@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createParser } from '../src/main/activity'
 import { buildCommand, runCli, type BuiltCommand, type Runner } from '../src/main/adapters'
@@ -487,6 +487,9 @@ describe('materials: attachments and reference folders', () => {
     ;(eng as unknown as { runner: Runner }).runner = fakeRunner(calls)
     await eng.runTask(t.id)
     expect(calls[0].args).toContain(`--add-dir=${ref}`)
+    // the attachment lives in the hive, outside the work folder: the CLI must be allowed to open it
+    const attDir = dirname(eng.hive.attachmentPath(r.attached[0]))
+    expect(calls[0].args).toContain(`--add-dir=${attDir}`)
     const rec = eng.hive.getRun(t.id, eng.hive.getTask(t.id)!.lastRunId!)!
     expect(rec.prompt).toContain('Reference folders you may read')
     expect(rec.prompt).toContain(ref)

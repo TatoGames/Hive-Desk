@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type {
   ActivityEvent,
   Agent,
@@ -77,6 +78,20 @@ const PERMISSION_TEXT: Record<PermissionLevel, string | null> = {
     'Permission level for this task: READ-ONLY. Do not create, modify, move or delete any file, and do not run commands that change anything. Read, analyse and report only.',
   exec:
     'Permission level for this task: COMMANDS ALLOWED. You may run the shell commands the task needs (build, test, install). Avoid anything destructive outside the task.'
+}
+
+/**
+ * Folders the CLI must be allowed to open: the reference folders plus the folders holding the
+ * attachments (they live in the hive, outside the work folder, so without this the agent cannot
+ * read or copy them).
+ */
+function accessDirs(task: Task, hive: Hive): string[] {
+  const out = new Set((task.refDirs ?? []).filter((d) => existsSync(d)))
+  for (const a of task.attachments ?? []) {
+    const abs = hive.attachmentPath(a)
+    if (existsSync(abs)) out.add(dirname(abs))
+  }
+  return [...out]
 }
 
 /** Attachments and reference folders, as the agent should see them. */
@@ -293,7 +308,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     built = buildCommand(agent, {
       stream: true,
       permission: level,
-      refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
+      refDirs: accessDirs(task, hive),
       resumeSession
     })
   } catch (e) {
