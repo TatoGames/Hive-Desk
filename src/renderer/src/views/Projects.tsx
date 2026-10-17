@@ -15,7 +15,9 @@ export default function Projects({ snap }: { snap: Snapshot }): JSX.Element {
 
   const pick = async (id: string): Promise<void> => {
     const dir = await window.hive.pickFolder()
-    if (dir) await window.hive.setProjectPath(id, dir)
+    if (!dir) return
+    const r = await window.hive.setProjectPath(id, dir)
+    if (!r.ok && r.warning && window.confirm(r.warning + '\n\n그래도 이 폴더를 쓸까요?')) await window.hive.setProjectPath(id, dir, true)
   }
 
   return (

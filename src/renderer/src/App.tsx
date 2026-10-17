@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
+import Boardroom from './views/Boardroom'
 import Committee from './views/Committee'
 import Performance from './views/Performance'
 import Reports from './views/Reports'
@@ -52,7 +53,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'boardroom' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -76,7 +77,9 @@ export default function App(): JSX.Element {
   const unread = snap.messages.filter((m) => !m.read).length
   const current: Tab = needsSetup ? 'settings' : tab
 
+  const otherWaiting = snap.companies.filter((c) => !c.active).reduce((n, c) => n + c.waiting, 0)
   const tabs: { id: Tab; label: string; badge?: number }[] = [
+    { id: 'boardroom', label: '이사회 (모든 회사)', badge: otherWaiting },
     { id: 'board', label: '태스크 보드' },
     { id: 'company', label: '회사' },
     { id: 'projects', label: '프로젝트' },
@@ -95,6 +98,22 @@ export default function App(): JSX.Element {
         <div className="brand">
           <span className="logo">⬢</span> HiveDesk
         </div>
+        {snap.companies.length > 0 && (
+          <div className="switcher">
+            <select
+              value={snap.companies.find((c) => c.active)?.id ?? ''}
+              onChange={(e) => void window.hive.switchCompany(e.target.value)}
+              title="회사 전환 — 회사끼리는 데이터가 완전히 분리돼 있어요"
+            >
+              {snap.companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                  {!c.active && c.waiting ? ` (${c.waiting})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <nav>
           {tabs.map((t) => (
             <button
@@ -131,6 +150,7 @@ export default function App(): JSX.Element {
             </button>
           </div>
         )}
+        {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
         {current === 'company' && <Company snap={snap} />}
         {current === 'projects' && <Projects snap={snap} />}

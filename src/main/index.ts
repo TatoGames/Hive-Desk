@@ -129,7 +129,7 @@ function registerIpc(): void {
   ipcMain.handle('model:verify', (_e, id: string) => engine.verifyModel(id))
   ipcMain.handle('project:save', (_e, p: Partial<Project> & { name: string }) => engine.saveProject(p))
   ipcMain.handle('project:delete', (_e, id: string) => engine.deleteProject(id))
-  ipcMain.handle('project:path', (_e, id: string, path: string) => engine.setProjectPath(id, path))
+  ipcMain.handle('project:path', (_e, id: string, path: string, force?: boolean) => engine.setProjectPath(id, path, force))
   ipcMain.handle('memory:kind', (_e, id: string, kind: 'fixed' | 'recent') => engine.setMemoryKind(id, kind))
   ipcMain.handle('task:shared-runs', (_e, id: string) => engine.sharedRuns(id))
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
@@ -142,6 +142,9 @@ function registerIpc(): void {
   ipcMain.handle('task:review', (_e, id: string, decision: 'approve' | 'changes', text?: string) =>
     engine.reviewTask(id, decision, text)
   )
+  ipcMain.handle('company:create', (_e, name: string, templateId?: string, place?: boolean) => engine.createCompany(name, templateId, place))
+  ipcMain.handle('company:switch', (_e, id: string) => engine.switchCompany(id))
+  ipcMain.handle('company:rename', (_e, id: string, name: string) => engine.renameCompany(id, name))
   ipcMain.handle('agenda:open', (_e, title: string, body: string) => engine.openAgenda(title, body))
   ipcMain.handle('agenda:decide', (_e, id: string, choice: number, note?: string) => engine.decideAgenda(id, choice, note))
   ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))
@@ -154,7 +157,13 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   fixPath()
-  engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+  try {
+    engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+  } catch (e) {
+    dialog.showErrorBox('HiveDesk를 시작하지 못했어요', (e as Error).message)
+    app.quit()
+    return
+  }
   registerIpc()
   createWindow()
   app.on('activate', () => {

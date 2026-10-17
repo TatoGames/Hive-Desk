@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type {
+  CompanySummary,
   Agent,
   AppConfig,
   AttachResult,
@@ -55,6 +57,7 @@ import DEFAULT_MODELS from '../shared/models.default.json'
 import { autoPlace } from '../shared/placement'
 import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
+import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, writeMeta, type MigrationResult } from './workspace'
 
 export type Emit = (e: EngineEvent) => void
 
@@ -73,7 +76,20 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 /** Owns config + hive, runs tasks (manually or via auto-run), and schedules git sync. */
 export class Engine {
   config: AppConfig
-  hive: Hive
+  /** This computer's own data (usage limits, model lists, connection checks), shared by every company. */
+  machine!: Hive
+  private hives = new Map<string, Hive>()
+  /** Which company the current call chain works for: a run keeps its company even when the screen switches. */
+  private als = new AsyncLocalStorage<Hive>()
+  /** The first company (agents without a company belong to it). */
+  private primaryId = ''
+  /** Set when the workspace was moved from the v0.2 layout at start-up. */
+  migration: MigrationResult | null = null
+
+  /** The company this code is working for: the one of the running call chain, else the one on screen. */
+  get hive(): Hive {
+    return this.als.getStore() ?? this.hives.get(this.config.activeCompanyId ?? '') ?? [...this.hives.values()][0]
+  }
   private running = new Map<string, AbortController>()
   private liveRuns = new Map<string, LiveRun>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
@@ -120,12 +136,46 @@ export class Engine {
       notify: (title, body) => self.notify(title, body)
     })
     this.config = loadConfig(configFile, this.home)
-    mkdirSync(this.config.workspace, { recursive: true })
-    this.hive = new Hive(this.config.workspace)
+    this.openWorkspace()
     this.loadLimits()
     this.recoverInterrupted()
     this.publishRoster()
     this.applyTimers()
+  }
+
+  /** Open (and, for a v0.2 workspace, first move) the companies of the workspace folder. */
+  private openWorkspace(): void {
+    const ws = this.config.workspace
+    mkdirSync(ws, { recursive: true })
+    if (isLegacyLayout(ws)) this.migration = migrateLegacy(ws, newId())
+    this.machine = new Hive(ws, '', { shared: false })
+    this.hives.clear()
+    let metas = listCompanyMetas(ws)
+    if (!metas.length) {
+      const m = { id: newId(), name: '내 회사', createdAt: new Date().toISOString() }
+      writeMeta(ws, m)
+      metas = [m]
+    }
+    for (const m of metas) this.hives.set(m.id, new Hive(companyDir(ws, m.id), m.id))
+    this.primaryId = metas[0].id
+    if (!this.hives.has(this.config.activeCompanyId ?? '')) {
+      this.config = { ...this.config, activeCompanyId: this.primaryId }
+      saveConfig(this.configFile, this.config)
+    }
+  }
+
+  /** Run `fn` for one company, whatever is on screen. */
+  private inCompany<T>(h: Hive, fn: () => T): T {
+    return this.als.run(h, fn)
+  }
+
+  private companyOf(a: Agent): string {
+    return a.companyId && this.hives.has(a.companyId) ? a.companyId : this.primaryId
+  }
+
+  /** Agents (employees) of one company that live on this computer. */
+  agentsOf(companyId: string): Agent[] {
+    return this.config.agents.filter((a) => this.companyOf(a) === companyId)
   }
 
   /**
@@ -134,6 +184,11 @@ export class Engine {
    */
   private recoverInterrupted(): void {
     const jobs: Promise<void>[] = []
+    for (const h of this.hives.values()) this.inCompany(h, () => this.recoverOne(jobs))
+    this.recovering = Promise.all(jobs).then(() => this.changed())
+  }
+
+  private recoverOne(jobs: Promise<void>[]): void {
     for (const t of this.hive.listTasks()) {
       if (t.status !== 'running' || !this.localAgent(t.assignee)) continue
       const run = this.hive.unfinishedRun(t.id)
@@ -155,7 +210,6 @@ export class Engine {
         }
       }
     }
-    this.recovering = Promise.all(jobs).then(() => this.changed())
   }
 
   /** Paths the change tracker ignores (its own staging folder, and the hive's data when it is the folder). */
@@ -165,7 +219,7 @@ export class Engine {
 
   // ---- usage limits (per CLI on this machine) ----
   private limitFile(): string {
-    return join(this.hive.root, '.local', 'limits.json')
+    return join(this.machine.root, '.local', 'limits.json')
   }
 
   private loadLimits(): void {
@@ -215,10 +269,13 @@ export class Engine {
   }
 
   private publishRoster(): void {
-    const mine = new Set(this.config.agents.map((a) => a.id))
-    for (const a of this.config.agents) this.hive.publishAgent(a)
-    for (const r of this.hive.listRoster()) {
-      if (r.owner === this.config.memberName && !mine.has(r.id)) this.hive.unpublishAgent(r.id)
+    for (const h of this.hives.values()) {
+      const mine = this.agentsOf(h.id)
+      const ids = new Set(mine.map((a) => a.id))
+      for (const a of mine) h.publishAgent(a, this.machine.connectionChecks()[a.adapter])
+      for (const r of h.listRoster()) {
+        if (r.owner === this.config.memberName && !ids.has(r.id)) h.unpublishAgent(r.id)
+      }
     }
   }
 
@@ -228,18 +285,25 @@ export class Engine {
   }
 
   private seenAttention: Set<string> | null = null
+  private companyName(id: string): string {
+    return readMeta(companyDir(this.config.workspace, id))?.name ?? ''
+  }
 
   /** Tell the person about things that now wait for them (new approvals, questions, results, failures). */
   private notifyAttention(): void {
     let now: Map<string, [string, string]>
     try {
       now = new Map()
-      for (const a of this.hive.listApprovals()) if (a.status === 'pending') now.set('a' + a.id, ['승인이 필요해요', a.reason.slice(0, 80)])
-      for (const t of this.hive.listTasks()) {
-        if (t.hidden) continue
-        if (t.status === 'needs_input') now.set('i' + t.id, ['에이전트가 자료를 기다려요', t.title])
-        else if (t.status === 'needs_review' && !t.parentId) now.set('r' + t.id, ['결과를 확인해 주세요', t.title])
-        else if (t.status === 'failed') now.set('f' + t.id, ['작업이 실패했어요', t.title])
+      const many = this.hives.size > 1
+      for (const h of this.hives.values()) {
+        const tag = many ? `[${this.companyName(h.id)}] ` : ''
+        for (const a of h.listApprovals()) if (a.status === 'pending') now.set('a' + a.id, [tag + '승인이 필요해요', a.reason.slice(0, 80)])
+        for (const t of h.listTasks()) {
+          if (t.hidden) continue
+          if (t.status === 'needs_input') now.set('i' + t.id, [tag + '에이전트가 자료를 기다려요', t.title])
+          else if (t.status === 'needs_review' && !t.parentId) now.set('r' + t.id, [tag + '결과를 확인해 주세요', t.title])
+          else if (t.status === 'failed') now.set('f' + t.id, [tag + '작업이 실패했어요', t.title])
+        }
       }
     } catch {
       return
@@ -256,10 +320,13 @@ export class Engine {
   }
 
   snapshot(): Snapshot {
-    const local = this.config.agents
+    const active = this.hive.id
+    const local = this.agentsOf(active)
     const messages = local.flatMap((a) => this.hive.listInbox(a.id))
     return {
-      config: this.config,
+      // only this company's employees are shown: other companies' agents are not visible here
+      config: { ...this.config, agents: local },
+      companies: this.companySummaries(),
       tasks: this.hive.listTasks(),
       approvals: this.hive.listApprovals(),
       roster: this.hive.listRoster(),
@@ -267,7 +334,7 @@ export class Engine {
       memory: this.hive.listMemory(),
       usage: this.hive.usageToday(),
       running: [...this.running.keys()],
-      gitEnabled: isGitRepo(this.config.workspace),
+      gitEnabled: isGitRepo(this.hive.root),
       live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()])),
       waiting: Object.fromEntries(this.waiting),
       company: {
@@ -275,7 +342,7 @@ export class Engine {
         units: this.hive.listUnits(),
         seats: this.hive.listSeats(),
         catalog: this.catalog(),
-        availability: this.hive.availability(),
+        availability: this.machine.availability(),
         aptitude: this.hive.listAptitude(),
         finals: this.hive.listFinals(),
         agendas: this.hive.listAgendas()
@@ -286,6 +353,65 @@ export class Engine {
     }
   }
 
+  // ---- companies ----
+  /** Short tag in agent ids of every company but the first, so two companies can have an agent with the same name. */
+  private idTag(companyId: string): string {
+    return companyId && companyId !== this.primaryId ? `c${companyId.slice(-4)}-` : ''
+  }
+
+  companySummaries(): CompanySummary[] {
+    return [...this.hives.values()].map((h) => {
+      const tasks = h.listTasks().filter((t) => !t.hidden)
+      const usage = Object.values(h.usageToday())
+      return {
+        id: h.id,
+        name: this.companyName(h.id) || h.getCompany()?.name || '회사',
+        active: h.id === this.hive.id,
+        open: tasks.filter((t) => t.status !== 'done').length,
+        running: tasks.filter((t) => this.running.has(t.id)).length,
+        waiting:
+          h.listApprovals().filter((a) => a.status === 'pending').length +
+          tasks.filter((t) => t.status === 'needs_input' || (t.status === 'needs_review' && !t.parentId)).length,
+        members: this.agentsOf(h.id).length,
+        runsToday: usage.reduce((n, u) => n + u.runs, 0),
+        minutesToday: Math.round(usage.reduce((n, u) => n + u.ms, 0) / 60000)
+      }
+    })
+  }
+
+  /** A new, completely separate company (its own folder, board, memory and organization). */
+  createCompany(name: string, templateId?: string, place = true): CompanySummary {
+    const clean = name.trim()
+    if (!clean) throw new Error('회사 이름을 입력하세요.')
+    if (listCompanyMetas(this.config.workspace).some((m) => m.name === clean)) throw new Error('같은 이름의 회사가 이미 있어요.')
+    const meta = { id: newId(), name: clean, createdAt: new Date().toISOString() }
+    writeMeta(this.config.workspace, meta)
+    const h = new Hive(companyDir(this.config.workspace, meta.id), meta.id)
+    this.hives.set(meta.id, h)
+    if (templateId) this.inCompany(h, () => this.applyTemplate(templateId, clean, place))
+    this.switchCompany(meta.id)
+    return this.companySummaries().find((c) => c.id === meta.id)!
+  }
+
+  switchCompany(id: string): void {
+    if (!this.hives.has(id)) throw new Error('없는 회사예요.')
+    this.config = { ...this.config, activeCompanyId: id }
+    saveConfig(this.configFile, this.config)
+    this.changed()
+  }
+
+  renameCompany(id: string, name: string): void {
+    const m = readMeta(companyDir(this.config.workspace, id))
+    const clean = name.trim()
+    if (!m || !clean) return
+    if (listCompanyMetas(this.config.workspace).some((x) => x.id !== id && x.name === clean)) throw new Error('같은 이름의 회사가 이미 있어요.')
+    writeMeta(this.config.workspace, { ...m, name: clean })
+    const h = this.hives.get(id)!
+    const c = h.getCompany()
+    if (c) h.saveCompany({ ...c, name: clean })
+    this.changed()
+  }
+
   // ---- settings & agents ----
   saveSettings(patch: Partial<AppConfig>): void {
     const prevWorkspace = this.config.workspace
@@ -294,13 +420,13 @@ export class Engine {
     if (patch.memberName !== undefined && patch.memberName !== prevName) {
       // agent ids embed the owner name; rebuild them
       this.config.agents = this.config.agents.map((a) =>
-        makeAgent(this.config.memberName, { ...a, id: undefined })
+        makeAgent(this.config.memberName, { ...a, id: undefined }, this.idTag(this.companyOf(a)))
       )
     }
     saveConfig(this.configFile, this.config)
     if (this.config.workspace !== prevWorkspace) {
-      mkdirSync(this.config.workspace, { recursive: true })
-      this.hive = new Hive(this.config.workspace)
+      this.config = { ...this.config, activeCompanyId: undefined }
+      this.openWorkspace()
       this.loadLimits()
     }
     this.publishRoster()
@@ -318,12 +444,14 @@ export class Engine {
       }
       input = { ...input, model: resolveModelArg(m, input.modelRef.pin) }
     }
-    const next = makeAgent(this.config.memberName, input)
+    const prev = existingId ? this.config.agents.find((a) => a.id === existingId) : undefined
+    const company = input.companyId ?? (prev ? this.companyOf(prev) : this.hive.id)
+    const next = makeAgent(this.config.memberName, { ...input, companyId: company }, this.idTag(company))
     const agents = this.config.agents.filter((a) => a.id !== (existingId ?? next.id))
     agents.push(next)
     this.config = { ...this.config, agents }
     saveConfig(this.configFile, this.config)
-    if (existingId && existingId !== next.id) this.hive.unpublishAgent(existingId)
+    if (existingId && existingId !== next.id) for (const h of this.hives.values()) h.unpublishAgent(existingId)
     this.publishRoster()
     this.changed()
     return next
@@ -332,7 +460,7 @@ export class Engine {
   deleteAgent(id: string): void {
     this.config = { ...this.config, agents: this.config.agents.filter((a) => a.id !== id) }
     saveConfig(this.configFile, this.config)
-    this.hive.unpublishAgent(id)
+    for (const h of this.hives.values()) h.unpublishAgent(id)
     this.changed()
   }
 
@@ -465,7 +593,7 @@ export class Engine {
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
-    return resolveCwd(agent, this.config.workspace, this.hive.projectDir(t?.projectId))
+    return resolveCwd(agent, this.hive.root, this.hive.projectDir(t?.projectId))
   }
 
   private folderBusy(agent: Agent, taskId: string): boolean {
@@ -473,7 +601,11 @@ export class Engine {
   }
 
   /** Run a task; if the human added instructions while it ran, apply them right after (same session if possible). */
-  async runTask(id: string): Promise<string> {
+  runTask(id: string): Promise<string> {
+    return this.als.run(this.hive, () => this.runTaskImpl(id))
+  }
+
+  private async runTaskImpl(id: string): Promise<string> {
     const task = this.hive.getTask(id)
     if (!task) return 'not_ready'
     const agent = this.localAgent(task.assignee)
@@ -519,7 +651,7 @@ export class Engine {
       hive: this.hive,
       stripApiKeys: this.config.stripApiKeys,
       runner: this.runner,
-      defaultCwd: this.config.workspace,
+      defaultCwd: this.hive.root,
       machine: this.config.memberName,
       signal: ac.signal,
       watchMs: this.watchMs,
@@ -550,7 +682,11 @@ export class Engine {
   }
 
   // ---- before a run: what will be touched, what could go wrong ----
-  async preflight(id: string): Promise<Preflight> {
+  preflight(id: string): Promise<Preflight> {
+    return this.als.run(this.hive, () => this.preflightImpl(id))
+  }
+
+  private async preflightImpl(id: string): Promise<Preflight> {
     const task = this.hive.getTask(id)
     const items: PreflightItem[] = []
     const add = (level: PreflightItem['level'], text: string, fix?: PreflightItem['fix']): void => {
@@ -566,7 +702,7 @@ export class Engine {
     let canRun = true
 
     // where it works
-    let cwd = this.config.workspace
+    let cwd = this.hive.root
     const projDir = this.hive.projectDir(task.projectId)
     const proj = this.hive.getProject(task.projectId)
     if (proj && !projDir) {
@@ -678,10 +814,14 @@ export class Engine {
   }
 
   /** "변경 추적 켜기": make the agent's work folder a git repo so diffs are line by line. */
-  async enableTracking(id: string): Promise<{ ok: boolean; message: string }> {
+  enableTracking(id: string): Promise<{ ok: boolean; message: string }> {
+    return this.als.run(this.hive, () => this.enableTrackingImpl(id))
+  }
+
+  private async enableTrackingImpl(id: string): Promise<{ ok: boolean; message: string }> {
     const task = this.hive.getTask(id)
     const agent = this.localAgent(task?.assignee ?? null)
-    const cwd = agent?.workDir && existsSync(agent.workDir) ? agent.workDir : this.config.workspace
+    const cwd = agent?.workDir && existsSync(agent.workDir) ? agent.workDir : this.hive.root
     const r = await enableTracking(cwd)
     if (r.ok && task) this.hive.addEvent(id, 'status', this.config.memberName || 'me', r.message)
     this.changed()
@@ -829,7 +969,11 @@ export class Engine {
   }
 
   /** Undo everything a run changed in its work folder (back to how it was just before the run). */
-  async rollbackRun(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
+  rollbackRun(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
+    return this.als.run(this.hive, () => this.rollbackRunImpl(taskId, runId))
+  }
+
+  private async rollbackRunImpl(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
     const task = this.hive.getTask(taskId)
     const rec = this.hive.getRun(taskId, runId)
     if (!task || !rec) return { ok: false, message: '실행 기록을 찾을 수 없어요.' }
@@ -896,11 +1040,11 @@ export class Engine {
   }
 
   catalog(): ModelEntry[] {
-    const acct = Object.entries(this.hive.accountModels()).flatMap(([ad, v]) => accountEntries(ad as Agent['adapter'], v.models, v.at))
+    const acct = Object.entries(this.machine.accountModels()).flatMap(([ad, v]) => accountEntries(ad as Agent['adapter'], v.models, v.at))
     // the bundled entry of the same adapter + CLI name wins as the base (it has better notes), marked verified by the account
     const verifiedKeys = new Set(acct.map((m) => m.adapter + '|' + m.cliArg))
     const base = (DEFAULT_MODELS as ModelEntry[]).map((m) =>
-      verifiedKeys.has(m.adapter + '|' + m.cliArg) ? { ...m, verified: { source: `${m.adapter} 계정 모델 목록`, at: this.hive.accountModels()[m.adapter].at.slice(0, 10) } } : m
+      verifiedKeys.has(m.adapter + '|' + m.cliArg) ? { ...m, verified: { source: `${m.adapter} 계정 모델 목록`, at: this.machine.accountModels()[m.adapter].at.slice(0, 10) } } : m
     )
     const known = new Set(base.map((m) => m.adapter + '|' + m.cliArg))
     return mergeCatalog([...base, ...acct.filter((m) => !known.has(m.adapter + '|' + m.cliArg))], this.userModels())
@@ -966,10 +1110,10 @@ export class Engine {
     }
     const models = parseModelList(res.stdout)
     if (!models.length) return { ok: false, count: 0, message: '모델 목록이 비어 있거나 읽을 수 없는 형식이에요.' }
-    this.hive.setAccountModels(adapter, models)
+    this.machine.setAccountModels(adapter, models)
     // models the account lists are usable by definition
     for (const m of this.catalog().filter((x) => x.adapter === adapter && models.some((y) => y.slug === x.cliArg))) {
-      this.hive.setAvailability(m.id, { ok: true, at: new Date().toISOString(), message: '계정 모델 목록에 있어요.' })
+      this.machine.setAvailability(m.id, { ok: true, at: new Date().toISOString(), message: '계정 모델 목록에 있어요.' })
     }
     this.changed()
     return { ok: true, count: models.length, message: `${models.length}개 모델을 불러왔어요.` }
@@ -980,7 +1124,7 @@ export class Engine {
     if (!m) return { ok: false, message: '카탈로그에 없는 모델이에요.' }
     const r = await checkCli(m.adapter, this.runner, undefined, m.cliArg)
     const ok = r.ok
-    this.hive.setAvailability(id, {
+    this.machine.setAvailability(id, {
       ok,
       at: new Date().toISOString(),
       message: ok ? '이 계정에서 쓸 수 있어요.' : r.message.slice(0, 300)
@@ -994,6 +1138,10 @@ export class Engine {
     const tpl = TEMPLATES.find((t) => t.id === templateId)
     if (!tpl) throw new Error('없는 템플릿이에요: ' + templateId)
     const built = buildFromTemplate(tpl, name.trim() || tpl.name, newId, new Date().toISOString())
+    const meta = readMeta(companyDir(this.config.workspace, this.hive.id))
+    if (meta && built.company.name && meta.name !== built.company.name && !listCompanyMetas(this.config.workspace).some((x) => x.id !== meta.id && x.name === built.company.name)) {
+      writeMeta(this.config.workspace, { ...meta, name: built.company.name })
+    }
     this.hive.clearOrg()
     this.hive.saveCompany(built.company)
     for (const u of built.units) this.hive.saveUnit(u)
@@ -1118,7 +1266,7 @@ export class Engine {
         catalog: this.catalog()
       },
       company.rules,
-      this.hive.availability(),
+      this.machine.availability(),
       onlyEmpty
     )
     for (const st of seats) if (picks[st.id]) this.hive.saveSeat({ ...st, modelId: picks[st.id] })
@@ -1195,16 +1343,36 @@ export class Engine {
     this.changed()
   }
 
-  setProjectPath(id: string, path: string): void {
+  /**
+   * Set this computer's folder of a project. A folder that another company already uses is refused
+   * (the companies would see each other's files) unless `force` says the person knows.
+   */
+  setProjectPath(id: string, path: string, force = false): { ok: boolean; warning?: string } {
+    if (path && !force) {
+      const want = normPath(path)
+      for (const h of this.hives.values()) {
+        if (h.id === this.hive.id) continue
+        for (const [pid, p] of Object.entries(h.projectPaths())) {
+          if (p && normPath(p) === want) {
+            const proj = h.getProject(pid)
+            return {
+              ok: false,
+              warning: `이 폴더는 다른 회사 "${this.companyName(h.id)}"의 프로젝트${proj ? ` "${proj.name}"` : ''}에 이미 쓰이고 있어요. 두 회사가 같은 폴더를 쓰면 서로의 파일을 볼 수 있어요. 자료를 주고받으려면 회사 간 협업을 쓰세요.`
+            }
+          }
+        }
+      }
+    }
     this.hive.setProjectPath(id, path)
     this.changed()
+    return { ok: true }
   }
 
   /** Remember the result of a connection check, so teammates see whether this computer's agents work. */
   recordCheck(adapter: Agent['adapter'], r: { ok: boolean; message: string }): void {
     const check: ConnectionCheck = { at: new Date().toISOString(), ok: r.ok, message: r.message.slice(0, 200) }
     // the check belongs to the connection (login), so agents created later on it show it as well
-    this.hive.setConnectionCheck(adapter, check)
+    this.machine.setConnectionCheck(adapter, check)
     for (const a of this.config.agents) if (a.adapter === adapter) this.hive.publishAgent(a, check)
     this.changed()
   }
@@ -1220,18 +1388,23 @@ export class Engine {
     if (this.ticking) return
     this.ticking = true
     try {
-      const all = this.hive.listTasks()
-      const busyAgents = new Set(
-        [...this.running.keys()].map((id) => all.find((t) => t.id === id)?.assignee)
-      )
-      for (const t of all) {
-        if (this.running.size >= this.config.maxConcurrent) break
-        if (!this.config.autoRun && !t.auto) continue
-        const agent = this.localAgent(t.assignee)
-        if (!agent || busyAgents.has(agent.id) || !this.hive.isReady(t, all)) continue
-        if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
-        busyAgents.add(agent.id)
-        void this.runTask(t.id)
+      const busyAgents = new Set<string | null | undefined>()
+      for (const h of this.hives.values()) {
+        const all = h.listTasks()
+        for (const id of this.running.keys()) busyAgents.add(all.find((t) => t.id === id)?.assignee)
+      }
+      // companies take turns in the order they were created; the limits and the work-folder lock are shared
+      for (const h of this.hives.values()) {
+        const all = h.listTasks()
+        for (const t of all) {
+          if (this.running.size >= this.config.maxConcurrent) return
+          if (!this.config.autoRun && !t.auto) continue
+          const agent = this.localAgent(t.assignee)
+          if (!agent || busyAgents.has(agent.id) || !h.isReady(t, all)) continue
+          if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
+          busyAgents.add(agent.id)
+          void this.inCompany(h, () => this.runTask(t.id))
+        }
       }
     } finally {
       this.ticking = false
@@ -1245,7 +1418,7 @@ export class Engine {
     if (this.syncTimer) clearInterval(this.syncTimer)
     this.syncTimer = null
     const m = this.config.syncIntervalMinutes
-    if (m > 0 && isGitRepo(this.config.workspace)) {
+    if (m > 0 && [...this.hives.values()].some((h) => isGitRepo(h.root))) {
       this.syncTimer = setInterval(() => void this.sync(), m * 60_000)
       this.syncTimer.unref?.()
     }
@@ -1253,14 +1426,20 @@ export class Engine {
 
   // ---- sharing ----
   async enableSharing(remoteUrl: string): Promise<SyncResult> {
-    const r = await initSync(this.config.workspace, remoteUrl)
+    const r = await initSync(this.hive.root, remoteUrl)
     this.applyTimers()
     this.changed()
     return r
   }
 
   async sync(): Promise<SyncResult> {
-    const r = await syncNow(this.config.workspace, this.config.memberName)
+    // every company is its own repository; companies that are not shared are skipped
+    let r: SyncResult = { ok: true, message: '공유 중인 회사가 없어요.' }
+    for (const h of this.hives.values()) {
+      if (!isGitRepo(h.root)) continue
+      r = await syncNow(h.root, this.config.memberName)
+      if (!r.ok) break
+    }
     this.publishRoster()
     this.changed()
     return r

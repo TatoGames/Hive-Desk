@@ -5,6 +5,7 @@ import type {
   Agent,
   AppConfig,
   AdapterInfo,
+  CompanySummary,
   AttachResult,
   EngineEvent,
   LiveState,
@@ -102,7 +103,12 @@ const api = {
   verifyModel: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('model:verify', id),
   saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
   deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
-  setProjectPath: (id: string, path: string): Promise<void> => ipcRenderer.invoke('project:path', id, path),
+  createCompany: (name: string, templateId?: string, place?: boolean): Promise<CompanySummary> =>
+    ipcRenderer.invoke('company:create', name, templateId, place),
+  switchCompany: (id: string): Promise<void> => ipcRenderer.invoke('company:switch', id),
+  renameCompany: (id: string, name: string): Promise<void> => ipcRenderer.invoke('company:rename', id, name),
+  setProjectPath: (id: string, path: string, force?: boolean): Promise<{ ok: boolean; warning?: string }> =>
+    ipcRenderer.invoke('project:path', id, path, force),
   sharedRuns: (id: string): Promise<RunShared[]> => ipcRenderer.invoke('task:shared-runs', id),
   deleteMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
   detectAdapters: (): Promise<AdapterInfo[]> => ipcRenderer.invoke('adapters:detect'),

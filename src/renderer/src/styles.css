@@ -251,3 +251,11 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .recs { background: var(--warn-bg); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .tbl td { white-space: nowrap; }
 .tbl td:first-child { white-space: normal; }
+
+.switcher { padding: 0 8px 12px; }
+.switcher select { width: 100%; font-weight: 600; }
+.companies { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.company-card.active { border-color: var(--accent, #d98a1f); }
+.company-card .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.company-card .stats > div { display: flex; flex-direction: column; }
+.company-card .num { font-size: 24px; font-weight: 700; }

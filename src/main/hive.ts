@@ -99,12 +99,20 @@ function listJson<T>(dir: string): T[] {
  * (budget usage) is per-machine and never synced.
  */
 export class Hive {
-  constructor(public readonly root: string) {
-    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
+  /**
+   * `id` is the company this hive belongs to ('' for the computer-wide store, which has no shared folders).
+   */
+  constructor(
+    public readonly root: string,
+    public readonly id = '',
+    opts: { shared?: boolean } = {}
+  ) {
+    const shared = opts.shared !== false
+    for (const d of [...(shared ? SHARED_DIRS : []), '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
-    if (!existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\n', 'utf8')
+    if (shared && !existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\n', 'utf8')
   }
 
   private p(...parts: string[]): string {
@@ -418,7 +426,7 @@ export class Hive {
   // ---- roster (public view of agents so teammates can assign tasks) ----
   publishAgent(a: Agent, check?: ConnectionCheck): void {
     const prev = readJson<RosterEntry>(this.p('agents', a.id + '.json'))
-    const keep = check ?? this.connectionChecks()[a.adapter] ?? prev?.check
+    const keep = check ?? prev?.check
     const r: RosterEntry = {
       id: a.id,
       name: a.name,

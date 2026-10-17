@@ -7,6 +7,8 @@ export type AdapterId = 'claude' | 'codex' | 'gemini' | 'agy' | 'custom'
 export interface Agent {
   /** Globally unique: `<member>-<name>` (slugged). Used as task assignee. */
   id: string
+  /** The company this employee works for (absent = the first company). */
+  companyId?: string
   name: string
   owner: string
   adapter: AdapterId
@@ -506,7 +508,24 @@ export interface Agenda {
   note?: string
 }
 
+/** One company as the switcher and the board dashboard show it. */
+export interface CompanySummary {
+  id: string
+  name: string
+  active: boolean
+  /** Tasks that are not done yet. */
+  open: number
+  running: number
+  /** Approvals, questions and results that wait for the board. */
+  waiting: number
+  members: number
+  runsToday: number
+  minutesToday: number
+}
+
 export interface AppConfig {
+  /** The company shown on screen. */
+  activeCompanyId?: string
   /** Desktop notifications for approvals, reports and failures (default on). */
   notifications?: boolean
   /** `changes` (default): check results that changed files. */
@@ -543,6 +562,7 @@ export interface SyncResult {
 
 export interface Snapshot {
   config: AppConfig
+  companies: CompanySummary[]
   tasks: Task[]
   approvals: Approval[]
   roster: RosterEntry[]
