@@ -1,3 +1,6 @@
+import type { AptitudeRecord } from './aptitude'
+import type { Company, ModelAvailability, ModelEntry, ModelRef, OrgUnit, Seat } from './company'
+
 export type AdapterId = 'claude' | 'codex' | 'gemini' | 'agy' | 'custom'
 
 /** An agent that runs on THIS machine, using the owner's own logged-in CLI. */
@@ -23,6 +26,17 @@ export interface Agent {
   timeoutMinutes: number
   /** If true, every task for this agent needs human approval first. */
   requireApproval: boolean
+  // ---- company model (stage 2) ----
+  /** Rank id in the company's rank list. */
+  rankId?: string
+  /** Org unit the agent belongs to. */
+  unitId?: string
+  /** Work area (see JOBS): plan / build / review ... */
+  job?: string
+  /** Catalog model + how it is pinned. `model` holds the resulting CLI argument. */
+  modelRef?: ModelRef
+  /** The permission level tasks get when they do not set their own. */
+  permission?: PermissionLevel
 }
 
 /** What other team members see of an agent (no local paths). */
@@ -34,6 +48,12 @@ export interface RosterEntry {
   role: string
   /** Result of the owner's latest connection check (login / CLI works). */
   check?: ConnectionCheck
+  rankId?: string
+  unitId?: string
+  job?: string
+  /** Catalog id of the agent's model, and the CLI argument it runs with. */
+  modelId?: string
+  model?: string
 }
 
 export interface ConnectionCheck {
@@ -434,6 +454,7 @@ export interface Snapshot {
   /** CLIs whose usage limit is used up on this machine, until when (key = adapter id). */
   limits: Record<string, { until: string; message: string; guessed: boolean }>
   projects: Project[]
+  company: CompanySnapshot
   /** This computer's folder for each project (project id → absolute path). */
   projectPaths: Record<string, string>
 }
@@ -479,4 +500,16 @@ export interface AttachResult {
   /** Dropped folders become reference folders. */
   folders: string[]
   errors: string[]
+}
+
+/** The company model as the screens see it. */
+export interface CompanySnapshot {
+  company: Company | null
+  units: OrgUnit[]
+  seats: Seat[]
+  /** Defaults + the user's own entries. */
+  catalog: ModelEntry[]
+  /** [사용 확인] results on this computer (model id → result). */
+  availability: Record<string, ModelAvailability>
+  aptitude: AptitudeRecord[]
 }

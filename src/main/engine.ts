@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   Agent,
@@ -22,6 +22,8 @@ import type {
 } from '../shared/types'
 import type { LiveRun } from './activity'
 import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
+import { checkCli } from './setup'
+import { newId } from './hive'
 import { STAGE_DIR } from './staging'
 import { attachmentAdvice } from './attachAdvice'
 import { personalClaudeRules } from './claudeSettings'
@@ -33,6 +35,21 @@ import { enableTracking, isInsideGit, normPath } from './gitdiff'
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
 import { budgetProblem, resolveCwd, runTask } from './runner'
+import type { AptitudeRecord } from '../shared/aptitude'
+import {
+  DEFAULT_RULES,
+  isModelEntry,
+  mergeCatalog,
+  modelLabel,
+  resolveModelArg,
+  type Company,
+  type ModelEntry,
+  type OrgUnit,
+  type Seat
+} from '../shared/company'
+import DEFAULT_MODELS from '../shared/models.default.json'
+import { autoPlace } from '../shared/placement'
+import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 
 export type Emit = (e: EngineEvent) => void
@@ -194,6 +211,14 @@ export class Engine {
       gitEnabled: isGitRepo(this.config.workspace),
       live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()])),
       waiting: Object.fromEntries(this.waiting),
+      company: {
+        company: this.hive.getCompany(),
+        units: this.hive.listUnits(),
+        seats: this.hive.listSeats(),
+        catalog: this.catalog(),
+        availability: this.hive.availability(),
+        aptitude: this.hive.listAptitude()
+      },
       projects: this.hive.listProjects(),
       projectPaths: this.hive.projectPaths(),
       limits: Object.fromEntries(Object.keys(this.limits).flatMap((k) => (this.limitFor(k as Agent['adapter']) ? [[k, this.limits[k]]] : [])))
@@ -224,6 +249,14 @@ export class Engine {
 
   saveAgent(input: Partial<Agent> & { name: string; adapter: Agent['adapter'] }): Agent {
     const existingId = input.id
+    if (input.modelRef) {
+      const m = this.catalog().find((x) => x.id === input.modelRef!.id)
+      if (!m) throw new Error('카탈로그에 없는 모델이에요: ' + input.modelRef.id)
+      if (m.adapter !== input.adapter) {
+        throw new Error(`${m.family} ${m.version}은(는) ${m.adapter}용 모델이라 ${input.adapter} 에이전트에는 쓸 수 없어요.`)
+      }
+      input = { ...input, model: resolveModelArg(m, input.modelRef.pin) }
+    }
     const next = makeAgent(this.config.memberName, input)
     const agents = this.config.agents.filter((a) => a.id !== (existingId ?? next.id))
     agents.push(next)
@@ -414,6 +447,13 @@ export class Engine {
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
+      onRunEnd: ({ agent: a, taskId, ms, result }) =>
+        this.noteAptitude(a, taskId, {
+          runs: 1,
+          ms,
+          approved: result === 'approved' ? 1 : 0,
+          failed: result === 'failed' ? 1 : 0
+        }),
       onOutput: (taskId, chunk) => this.emit({ type: 'output', taskId, chunk }),
       onLive: (live) => this.liveRuns.set(live.taskId, live),
       onActivity: (taskId, events, live) =>
@@ -504,7 +544,7 @@ export class Engine {
     }
 
     // permission level
-    const level = effectivePermission(agent.adapter, task.permission)
+    const level = effectivePermission(agent.adapter, task.permission ?? agent.permission)
     const enforced = acc.permission === 'flag'
     if (level === 'read') {
       if (enforced) add('ok', '권한: 읽기만 — CLI가 파일 수정과 명령 실행을 막아요.')
@@ -655,11 +695,13 @@ export class Engine {
     if (decision === 'approve') {
       this.hive.updateTask(id, { status: 'done' })
       this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
+      this.noteTaskAptitude(t, { approved: 1 })
     } else {
       const body = text.trim()
       if (!body) return
       this.hive.updateTask(id, { status: 'todo', reply: body })
       this.hive.addEvent(id, 'review', by, `수정을 요청했어요: ${body}`)
+      this.noteTaskAptitude(t, { changes: 1 })
       if (this.localAgent(t.assignee)) void this.runTask(id)
     }
     this.changed()
@@ -680,6 +722,7 @@ export class Engine {
     if (!r.ok) return { ok: false, message: r.message }
     this.hive.addRun({ ...rec, rolledBackAt: new Date().toISOString() })
     this.hive.addEvent(taskId, 'rollback', by, `이 실행을 되돌렸어요. ${r.message}`, runId)
+    if (task.status === 'needs_review') this.noteTaskAptitude(task, { changes: 1 })
     const patch: Partial<Task> = { interruptedRun: undefined }
     if (task.status === 'done' || task.status === 'failed' || task.status === 'needs_review') {
       patch.status = 'todo'
@@ -708,6 +751,265 @@ export class Engine {
   setMemoryKind(id: string, kind: 'fixed' | 'recent'): void {
     this.hive.setMemoryKind(id, kind)
     this.changed()
+  }
+
+  // ---- model catalog: bundled defaults + the user's own file (<home>/models.json) ----
+  private get catalogFile(): string {
+    return join(this.home, 'models.json')
+  }
+
+  private userModels(): ModelEntry[] {
+    try {
+      if (!existsSync(this.catalogFile)) return []
+      const raw = JSON.parse(readFileSync(this.catalogFile, 'utf8')) as unknown
+      return Array.isArray(raw) ? raw.filter(isModelEntry) : []
+    } catch {
+      return []
+    }
+  }
+
+  catalog(): ModelEntry[] {
+    return mergeCatalog(DEFAULT_MODELS as ModelEntry[], this.userModels())
+  }
+
+  /** Add or change a model in the user's own catalog file (a default with the same id is replaced). */
+  saveModel(entry: ModelEntry): ModelEntry {
+    if (!isModelEntry(entry)) throw new Error('모델 정보가 부족해요 (id, CLI 모델 인자, 사용할 CLI, 체급이 필요해요).')
+    const weight = Number(entry.weight)
+    const clean: ModelEntry = {
+      ...entry,
+      id: entry.id.trim(),
+      cliArg: entry.cliArg.trim(),
+      weight: Number.isFinite(weight) && weight > 0 ? weight : 1,
+      domains: (entry.domains ?? []).filter(Boolean),
+      custom: true
+    }
+    const mine = this.userModels().filter((m) => m.id !== clean.id)
+    mkdirSync(dirname(this.catalogFile), { recursive: true })
+    writeFileSync(this.catalogFile, JSON.stringify([...mine, clean], null, 2) + '\n', 'utf8')
+    this.refreshModelArgs()
+    this.changed()
+    return clean
+  }
+
+  /** Remove one of the user's own entries (the bundled defaults cannot be removed, only replaced). */
+  deleteModel(id: string): void {
+    const mine = this.userModels().filter((m) => m.id !== id)
+    writeFileSync(this.catalogFile, JSON.stringify(mine, null, 2) + '\n', 'utf8')
+    this.changed()
+  }
+
+  /** Re-derive each agent's CLI model argument from the catalog (alias vs pinned). */
+  private refreshModelArgs(): void {
+    const cat = this.catalog()
+    let changed = false
+    const agents = this.config.agents.map((a) => {
+      const m = a.modelRef ? cat.find((x) => x.id === a.modelRef!.id) : undefined
+      if (!a.modelRef || !m) return a
+      const arg = resolveModelArg(m, a.modelRef.pin)
+      if (arg === a.model) return a
+      changed = true
+      return { ...a, model: arg }
+    })
+    if (changed) {
+      this.config = { ...this.config, agents }
+      saveConfig(this.configFile, this.config)
+      this.publishRoster()
+    }
+  }
+
+  /** Does this model really work with this account? Runs the CLI once with that model. */
+  async verifyModel(id: string): Promise<{ ok: boolean; message: string }> {
+    const m = this.catalog().find((x) => x.id === id)
+    if (!m) return { ok: false, message: '카탈로그에 없는 모델이에요.' }
+    const r = await checkCli(m.adapter, this.runner, undefined, m.cliArg)
+    const ok = r.ok
+    this.hive.setAvailability(id, {
+      ok,
+      at: new Date().toISOString(),
+      message: ok ? '이 계정에서 쓸 수 있어요.' : r.message.slice(0, 300)
+    })
+    this.changed()
+    return { ok, message: ok ? '이 계정에서 쓸 수 있어요.' : r.message }
+  }
+
+  // ---- company: organization, ranks, seats ----
+  applyTemplate(templateId: string, name: string, place = true): Company {
+    const tpl = TEMPLATES.find((t) => t.id === templateId)
+    if (!tpl) throw new Error('없는 템플릿이에요: ' + templateId)
+    const built = buildFromTemplate(tpl, name.trim() || tpl.name, newId, new Date().toISOString())
+    this.hive.clearOrg()
+    this.hive.saveCompany(built.company)
+    for (const u of built.units) this.hive.saveUnit(u)
+    for (const st of built.seats) this.hive.saveSeat(st)
+    if (place) this.placeModels(false)
+    // agents that pointed at the old org lose the link
+    this.config = { ...this.config, agents: this.config.agents.map((a) => ({ ...a, unitId: undefined, rankId: undefined })) }
+    saveConfig(this.configFile, this.config)
+    this.publishRoster()
+    this.changed()
+    return built.company
+  }
+
+  saveCompany(patch: Partial<Company>): Company {
+    const cur = this.hive.getCompany()
+    if (!cur) throw new Error('먼저 템플릿으로 회사를 만드세요.')
+    const next: Company = {
+      ...cur,
+      ...patch,
+      rules: { ...DEFAULT_RULES, ...cur.rules, ...(patch.rules ?? {}) },
+      ranks: patch.ranks ? patch.ranks.map((r, i) => ({ ...r, level: i + 1 })) : cur.ranks
+    }
+    this.hive.saveCompany(next)
+    this.changed()
+    return next
+  }
+
+  saveUnit(input: Partial<OrgUnit> & { name: string }): OrgUnit {
+    const units = this.hive.listUnits()
+    const cur = input.id ? units.find((u) => u.id === input.id) : undefined
+    if (input.parentId && input.id) {
+      // no loops: a unit cannot move below itself
+      let p: string | null = input.parentId
+      while (p) {
+        if (p === input.id) throw new Error('자기 아래 조직으로는 옮길 수 없어요.')
+        p = units.find((u) => u.id === p)?.parentId ?? null
+      }
+    }
+    const u: OrgUnit = {
+      id: cur?.id ?? newId(),
+      name: input.name.trim(),
+      kind: input.kind ?? cur?.kind ?? '팀',
+      parentId: input.parentId === undefined ? (cur?.parentId ?? null) : input.parentId,
+      mission: input.mission ?? cur?.mission ?? '',
+      folderName: input.folderName ?? cur?.folderName ?? '',
+      order: input.order ?? cur?.order ?? units.length
+    }
+    this.hive.saveUnit(u)
+    this.changed()
+    return u
+  }
+
+  /** Delete a unit with everything below it (sub-units and seats); their agents stay, unassigned. */
+  deleteUnit(id: string): void {
+    const units = this.hive.listUnits()
+    const gone = new Set<string>()
+    const walk = (x: string): void => {
+      gone.add(x)
+      for (const u of units) if (u.parentId === x) walk(u.id)
+    }
+    walk(id)
+    for (const x of gone) this.hive.deleteUnit(x)
+    for (const st of this.hive.listSeats()) if (gone.has(st.unitId)) this.hive.deleteSeat(st.id)
+    this.config = {
+      ...this.config,
+      agents: this.config.agents.map((a) => (a.unitId && gone.has(a.unitId) ? { ...a, unitId: undefined } : a))
+    }
+    saveConfig(this.configFile, this.config)
+    this.publishRoster()
+    this.changed()
+  }
+
+  saveSeat(input: Partial<Seat> & { unitId: string; title: string }): Seat {
+    const cur = input.id ? this.hive.listSeats().find((x) => x.id === input.id) : undefined
+    const company = this.hive.getCompany()
+    const st: Seat = {
+      id: cur?.id ?? newId(),
+      unitId: input.unitId,
+      title: input.title.trim(),
+      rankId: input.rankId ?? cur?.rankId ?? company?.ranks[company.ranks.length - 1]?.id ?? '',
+      job: input.job ?? cur?.job ?? 'build',
+      difficulty: input.difficulty ?? cur?.difficulty ?? 'hard',
+      order: cur?.order ?? input.order ?? this.hive.listSeats().length,
+      ...(input.modelId !== undefined ? (input.modelId ? { modelId: input.modelId } : {}) : cur?.modelId ? { modelId: cur.modelId } : {}),
+      ...(input.agentId !== undefined ? (input.agentId ? { agentId: input.agentId } : {}) : cur?.agentId ? { agentId: cur.agentId } : {})
+    }
+    this.hive.saveSeat(st)
+    this.changed()
+    return st
+  }
+
+  deleteSeat(id: string): void {
+    this.hive.deleteSeat(id)
+    this.changed()
+  }
+
+  /** Put an agent on a seat (or empty it). The agent takes over the seat's rank, unit and job. */
+  assignSeat(seatId: string, agentId: string | null): void {
+    const seats = this.hive.listSeats()
+    const seat = seats.find((x) => x.id === seatId)
+    if (!seat) return
+    // one seat per agent
+    for (const o of seats) if (agentId && o.agentId === agentId && o.id !== seatId) this.hive.saveSeat({ ...o, agentId: undefined })
+    this.hive.saveSeat({ ...seat, agentId: agentId ?? undefined })
+    const mine = this.config.agents.find((a) => a.id === agentId)
+    if (mine) {
+      this.saveAgent({ ...mine, unitId: seat.unitId, rankId: seat.rankId, job: seat.job })
+    }
+    this.changed()
+  }
+
+  /** Fill the recommended model of seats (only empty ones unless `onlyEmpty` is false). */
+  placeModels(onlyEmpty = true): number {
+    const company = this.hive.getCompany()
+    if (!company) return 0
+    const seats = this.hive.listSeats()
+    const picks = autoPlace(
+      {
+        units: this.hive.listUnits(),
+        seats,
+        agents: this.hive.listRoster().map((r) => ({ id: r.id, adapter: r.adapter, modelId: r.modelId, model: r.model })),
+        catalog: this.catalog()
+      },
+      company.rules,
+      this.hive.availability(),
+      onlyEmpty
+    )
+    for (const st of seats) if (picks[st.id]) this.hive.saveSeat({ ...st, modelId: picks[st.id] })
+    this.changed()
+    return Object.keys(picks).length
+  }
+
+  /** Review results count for the model that did the work (the task's assignee, if it is one of ours). */
+  private noteTaskAptitude(t: Task, d: { approved?: number; changes?: number }): void {
+    const a = this.localAgent(t.assignee)
+    if (a) this.noteAptitude(a, t.id, d)
+  }
+
+  // ---- aptitude: how each model version does in each work area ----
+  private aptitudeKey(agent: Agent): { key: string; label: string } {
+    const cat = this.catalog()
+    const m = agent.modelRef ? cat.find((x) => x.id === agent.modelRef!.id) : undefined
+    if (m) return { key: m.id, label: modelLabel(m) }
+    const arg = agent.model ?? 'default'
+    return { key: `${agent.adapter}:${arg}`, label: `${agent.adapter} ${arg}` }
+  }
+
+  /** Add one event to the (task × model) record. */
+  noteAptitude(
+    agent: Agent,
+    taskId: string,
+    d: { runs?: number; ms?: number; approved?: number; changes?: number; failed?: number }
+  ): void {
+    const { key, label } = this.aptitudeKey(agent)
+    const cur = this.hive.getAptitude(taskId)
+    // a task can change hands: a different model starts its own record under the same task
+    const base: AptitudeRecord =
+      cur && cur.modelKey === key
+        ? cur
+        : { taskId, modelKey: key, modelLabel: label, domain: agent.job || 'general', runs: 0, ms: 0, approved: 0, changes: 0, failed: 0, updatedAt: '' }
+    if (cur && cur.modelKey !== key) {
+      this.hive.saveAptitude({ ...cur, taskId: `${taskId}~${cur.modelKey}` })
+    }
+    this.hive.saveAptitude({
+      ...base,
+      runs: base.runs + (d.runs ?? 0),
+      ms: base.ms + (d.ms ?? 0),
+      approved: base.approved + (d.approved ?? 0),
+      changes: base.changes + (d.changes ?? 0),
+      failed: base.failed + (d.failed ?? 0),
+      updatedAt: new Date().toISOString()
+    })
   }
 
   // ---- projects ----

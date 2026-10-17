@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
   AdapterId,
   Agent,
@@ -77,6 +78,19 @@ const api = {
     ipcRenderer.invoke('message:send', from, to, body),
   addMemory: (text: string, kind?: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:add', text, kind),
   setMemoryKind: (id: string, kind: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:kind', id, kind),
+  applyTemplate: (id: string, name: string, place?: boolean): Promise<Company> =>
+    ipcRenderer.invoke('company:template', id, name, place),
+  saveCompany: (patch: Partial<Company>): Promise<Company> => ipcRenderer.invoke('company:save', patch),
+  saveUnit: (u: Partial<OrgUnit> & { name: string }): Promise<OrgUnit> => ipcRenderer.invoke('company:unit-save', u),
+  deleteUnit: (id: string): Promise<void> => ipcRenderer.invoke('company:unit-delete', id),
+  saveSeat: (s: Partial<Seat> & { unitId: string; title: string }): Promise<Seat> =>
+    ipcRenderer.invoke('company:seat-save', s),
+  deleteSeat: (id: string): Promise<void> => ipcRenderer.invoke('company:seat-delete', id),
+  assignSeat: (seatId: string, agentId: string | null): Promise<void> => ipcRenderer.invoke('company:assign', seatId, agentId),
+  placeModels: (onlyEmpty?: boolean): Promise<number> => ipcRenderer.invoke('company:place', onlyEmpty),
+  saveModel: (m: ModelEntry): Promise<ModelEntry> => ipcRenderer.invoke('model:save', m),
+  deleteModel: (id: string): Promise<void> => ipcRenderer.invoke('model:delete', id),
+  verifyModel: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('model:verify', id),
   saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
   deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
   setProjectPath: (id: string, path: string): Promise<void> => ipcRenderer.invoke('project:path', id, path),

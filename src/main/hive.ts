@@ -11,6 +11,8 @@ import {
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import type { AptitudeRecord } from '../shared/aptitude'
+import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
   Approval,
@@ -32,7 +34,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -139,7 +141,7 @@ export class Hive {
       updatedAt: now(),
       cleared: [],
       notes: [],
-      ...(input.permission && input.permission !== 'edit' ? { permission: input.permission } : {}),
+      ...(input.permission ? { permission: input.permission } : {}),
       ...(input.refDirs?.length ? { refDirs: input.refDirs } : {}),
       ...(input.projectId ? { projectId: input.projectId } : {})
     }
@@ -419,6 +421,11 @@ export class Hive {
       owner: a.owner,
       adapter: a.adapter,
       role: a.role,
+      ...(a.rankId ? { rankId: a.rankId } : {}),
+      ...(a.unitId ? { unitId: a.unitId } : {}),
+      ...(a.job ? { job: a.job } : {}),
+      ...(a.modelRef ? { modelId: a.modelRef.id } : {}),
+      ...(a.model ? { model: a.model } : {}),
       ...(keep ? { check: keep } : {})
     }
     writeJson(this.p('agents', a.id + '.json'), r)
@@ -488,6 +495,70 @@ export class Hive {
 
   listSharedRuns(taskId: string): RunShared[] {
     return listJson<RunShared>(this.p('reports', taskId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+  }
+
+  // ---- company model (shared: one file per unit / seat, so teammates' edits merge) ----
+  getCompany(): Company | null {
+    return readJson<Company>(this.p('company', 'company.json'))
+  }
+
+  saveCompany(c: Company): void {
+    mkdirSync(this.p('company'), { recursive: true })
+    writeJson(this.p('company', 'company.json'), c)
+  }
+
+  listUnits(): OrgUnit[] {
+    return listJson<OrgUnit>(this.p('company', 'units')).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+  }
+
+  saveUnit(u: OrgUnit): void {
+    mkdirSync(this.p('company', 'units'), { recursive: true })
+    writeJson(this.p('company', 'units', u.id + '.json'), u)
+  }
+
+  deleteUnit(id: string): void {
+    rmSync(this.p('company', 'units', id + '.json'), { force: true })
+  }
+
+  listSeats(): Seat[] {
+    return listJson<Seat>(this.p('company', 'seats')).sort((a, b) => (a.order ?? 1e9) - (b.order ?? 1e9) || a.id.localeCompare(b.id))
+  }
+
+  saveSeat(s: Seat): void {
+    mkdirSync(this.p('company', 'seats'), { recursive: true })
+    writeJson(this.p('company', 'seats', s.id + '.json'), s)
+  }
+
+  deleteSeat(id: string): void {
+    rmSync(this.p('company', 'seats', id + '.json'), { force: true })
+  }
+
+  /** Remove the whole org (units + seats); the company file is rewritten by the caller. */
+  clearOrg(): void {
+    rmSync(this.p('company', 'units'), { recursive: true, force: true })
+    rmSync(this.p('company', 'seats'), { recursive: true, force: true })
+  }
+
+  // ---- aptitude records (one file per task, shared) ----
+  getAptitude(taskId: string): AptitudeRecord | null {
+    return readJson<AptitudeRecord>(this.p('aptitude', taskId + '.json'))
+  }
+
+  saveAptitude(r: AptitudeRecord): void {
+    writeJson(this.p('aptitude', r.taskId + '.json'), r)
+  }
+
+  listAptitude(): AptitudeRecord[] {
+    return listJson<AptitudeRecord>(this.p('aptitude'))
+  }
+
+  // ---- model availability on this computer ----
+  availability(): Record<string, ModelAvailability> {
+    return readJson<Record<string, ModelAvailability>>(this.p('.local', 'model-availability.json')) ?? {}
+  }
+
+  setAvailability(id: string, a: ModelAvailability): void {
+    writeJson(this.p('.local', 'model-availability.json'), { ...this.availability(), [id]: a })
   }
 
   // ---- per-machine budget usage ----

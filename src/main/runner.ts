@@ -142,7 +142,7 @@ export function buildPrompt(opts: {
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
-  const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission)]
+  const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission ?? agent.permission)]
   if (perm) lines.push('', perm)
   lines.push(...materialLines(task, hive, opts.staged))
 
@@ -218,6 +218,8 @@ export interface RunnerDeps {
   humanReview?: HumanReview
   /** The CLI reported that its usage limit is used up. */
   onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
+  /** A run ended: feeds the aptitude record. `pending` = waits for a human check. */
+  onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'other' }) => void
   /** Name of this computer's member, shown on shared run summaries. */
   machine?: string
   signal?: AbortSignal
@@ -311,7 +313,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const task = hive.getTask(taskId)
   if (!task || task.assignee !== agent.id) return 'not_ready'
   if (task.status !== 'todo') return 'not_ready'
-  const level: PermissionLevel = effectivePermission(agent.adapter, task.permission)
+  const level: PermissionLevel = effectivePermission(agent.adapter, task.permission ?? agent.permission)
 
   // Gate 1: human approval for risky tasks / cautious agents / command-running tasks.
   if ((task.risky || agent.requireApproval || level === 'exec') && !task.cleared.includes('risky-task')) {
@@ -531,6 +533,9 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     hive.addRun(rec)
     shareRun(hive, rec, deps.machine ?? '')
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
+    if (outcome !== 'done') {
+      deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: outcome === 'failed' ? 'failed' : 'other' })
+    }
     return runId
   }
   const lastError = [...live.all()].reverse().find((e) => e.kind === 'error')?.text
@@ -639,6 +644,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
 
   const review = needsReview(deps.humanReview ?? 'off', level, diff)
   const lastRunId = saveRun('done', { report: parsed.report })
+  deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: review ? 'pending' : 'approved' })
   if (review) {
     hive.addEvent(task.id, 'review', 'system', `사람 확인을 기다려요: ${reviewReason(diff)}`, runId)
   }

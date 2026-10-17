@@ -155,9 +155,11 @@ const AUTH_HINT =
 export async function checkCli(
   id: AdapterId,
   runner: Runner = runCli,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  /** Check one specific model instead of the CLI's default. */
+  model?: string
 ): Promise<SetupCheck> {
-  const agent = makeAgent('check', { name: 'check', adapter: id, extraArgs: '' })
+  const agent = makeAgent('check', { name: 'check', adapter: id, extraArgs: '', model })
   const built = buildCommand(agent)
   const res = await runner(built, {
     cwd: homedir(),
