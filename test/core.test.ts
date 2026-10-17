@@ -18,7 +18,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hivedesk-'))
 })
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true })
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 })
 
 function fakeAgent(over: Partial<Agent> = {}): Agent {
@@ -267,7 +267,11 @@ describe('PATH discovery', () => {
     expect(dirs).toContain('/Users/minu/.npm-global/bin')
     expect(dirs).toContain('/opt/homebrew/bin')
     const exists = (p: string) => p !== '/nope'
-    expect(mergePath(['/usr/bin:/bin', '/nope:/usr/bin:/a', '/b'], exists)).toBe('/usr/bin:/bin:/a:/b')
+    const d = (await import('node:path')).delimiter
+    const p = (...xs: string[]) => xs.join(d)
+    expect(mergePath([p('/usr/bin', '/bin'), p('/nope', '/usr/bin', '/a'), '/b'], exists)).toBe(
+      p('/usr/bin', '/bin', '/a', '/b')
+    )
   })
 })
 

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, posix, win32 } from 'node:path'
 
 /**
  * Apps opened from the Dock/Finder (and terminals whose profile was not reloaded
@@ -10,6 +10,7 @@ import { delimiter, join } from 'node:path'
  * folders, so `claude`, `codex`, `agy` and `node` are found either way.
  */
 export function candidateDirs(home: string, platform: NodeJS.Platform): string[] {
+  const join = platform === 'win32' ? win32.join : posix.join
   if (platform === 'win32') {
     const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming')
     return [join(appData, 'npm'), join(home, '.local', 'bin'), join(home, '.npm-global')]

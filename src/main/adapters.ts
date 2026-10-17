@@ -163,6 +163,8 @@ export interface RunResult {
   spawnError?: string
 }
 
+const WIN_NOT_FOUND = /is not recognized as an internal or external command|내부 또는 외부 명령/i
+
 export type Runner = (built: BuiltCommand, opts: RunOptions) => Promise<RunResult>
 
 /** Real process runner. npm-installed CLIs are .cmd shims on Windows, hence shell there. */
@@ -206,6 +208,14 @@ export const runCli: Runner = (built, opts) =>
     }
 
     const kill = (): void => {
+      if (win && child.pid) {
+        // With shell: true the CLI runs under cmd.exe; kill the whole tree.
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }).on(
+          'error',
+          () => child.kill()
+        )
+        return
+      }
       try {
         child.kill('SIGTERM')
         setTimeout(() => {
@@ -245,7 +255,16 @@ export const runCli: Runner = (built, opts) =>
             : e.message
       })
     })
-    child.on('close', (code) => done({ code }))
+    child.on('close', (code) => {
+      // cmd.exe reports a missing program as exit code 1 + a localized message
+      if (win && code !== 0 && WIN_NOT_FOUND.test(stderr)) {
+        return done({
+          code,
+          spawnError: `명령을 찾을 수 없어요: ${built.command}. 설치되어 있고 PATH에 잡혀 있는지 확인하세요.`
+        })
+      }
+      done({ code })
+    })
     child.stdin?.on('error', () => {
       /* EPIPE if the CLI exits before reading stdin */
     })
