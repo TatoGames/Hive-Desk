@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
@@ -21,7 +21,7 @@ const ok = (stdout: string) => ({ code: 0, stdout, stderr: '', timedOut: false, 
 function setup(votes: Record<string, number>, ceos = ['c1', 'c2', 'c3'], plan?: (p: string) => string) {
   const events: EngineEvent[] = []
   const runner: Runner = async (_b, o) => {
-    const who = o.cwd.split('/').pop()!
+    const who = basename(o.cwd)
     if (o.prompt.includes('CEO COMMITTEE')) {
       if (o.prompt.includes('independent proposal')) return ok(`${who}의 제안: 방법 ${who}`)
       if (o.prompt.includes('ONE round of critique')) return ok(`${who}의 비판`)

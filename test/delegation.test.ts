@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner, RunResult } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
@@ -48,7 +48,7 @@ const titleOf = (prompt: string): string => /## Your task\n(.*)/.exec(prompt)?.[
 
 function scripted(s: Script): Runner {
   return async (_b, o) => {
-    const who = o.cwd.split('/').pop()!
+    const who = basename(o.cwd)
     const title = titleOf(o.prompt)
     let kind = 'work'
     let out: string
