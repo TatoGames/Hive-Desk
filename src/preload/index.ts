@@ -79,6 +79,8 @@ const api = {
     ipcRenderer.invoke('agenda:decide', id, choice, note),
   applyReassignment: (domain: string, from: string, to: string): Promise<number> =>
     ipcRenderer.invoke('reassign:apply', domain, from, to),
+  refreshAccountModels: (adapter: Agent['adapter']): Promise<{ ok: boolean; count: number; message: string }> =>
+    ipcRenderer.invoke('model:refresh', adapter),
   decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
     ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>

@@ -16,6 +16,8 @@ interface AdapterSpec {
   /** Args that put the CLI into one-shot mode, reading the prompt from stdin. */
   baseArgs: string[]
   modelFlag?: string
+  /** Args of the command that prints the models this account can use. */
+  listModels?: string[]
   defaultExtraArgs: string
   install: string
   login: string
@@ -64,6 +66,9 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     // instruction to read stdin, agy tries a shell command to read it, which
     // headless mode denies, and the run ends with no output.
     baseArgs: [],
+    modelFlag: '--model',
+    /** Lists the models this login can use (one per line). */
+    listModels: ['models'],
     defaultExtraArgs: '',
     install: 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
     login: '`agy`를 한 번 실행하면 브라우저가 열려 Google 계정으로 로그인해요. 무료 계정도 쓸 수 있어요.',

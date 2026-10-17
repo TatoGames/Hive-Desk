@@ -21,7 +21,7 @@ import type {
   TaskStatus
 } from '../shared/types'
 import type { LiveRun } from './activity'
-import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
+import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Runner } from './adapters'
 import { checkCli } from './setup'
 import { Committee } from './committee'
 import { Delegation } from './delegation'
@@ -40,9 +40,11 @@ import { budgetProblem, resolveCwd, runTask } from './runner'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
   DEFAULT_RULES,
+  accountEntries,
   isModelEntry,
   mergeCatalog,
   modelLabel,
+  parseModelList,
   resolveModelArg,
   type Company,
   type ModelEntry,
@@ -894,7 +896,14 @@ export class Engine {
   }
 
   catalog(): ModelEntry[] {
-    return mergeCatalog(DEFAULT_MODELS as ModelEntry[], this.userModels())
+    const acct = Object.entries(this.hive.accountModels()).flatMap(([ad, v]) => accountEntries(ad as Agent['adapter'], v.models, v.at))
+    // the bundled entry of the same adapter + CLI name wins as the base (it has better notes), marked verified by the account
+    const verifiedKeys = new Set(acct.map((m) => m.adapter + '|' + m.cliArg))
+    const base = (DEFAULT_MODELS as ModelEntry[]).map((m) =>
+      verifiedKeys.has(m.adapter + '|' + m.cliArg) ? { ...m, verified: { source: `${m.adapter} 계정 모델 목록`, at: this.hive.accountModels()[m.adapter].at.slice(0, 10) } } : m
+    )
+    const known = new Set(base.map((m) => m.adapter + '|' + m.cliArg))
+    return mergeCatalog([...base, ...acct.filter((m) => !known.has(m.adapter + '|' + m.cliArg))], this.userModels())
   }
 
   /** Add or change a model in the user's own catalog file (a default with the same id is replaced). */
@@ -944,6 +953,28 @@ export class Engine {
   }
 
   /** Does this model really work with this account? Runs the CLI once with that model. */
+  /** Ask the CLI which models this login can use (only CLIs that can list them). */
+  async refreshAccountModels(adapter: Agent['adapter']): Promise<{ ok: boolean; count: number; message: string }> {
+    const args = ADAPTERS[adapter]?.listModels
+    if (!args) return { ok: false, count: 0, message: '이 CLI는 모델 목록 명령이 없어요. 카탈로그에서 고르고 [사용 확인]으로 확인하세요.' }
+    const res = await this.runner(
+      { command: ADAPTERS[adapter].command, args },
+      { cwd: homedir(), prompt: '', timeoutMs: 60_000, env: cleanEnv(process.env, true) }
+    )
+    if (res.spawnError || res.code !== 0) {
+      return { ok: false, count: 0, message: res.spawnError ?? `모델 목록을 받지 못했어요 (로그인이 필요할 수 있어요): ${(res.stderr || res.stdout).slice(-200)}` }
+    }
+    const models = parseModelList(res.stdout)
+    if (!models.length) return { ok: false, count: 0, message: '모델 목록이 비어 있거나 읽을 수 없는 형식이에요.' }
+    this.hive.setAccountModels(adapter, models)
+    // models the account lists are usable by definition
+    for (const m of this.catalog().filter((x) => x.adapter === adapter && models.some((y) => y.slug === x.cliArg))) {
+      this.hive.setAvailability(m.id, { ok: true, at: new Date().toISOString(), message: '계정 모델 목록에 있어요.' })
+    }
+    this.changed()
+    return { ok: true, count: models.length, message: `${models.length}개 모델을 불러왔어요.` }
+  }
+
   async verifyModel(id: string): Promise<{ ok: boolean; message: string }> {
     const m = this.catalog().find((x) => x.id === id)
     if (!m) return { ok: false, message: '카탈로그에 없는 모델이에요.' }
@@ -1172,6 +1203,8 @@ export class Engine {
   /** Remember the result of a connection check, so teammates see whether this computer's agents work. */
   recordCheck(adapter: Agent['adapter'], r: { ok: boolean; message: string }): void {
     const check: ConnectionCheck = { at: new Date().toISOString(), ok: r.ok, message: r.message.slice(0, 200) }
+    // the check belongs to the connection (login), so agents created later on it show it as well
+    this.hive.setConnectionCheck(adapter, check)
     for (const a of this.config.agents) if (a.adapter === adapter) this.hive.publishAgent(a, check)
     this.changed()
   }

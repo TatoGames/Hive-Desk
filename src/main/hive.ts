@@ -418,7 +418,7 @@ export class Hive {
   // ---- roster (public view of agents so teammates can assign tasks) ----
   publishAgent(a: Agent, check?: ConnectionCheck): void {
     const prev = readJson<RosterEntry>(this.p('agents', a.id + '.json'))
-    const keep = check ?? prev?.check
+    const keep = check ?? this.connectionChecks()[a.adapter] ?? prev?.check
     const r: RosterEntry = {
       id: a.id,
       name: a.name,
@@ -584,6 +584,22 @@ export class Hive {
   // ---- model availability on this computer ----
   availability(): Record<string, ModelAvailability> {
     return readJson<Record<string, ModelAvailability>>(this.p('.local', 'model-availability.json')) ?? {}
+  }
+
+  // ---- this computer's AI connections (login + CLI), shared by every agent on that connection ----
+  connectionChecks(): Record<string, ConnectionCheck> {
+    return readJson<Record<string, ConnectionCheck>>(this.p('.local', 'connection-checks.json')) ?? {}
+  }
+  setConnectionCheck(adapter: string, c: ConnectionCheck): void {
+    writeJson(this.p('.local', 'connection-checks.json'), { ...this.connectionChecks(), [adapter]: c })
+  }
+
+  /** Models each CLI login reported (`agy models` …), per machine. */
+  accountModels(): Record<string, { at: string; models: { slug: string; label: string }[] }> {
+    return readJson(this.p('.local', 'account-models.json')) ?? {}
+  }
+  setAccountModels(adapter: string, models: { slug: string; label: string }[]): void {
+    writeJson(this.p('.local', 'account-models.json'), { ...this.accountModels(), [adapter]: { at: now(), models } })
   }
 
   setAvailability(id: string, a: ModelAvailability): void {

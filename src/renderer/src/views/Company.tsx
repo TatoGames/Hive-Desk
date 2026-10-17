@@ -441,6 +441,19 @@ function Models({ snap }: { snap: Snapshot }): JSX.Element {
       <div className="row between">
         <h2>모델 카탈로그</h2>
         <button
+          className="ghost"
+          disabled={busy === 'refresh'}
+          title="Antigravity(agy) 로그인 계정이 쓸 수 있는 모델을 CLI에서 직접 받아 와요"
+          onClick={async () => {
+            setBusy('refresh')
+            const r = await window.hive.refreshAccountModels('agy')
+            setMsg((m) => ({ ...m, refresh: r.message }))
+            setBusy('')
+          }}
+        >
+          {busy === 'refresh' ? '불러오는 중…' : 'agy 계정 모델 불러오기'}
+        </button>
+        <button
           className="primary"
           onClick={() =>
             setEdit({ id: '', company: '', family: '', version: '', adapter: 'claude', cliArg: '', tier: 'balanced', weight: 1, domains: [] })
@@ -451,8 +464,10 @@ function Models({ snap }: { snap: Snapshot }): JSX.Element {
       </div>
       <p className="muted small">
         체급·한도 무게·잘하는 분야는 참고용 값이에요 (직접 고칠 수 있어요). [사용 확인]은 이 컴퓨터의 로그인 계정으로 그 모델을 한 번
-        불러 보고, 되는지 알려 줘요. 사용량이 조금 들어요.
+        불러 보고, 되는지 알려 줘요. 사용량이 조금 들어요. <b>미확인</b> 표시는 이름을 아직 확인하지 못한 모델이에요 — 계정 모델
+        불러오기나 [사용 확인]으로 확인해 주세요.
       </p>
+      {msg.refresh && <div className="small">{msg.refresh}</div>}
       <table className="tbl">
         <thead>
           <tr>
@@ -471,7 +486,12 @@ function Models({ snap }: { snap: Snapshot }): JSX.Element {
             return (
               <tr key={m.id}>
                 <td>
-                  <b>{modelLabel(m)}</b> <span className="muted small">{m.company}</span>
+                  <b>{modelLabel(m)}</b> <span className="muted small">{m.company}</span>{' '}
+                  {m.verified ? (
+                    <span className="tag" title={`${m.verified.source} · ${m.verified.at}`}>확인됨</span>
+                  ) : av?.ok ? null : (
+                    <span className="tag warn">미확인</span>
+                  )}
                   <div className="muted small">
                     {m.cliArg}
                     {m.aliasArg ? ` · 별칭 ${m.aliasArg}` : ''}

@@ -112,6 +112,7 @@ function registerIpc(): void {
     fixPath()
     const r = await checkCli(id)
     engine.recordCheck(id, r)
+    if (r.ok) void engine.refreshAccountModels(id) // the account's own model list, when the CLI has one
     return r
   })
   ipcMain.handle('company:template', (_e, id: string, name: string, place?: boolean) => engine.applyTemplate(id, name, place))
@@ -124,6 +125,7 @@ function registerIpc(): void {
   ipcMain.handle('company:place', (_e, onlyEmpty?: boolean) => engine.placeModels(onlyEmpty))
   ipcMain.handle('model:save', (_e, m) => engine.saveModel(m))
   ipcMain.handle('model:delete', (_e, id: string) => engine.deleteModel(id))
+  ipcMain.handle('model:refresh', (_e, adapter: AdapterId) => engine.refreshAccountModels(adapter))
   ipcMain.handle('model:verify', (_e, id: string) => engine.verifyModel(id))
   ipcMain.handle('project:save', (_e, p: Partial<Project> & { name: string }) => engine.saveProject(p))
   ipcMain.handle('project:delete', (_e, id: string) => engine.deleteProject(id))
