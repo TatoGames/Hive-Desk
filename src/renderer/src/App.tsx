@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
@@ -11,6 +11,14 @@ type Tab = 'board' | 'agents' | 'inbox' | 'approvals' | 'settings'
 export default function App(): JSX.Element {
   const { snap, output, refresh } = useHive()
   const [tab, setTab] = useState<Tab>('board')
+  const routed = useRef(false)
+
+  // No AI connected yet → open the setup screen first.
+  useEffect(() => {
+    if (!snap || routed.current || !snap.config.memberName) return
+    routed.current = true
+    if (!snap.config.agents.length) setTab('agents')
+  }, [snap])
 
   if (!snap) return <div className="loading">불러오는 중…</div>
 

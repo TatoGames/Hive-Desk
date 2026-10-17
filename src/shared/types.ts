@@ -113,6 +113,8 @@ export interface AdapterInfo {
   install: string
   login: string
   note?: string
+  /** One-click install is available on this OS. */
+  canInstall?: boolean
 }
 
 export interface SyncResult {
@@ -133,7 +135,15 @@ export interface Snapshot {
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output'
+  type: 'changed' | 'output' | 'setup'
   taskId?: string
+  /** For `setup`: which CLI the installer output belongs to. */
+  adapter?: AdapterId
   chunk?: string
+}
+
+export interface SetupCheck {
+  ok: boolean
+  needsLogin: boolean
+  message: string
 }

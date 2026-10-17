@@ -270,3 +270,16 @@ describe('PATH discovery', () => {
     expect(mergePath(['/usr/bin:/bin', '/nope:/usr/bin:/a', '/b'], exists)).toBe('/usr/bin:/bin:/a:/b')
   })
 })
+
+describe('one-click setup', () => {
+  it('reports connected, needs-login and missing CLI clearly', async () => {
+    const { checkCli, installCommand } = await import('../src/main/setup')
+    expect(installCommand('claude')).toMatch(/claude\.ai\/install/)
+    const ok = await checkCli('claude', async () => ({ code: 0, stdout: 'OK\n', stderr: '', timedOut: false, aborted: false }))
+    expect(ok.ok).toBe(true)
+    const login = await checkCli('codex', async () => ({ code: 1, stdout: '', stderr: 'Not logged in. Run codex login', timedOut: false, aborted: false }))
+    expect(login).toMatchObject({ ok: false, needsLogin: true })
+    const missing = await checkCli('agy', async () => ({ code: null, stdout: '', stderr: '', timedOut: false, aborted: false, spawnError: '명령을 찾을 수 없어요: agy' }))
+    expect(missing).toMatchObject({ ok: false, needsLogin: false })
+  })
+})

@@ -23,6 +23,7 @@ export function useHive(): {
         setOutput((o) => ({ ...o, [id]: ((o[id] ?? '') + (e.chunk ?? '')).slice(-20000) }))
         return
       }
+      if (e.type === 'setup') return
       if (pending.current) return
       pending.current = window.setTimeout(() => {
         pending.current = null
