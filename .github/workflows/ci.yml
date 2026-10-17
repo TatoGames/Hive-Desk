@@ -24,3 +24,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Package and verify macOS signature
+        if: runner.os == 'macOS'
+        run: |
+          npx electron-builder --mac dir --arm64 --publish never
+          codesign --verify --deep --strict --verbose=2 release/mac-arm64/HiveDesk.app
+          codesign -dv release/mac-arm64/HiveDesk.app 2>&1 | grep -E "Signature=adhoc|Identifier"
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: ''

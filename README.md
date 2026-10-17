@@ -62,13 +62,15 @@ Claude Code · OpenAI Codex · Antigravity(agy) · Gemini CLI를 각자 **자기
 > CLI 실행 환경에서 빼서, CLI가 API 과금 대신 로그인한 계정을 쓰게 해요.
 > Claude Code의 추가 인자에 `--bare`를 넣지 마세요. bare 모드는 구독 로그인을 무시해요.
 
-### macOS에서 '손상된 앱' 경고가 뜰 때
+### macOS에서 처음 열 때
 
-아직 Apple 코드 서명을 하지 않아서 생기는 경고예요. 앱을 `응용 프로그램` 폴더로 옮긴 뒤 터미널에서 한 번 실행하세요.
+아직 Apple 개발자 서명이 없어서 처음 한 번은 macOS가 확인을 요청해요. 터미널은 필요 없어요.
 
-```bash
-xattr -cr /Applications/HiveDesk.app
-```
+1. 응용 프로그램 폴더에서 HiveDesk를 열면 *"HiveDesk"을(를) 확인할 수 없습니다* 같은 창이 떠요. **완료**를 눌러 닫아요.
+2. **시스템 설정 → 개인정보 보호 및 보안**으로 가서 아래쪽의 *"HiveDesk"이(가) 차단되었습니다* 옆 **그래도 열기**를 눌러요.
+3. 암호나 Touch ID로 확인하면 열려요. 다음부터는 바로 열려요.
+
+v0.1.1 이하 버전에서 *"손상되었기 때문에 열 수 없습니다"*가 뜨면 최신 버전을 받거나, 터미널에서 `xattr -cr /Applications/HiveDesk.app`을 한 번 실행하세요.
 
 Windows에서 SmartScreen 경고가 뜨면 *추가 정보 → 실행*을 누르세요.
 
