@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell } from 'electron'
 import { join } from 'node:path'
-import type { AdapterId, Agent, AppConfig, EngineEvent, Task } from '../shared/types'
+import type { AdapterId, Agent, AppConfig, EngineEvent, Project, Task } from '../shared/types'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
@@ -90,7 +90,7 @@ function registerIpc(): void {
   ipcMain.handle('message:send', (_e, from: string, to: string, body: string) =>
     engine.sendMessage(from, to, body)
   )
-  ipcMain.handle('memory:add', (_e, text: string) => engine.addMemory(text))
+  ipcMain.handle('memory:add', (_e, text: string, kind?: 'fixed' | 'recent') => engine.addMemory(text, kind))
   ipcMain.handle('memory:delete', (_e, id: string) => engine.deleteMemory(id))
   ipcMain.handle('adapters:detect', async () => {
     fixPath() // pick up CLIs installed while the app was open
@@ -103,10 +103,17 @@ function registerIpc(): void {
     return r
   })
   ipcMain.handle('setup:login', (_e, id: AdapterId) => openLogin(id))
-  ipcMain.handle('setup:check', (_e, id: AdapterId) => {
+  ipcMain.handle('setup:check', async (_e, id: AdapterId) => {
     fixPath()
-    return checkCli(id)
+    const r = await checkCli(id)
+    engine.recordCheck(id, r)
+    return r
   })
+  ipcMain.handle('project:save', (_e, p: Partial<Project> & { name: string }) => engine.saveProject(p))
+  ipcMain.handle('project:delete', (_e, id: string) => engine.deleteProject(id))
+  ipcMain.handle('project:path', (_e, id: string, path: string) => engine.setProjectPath(id, path))
+  ipcMain.handle('memory:kind', (_e, id: string, kind: 'fixed' | 'recent') => engine.setMemoryKind(id, kind))
+  ipcMain.handle('task:shared-runs', (_e, id: string) => engine.sharedRuns(id))
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
   ipcMain.handle('share:sync', () => engine.sync())
   ipcMain.handle('dialog:folder', async () => {

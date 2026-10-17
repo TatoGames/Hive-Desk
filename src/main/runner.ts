@@ -117,18 +117,28 @@ export function buildPrompt(opts: {
   staged?: Map<string, string>
 }): string {
   const { agent, task, hive } = opts
-  const mem = hive.listMemory(opts.maxMemory ?? 20)
+  const mem = hive.memoryForPrompt(opts.maxMemory ?? 20)
+  const project = hive.getProject(task.projectId)
   const inbox = hive.listInbox(agent.id).filter((m) => !m.read)
   const roster = hive.listRoster().filter((r) => r.id !== agent.id)
   const deps = task.dependsOn
     .map((d) => hive.getTask(d))
-    .filter((t): t is Task => !!t && t.status === 'done' && !!t.result)
+    .filter((t): t is Task => !!t && t.status === 'done' && !!(t.result || t.report))
 
   const lines: string[] = []
   lines.push(`You are "${agent.name}", an AI teammate. Role: ${agent.role || 'general helper'}.`)
   lines.push(
     'You work in a small team coordinated through shared files by the HiveDesk app. A human reviews your result.'
   )
+  if (project) {
+    lines.push('', `## Project: ${project.name}`)
+    if (project.description) lines.push(project.description)
+    if (project.briefing) lines.push('', 'Briefing (always applies):', project.briefing)
+  }
+  if (mem.fixed.length) {
+    lines.push('', '## Team rules (fixed memory — always apply)')
+    for (const m of mem.fixed) lines.push(`- ${m.text}`)
+  }
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
@@ -145,11 +155,11 @@ export function buildPrompt(opts: {
   }
   if (deps.length) {
     lines.push('', '## Results from tasks this depends on')
-    for (const d of deps) lines.push(`### ${d.title}`, (d.result ?? '').slice(0, 4000))
+    for (const d of deps) lines.push(`### ${d.title}`, dependencyText(d))
   }
-  if (mem.length) {
+  if (mem.recent.length) {
     lines.push('', '## Shared team memory (most recent last)')
-    for (const m of mem) lines.push(`- (${m.author}) ${m.text}`)
+    for (const m of mem.recent) lines.push(`- (${m.author}) ${m.text}`)
   }
   if (inbox.length) {
     lines.push('', '## Unread messages for you')
@@ -208,6 +218,8 @@ export interface RunnerDeps {
   humanReview?: HumanReview
   /** The CLI reported that its usage limit is used up. */
   onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
+  /** Name of this computer's member, shown on shared run summaries. */
+  machine?: string
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
   now?: () => Date
@@ -226,9 +238,58 @@ export type RunOutcome =
 /** Total time cap per run when the task does not set one. */
 export const DEFAULT_MAX_MINUTES = 240
 
+/** Patches / answers bigger than this stay on this computer only (the shared summary keeps the numbers). */
+export const SHARED_PATCH_MAX = 200_000
+
+export function shareRun(hive: Hive, rec: RunRecord, machine: string): void {
+  if (rec.outcome === 'running') return
+  const files = rec.diff.files
+  const small = rec.diff.patch.length <= SHARED_PATCH_MAX
+  hive.addSharedRun({
+    id: rec.id,
+    taskId: rec.taskId,
+    agentId: rec.agentId,
+    machine,
+    adapter: rec.adapter,
+    model: rec.model,
+    startedAt: rec.startedAt,
+    finishedAt: rec.finishedAt,
+    durationMs: rec.durationMs,
+    outcome: rec.outcome,
+    report: rec.report,
+    diffStat: {
+      available: rec.diff.available,
+      files: files.length,
+      additions: files.reduce((n, f) => n + f.additions, 0),
+      deletions: files.reduce((n, f) => n + f.deletions, 0)
+    },
+    files: files.slice(0, 500),
+    ...(small && rec.diff.patch ? { patch: rec.diff.patch } : {}),
+    ...(rec.response.length <= SHARED_PATCH_MAX ? { response: rec.response } : {}),
+    error: rec.error
+  })
+}
+
 /** The folder an agent's runs happen in. */
-export function resolveCwd(agent: Agent, defaultCwd: string): string {
+export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string | null): string {
+  if (projectDir && existsSync(projectDir)) return projectDir
   return agent.workDir && existsSync(agent.workDir) ? agent.workDir : defaultCwd
+}
+
+/** Most of a dependency's report that goes into the prompt, and the fallback cap on a raw result. */
+const DEP_RESULT_MAX = 1500
+
+/** What a finished task hands to the tasks that depend on it: its structured report first. */
+export function dependencyText(t: Task): string {
+  const r = t.report
+  if (r && (r.did || r.files || r.verify)) {
+    const out = [`Did: ${r.did}`, `Files: ${r.files}`, `How to verify: ${r.verify}`]
+    if (r.risks && r.risks.toLowerCase() !== 'none') out.push(`Risks: ${r.risks}`)
+    if (r.next && r.next.toLowerCase() !== 'none') out.push(`Next: ${r.next}`)
+    return out.join('\n').slice(0, 4000)
+  }
+  const raw = t.result ?? ''
+  return raw.length > DEP_RESULT_MAX ? raw.slice(0, DEP_RESULT_MAX) + '\n[...cut: the task gave no structured report]' : raw
 }
 
 export function budgetProblem(hive: Hive, agent: Agent, d: Date): string | null {
@@ -280,7 +341,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'awaiting_approval'
   }
 
-  const cwd = resolveCwd(agent, deps.defaultCwd)
+  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId))
   const started = nowFn()
   const runId = newId()
   const answering = task.reply !== undefined
@@ -468,6 +529,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       checkpointNote: cp.note
     }
     hive.addRun(rec)
+    shareRun(hive, rec, deps.machine ?? '')
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
     return runId
   }

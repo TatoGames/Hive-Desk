@@ -7,6 +7,7 @@ export default function Inbox({ snap }: { snap: Snapshot }): JSX.Element {
   const [to, setTo] = useState('')
   const [body, setBody] = useState('')
   const [mem, setMem] = useState('')
+  const [fixed, setFixed] = useState(false)
   const me = snap.config.memberName
 
   const send = async (): Promise<void> => {
@@ -64,7 +65,7 @@ export default function Inbox({ snap }: { snap: Snapshot }): JSX.Element {
         <section className="panel">
           <h2>공유 메모리</h2>
           <p className="muted small">
-            모든 에이전트가 매 실행마다 최근 메모리를 함께 읽어요. 프로젝트 규칙, 결정 사항을 적어 두세요.
+            모든 에이전트가 매 실행마다 고정 메모리 전체와 최근 메모리를 함께 읽어요. 프로젝트 규칙, 결정 사항을 적어 두세요.
           </p>
           <div className="row">
             <input
@@ -74,7 +75,7 @@ export default function Inbox({ snap }: { snap: Snapshot }): JSX.Element {
               onChange={(e) => setMem(e.target.value)}
               onKeyDown={async (e) => {
                 if (e.key === 'Enter' && mem.trim()) {
-                  await window.hive.addMemory(mem)
+                  await window.hive.addMemory(mem, fixed ? 'fixed' : 'recent')
                   setMem('')
                 }
               }}
@@ -83,22 +84,32 @@ export default function Inbox({ snap }: { snap: Snapshot }): JSX.Element {
               className="primary"
               disabled={!mem.trim()}
               onClick={async () => {
-                await window.hive.addMemory(mem)
+                await window.hive.addMemory(mem, fixed ? 'fixed' : 'recent')
                 setMem('')
               }}
             >
               기록
             </button>
           </div>
+          <label className="toggle small">
+            <input type="checkbox" checked={fixed} onChange={(e) => setFixed(e.target.checked)} />
+            고정 메모리로 기록 (오래돼도 모든 실행에 항상 들어가요)
+          </label>
           <div className="list">
             {!snap.memory.length && <div className="empty">아직 기록이 없어요.</div>}
             {[...snap.memory].reverse().map((m) => (
               <div key={m.id} className="msg">
                 <div className="small muted">
-                  {name(m.author)} · {fmtTime(m.createdAt)}
+                  {name(m.author)} · {fmtTime(m.createdAt)} {m.kind === 'fixed' && <span className="tag">고정</span>}
                 </div>
                 <div className="row between">
                   <div>{m.text}</div>
+                  <button
+                    className="sm ghost"
+                    onClick={() => void window.hive.setMemoryKind(m.id, m.kind === 'fixed' ? 'recent' : 'fixed')}
+                  >
+                    {m.kind === 'fixed' ? '고정 해제' : '고정'}
+                  </button>
                   <ConfirmButton label="삭제" onConfirm={() => window.hive.deleteMemory(m.id)} />
                 </div>
               </div>

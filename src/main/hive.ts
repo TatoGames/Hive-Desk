@@ -19,6 +19,9 @@ import type {
   MemoryEntry,
   Message,
   PermissionLevel,
+  Project,
+  RunShared,
+  ConnectionCheck,
   RosterEntry,
   RunRecord,
   RunSummary,
@@ -29,7 +32,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -120,6 +123,7 @@ export class Hive {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
     createdBy: string
   }): Task {
     const t: Task = {
@@ -136,7 +140,8 @@ export class Hive {
       cleared: [],
       notes: [],
       ...(input.permission && input.permission !== 'edit' ? { permission: input.permission } : {}),
-      ...(input.refDirs?.length ? { refDirs: input.refDirs } : {})
+      ...(input.refDirs?.length ? { refDirs: input.refDirs } : {}),
+      ...(input.projectId ? { projectId: input.projectId } : {})
     }
     writeJson(this.p('tasks', t.id + '.json'), t)
     const perm = t.permission === 'read' ? ' · 읽기만' : t.permission === 'exec' ? ' · 명령 실행 허용' : ''
@@ -162,6 +167,7 @@ export class Hive {
     rmSync(this.p('events', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'runs', id), { recursive: true, force: true })
     rmSync(this.p('attachments', id), { recursive: true, force: true })
+    rmSync(this.p('reports', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'attachments', id), { recursive: true, force: true })
   }
 
@@ -369,8 +375,8 @@ export class Hive {
   }
 
   // ---- shared memory (append-only entries: never conflicts in git) ----
-  addMemory(author: string, text: string): MemoryEntry {
-    const e: MemoryEntry = { id: newId(), author, text: text.trim(), createdAt: now() }
+  addMemory(author: string, text: string, kind: 'fixed' | 'recent' = 'recent'): MemoryEntry {
+    const e: MemoryEntry = { id: newId(), author, text: text.trim(), createdAt: now(), ...(kind === 'fixed' ? { kind } : {}) }
     writeJson(this.p('memory', e.id + '.json'), e)
     return e
   }
@@ -382,18 +388,38 @@ export class Hive {
     return all.slice(-limit)
   }
 
+  /** Memory for a prompt: every fixed entry, plus the most recent others. */
+  memoryForPrompt(recentLimit = 20): { fixed: MemoryEntry[]; recent: MemoryEntry[] } {
+    const all = this.listMemory(1000)
+    return {
+      fixed: all.filter((m) => m.kind === 'fixed'),
+      recent: all.filter((m) => m.kind !== 'fixed').slice(-recentLimit)
+    }
+  }
+
+  setMemoryKind(id: string, kind: 'fixed' | 'recent'): void {
+    const f = this.p('memory', id + '.json')
+    const m = readJson<MemoryEntry>(f)
+    if (!m) return
+    const { kind: _old, ...rest } = m
+    writeJson(f, kind === 'fixed' ? { ...rest, kind } : rest)
+  }
+
   deleteMemory(id: string): void {
     rmSync(this.p('memory', id + '.json'), { force: true })
   }
 
   // ---- roster (public view of agents so teammates can assign tasks) ----
-  publishAgent(a: Agent): void {
+  publishAgent(a: Agent, check?: ConnectionCheck): void {
+    const prev = readJson<RosterEntry>(this.p('agents', a.id + '.json'))
+    const keep = check ?? prev?.check
     const r: RosterEntry = {
       id: a.id,
       name: a.name,
       owner: a.owner,
       adapter: a.adapter,
-      role: a.role
+      role: a.role,
+      ...(keep ? { check: keep } : {})
     }
     writeJson(this.p('agents', a.id + '.json'), r)
   }
@@ -404,6 +430,64 @@ export class Hive {
 
   listRoster(): RosterEntry[] {
     return listJson<RosterEntry>(this.p('agents')).sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  // ---- projects (shared) + this computer's folder for each ----
+  listProjects(): Project[] {
+    return listJson<Project>(this.p('projects')).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  getProject(id: string | undefined): Project | null {
+    return id ? readJson<Project>(this.p('projects', id + '.json')) : null
+  }
+
+  saveProject(input: Partial<Project> & { name: string; createdBy: string }): Project {
+    const cur = input.id ? this.getProject(input.id) : null
+    const p: Project = {
+      id: cur?.id ?? newId(),
+      name: input.name.trim(),
+      description: (input.description ?? cur?.description ?? '').trim(),
+      briefing: (input.briefing ?? cur?.briefing ?? '').trim(),
+      folderName: (input.folderName ?? cur?.folderName ?? '').trim(),
+      createdBy: cur?.createdBy ?? input.createdBy,
+      createdAt: cur?.createdAt ?? now()
+    }
+    writeJson(this.p('projects', p.id + '.json'), p)
+    return p
+  }
+
+  deleteProject(id: string): void {
+    rmSync(this.p('projects', id + '.json'), { force: true })
+    for (const t of this.listTasks()) if (t.projectId === id) this.updateTask(t.id, { projectId: undefined })
+  }
+
+  projectPaths(): Record<string, string> {
+    return readJson<Record<string, string>>(this.p('.local', 'paths.json')) ?? {}
+  }
+
+  setProjectPath(id: string, path: string): void {
+    const all = this.projectPaths()
+    if (path.trim()) all[id] = path.trim()
+    else delete all[id]
+    writeJson(this.p('.local', 'paths.json'), all)
+  }
+
+  /** This computer's existing folder for the project, if one is set. */
+  projectDir(id: string | undefined): string | null {
+    if (!id) return null
+    const p = this.projectPaths()[id]
+    return p && existsSync(p) ? p : null
+  }
+
+  // ---- shared run summaries (teammates see what ran on other computers) ----
+  addSharedRun(r: RunShared): void {
+    const dir = this.p('reports', r.taskId)
+    mkdirSync(dir, { recursive: true })
+    writeJson(join(dir, r.id + '.json'), r)
+  }
+
+  listSharedRuns(taskId: string): RunShared[] {
+    return listJson<RunShared>(this.p('reports', taskId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   }
 
   // ---- per-machine budget usage ----

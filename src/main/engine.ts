@@ -14,6 +14,9 @@ import type {
   Snapshot,
   SyncResult,
   Task,
+  Project,
+  RunShared,
+  ConnectionCheck,
   TaskHistory,
   TaskStatus
 } from '../shared/types'
@@ -191,6 +194,8 @@ export class Engine {
       gitEnabled: isGitRepo(this.config.workspace),
       live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()])),
       waiting: Object.fromEntries(this.waiting),
+      projects: this.hive.listProjects(),
+      projectPaths: this.hive.projectPaths(),
       limits: Object.fromEntries(Object.keys(this.limits).flatMap((k) => (this.limitFor(k as Agent['adapter']) ? [[k, this.limits[k]]] : [])))
     }
   }
@@ -246,6 +251,7 @@ export class Engine {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
   }): Task {
     const t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
     this.changed()
@@ -263,8 +269,34 @@ export class Engine {
         `상태를 직접 바꿨어요: ${STATUS_LABEL[before.status]} → ${STATUS_LABEL[patch.status]}`
       )
     }
+    if (before) this.logTaskChanges(before, patch)
     this.changed()
     return t
+  }
+
+  /** Hand edits of a task are written to its timeline as events (append-only), so teammates see who changed what. */
+  private logTaskChanges(before: Task, patch: Partial<Task>): void {
+    const who = this.config.memberName || 'me'
+    const show = (v: unknown): string => (v === undefined || v === null || v === '' ? '없음' : String(v))
+    const fields: [keyof Task, string][] = [
+      ['title', '제목'],
+      ['assignee', '담당'],
+      ['permission', '권한'],
+      ['risky', '위험 표시'],
+      ['projectId', '프로젝트'],
+      ['maxMinutes', '최대 시간(분)']
+    ]
+    for (const [k, label] of fields) {
+      if (!(k in patch) || patch[k] === before[k]) continue
+      this.hive.addEvent(before.id, 'changed', who, `${label}을(를) 바꿨어요: ${show(before[k])} → ${show(patch[k])}`)
+    }
+    if (patch.description !== undefined && patch.description !== before.description) {
+      this.hive.addEvent(before.id, 'changed', who, '설명을 고쳤어요')
+    }
+  }
+
+  sharedRuns(id: string): RunShared[] {
+    return this.hive.listSharedRuns(id)
   }
 
   /** Timeline (shared) + run list (this machine) for one task. */
@@ -325,8 +357,13 @@ export class Engine {
   }
 
   /** Is another task working in (or waiting for) this agent's folder right now? */
-  private folderBusy(agent: Agent): boolean {
-    return this.folders.has(normPath(resolveCwd(agent, this.config.workspace)))
+  private cwdFor(agent: Agent, taskId: string): string {
+    const t = this.hive.getTask(taskId)
+    return resolveCwd(agent, this.config.workspace, this.hive.projectDir(t?.projectId))
+  }
+
+  private folderBusy(agent: Agent, taskId: string): boolean {
+    return this.folders.has(normPath(this.cwdFor(agent, taskId)))
   }
 
   /** Run a task; if the human added instructions while it ran, apply them right after (same session if possible). */
@@ -340,7 +377,7 @@ export class Engine {
     this.running.set(id, ac)
     this.changed()
     // Two agents editing the same folder would overwrite each other and mix up their diffs.
-    const key = normPath(resolveCwd(agent, this.config.workspace))
+    const key = normPath(this.cwdFor(agent, id))
     let locked = false
     try {
       locked = await this.lockFolder(key, id, ac.signal)
@@ -372,6 +409,7 @@ export class Engine {
       stripApiKeys: this.config.stripApiKeys,
       runner: this.runner,
       defaultCwd: this.config.workspace,
+      machine: this.config.memberName,
       signal: ac.signal,
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
@@ -410,7 +448,15 @@ export class Engine {
 
     // where it works
     let cwd = this.config.workspace
-    if (agent.workDir) {
+    const projDir = this.hive.projectDir(task.projectId)
+    const proj = this.hive.getProject(task.projectId)
+    if (proj && !projDir) {
+      add('warn', `프로젝트 "${proj.name}"의 작업 폴더가 이 컴퓨터에 설정돼 있지 않아요(또는 폴더가 없어요). 프로젝트 화면에서 이 컴퓨터의 폴더를 지정하세요. 지금은 에이전트의 작업 폴더를 써요.`)
+    }
+    if (projDir) {
+      cwd = projDir
+      add('ok', `작업 폴더(프로젝트 "${proj?.name}"): ${cwd}`)
+    } else if (agent.workDir) {
       if (existsSync(agent.workDir) && statSync(agent.workDir).isDirectory()) {
         cwd = agent.workDir
         add('ok', `작업 폴더: ${cwd}`)
@@ -430,7 +476,7 @@ export class Engine {
         add('warn', '이 폴더는 git 저장소가 아니라서 바뀐 파일 목록만 볼 수 있어요. 변경 추적을 켜면 줄 단위 diff도 볼 수 있어요.', 'git-init')
         add('warn', '되돌리기용으로 실행 전에 파일을 백업해 둬요. 폴더가 아주 크면(파일 5000개 또는 100MB 초과) 백업하지 않아요.')
       }
-      if (this.folderBusy(agent)) add('warn', '다른 작업이 이 폴더에서 실행 중이에요. 그 작업이 끝나면 이어서 시작해요.')
+      if (this.folderBusy(agent, id)) add('warn', '다른 작업이 이 폴더에서 실행 중이에요. 그 작업이 끝나면 이어서 시작해요.')
     }
     const lim = this.limitFor(agent.adapter)
     if (lim) {
@@ -654,8 +700,38 @@ export class Engine {
     this.changed()
   }
 
-  addMemory(text: string): void {
-    this.hive.addMemory(this.config.memberName || 'me', text)
+  addMemory(text: string, kind: 'fixed' | 'recent' = 'recent'): void {
+    this.hive.addMemory(this.config.memberName || 'me', text, kind)
+    this.changed()
+  }
+
+  setMemoryKind(id: string, kind: 'fixed' | 'recent'): void {
+    this.hive.setMemoryKind(id, kind)
+    this.changed()
+  }
+
+  // ---- projects ----
+  saveProject(input: Partial<Project> & { name: string }): Project {
+    const p = this.hive.saveProject({ ...input, createdBy: this.config.memberName || 'me' })
+    this.changed()
+    return p
+  }
+
+  deleteProject(id: string): void {
+    this.hive.deleteProject(id)
+    this.hive.setProjectPath(id, '')
+    this.changed()
+  }
+
+  setProjectPath(id: string, path: string): void {
+    this.hive.setProjectPath(id, path)
+    this.changed()
+  }
+
+  /** Remember the result of a connection check, so teammates see whether this computer's agents work. */
+  recordCheck(adapter: Agent['adapter'], r: { ok: boolean; message: string }): void {
+    const check: ConnectionCheck = { at: new Date().toISOString(), ok: r.ok, message: r.message.slice(0, 200) }
+    for (const a of this.config.agents) if (a.adapter === adapter) this.hive.publishAgent(a, check)
     this.changed()
   }
 
@@ -678,7 +754,7 @@ export class Engine {
         if (this.running.size >= this.config.maxConcurrent) break
         const agent = this.localAgent(t.assignee)
         if (!agent || busyAgents.has(agent.id) || !this.hive.isReady(t, all)) continue
-        if (this.limitFor(agent.adapter) || this.folderBusy(agent)) continue
+        if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
         busyAgents.add(agent.id)
         void this.runTask(t.id)
       }

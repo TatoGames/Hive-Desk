@@ -32,6 +32,48 @@ export interface RosterEntry {
   owner: string
   adapter: AdapterId
   role: string
+  /** Result of the owner's latest connection check (login / CLI works). */
+  check?: ConnectionCheck
+}
+
+export interface ConnectionCheck {
+  at: string
+  ok: boolean
+  message: string
+}
+
+/** A body of work shared by the team: a briefing every run reads, and a work folder name. */
+export interface Project {
+  id: string
+  name: string
+  description: string
+  /** Fixed briefing: goals, rules, conventions. Put into every prompt of this project. */
+  briefing: string
+  /** Shared name of the work folder. Each computer maps it to its own path (see Snapshot.projectPaths). */
+  folderName: string
+  createdBy: string
+  createdAt: string
+}
+
+/** Shared, size-limited summary of a run: teammates on other computers see this (the full record stays local). */
+export interface RunShared {
+  id: string
+  taskId: string
+  agentId: string
+  machine: string
+  adapter: AdapterId
+  model?: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  outcome: RunResultKind
+  report?: Report
+  diffStat: { available: boolean; files: number; additions: number; deletions: number }
+  files: DiffFile[]
+  /** Only when small enough (see SHARED_PATCH_MAX). */
+  patch?: string
+  response?: string
+  error?: string
 }
 
 export type TaskStatus =
@@ -100,6 +142,7 @@ export interface Task {
   errorKind?: FailureKind
   /** Let the agent read secret-looking files (.env, keys). Off by default. */
   allowSecrets?: boolean
+  projectId?: string
   error?: string
   startedAt?: string
   finishedAt?: string
@@ -132,6 +175,8 @@ export type TaskEventKind =
   | 'instruction'
   /** A human undid a run. */
   | 'rollback'
+  /** A field of the task was changed by hand (assignee, title, permission ...). */
+  | 'changed'
 
 /** One line of a task's timeline. Append-only: events are never rewritten. */
 export interface TaskEvent {
@@ -327,6 +372,8 @@ export interface MemoryEntry {
   author: string
   text: string
   createdAt: string
+  /** `fixed` entries go into every prompt; the others only the most recent ones. */
+  kind?: 'fixed' | 'recent'
 }
 
 export interface Usage {
@@ -386,6 +433,9 @@ export interface Snapshot {
   waiting: Record<string, string>
   /** CLIs whose usage limit is used up on this machine, until when (key = adapter id). */
   limits: Record<string, { until: string; message: string; guessed: boolean }>
+  projects: Project[]
+  /** This computer's folder for each project (project id → absolute path). */
+  projectPaths: Record<string, string>
 }
 
 export interface EngineEvent {

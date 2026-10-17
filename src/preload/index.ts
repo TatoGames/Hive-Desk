@@ -8,6 +8,8 @@ import type {
   EngineEvent,
   LiveState,
   PermissionLevel,
+  Project,
+  RunShared,
   Preflight,
   RunRecord,
   Snapshot,
@@ -31,6 +33,7 @@ const api = {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
   }): Promise<Task> => ipcRenderer.invoke('task:create', t),
   updateTask: (id: string, patch: Partial<Task>): Promise<Task> =>
     ipcRenderer.invoke('task:update', id, patch),
@@ -72,7 +75,12 @@ const api = {
     ipcRenderer.invoke('approval:decide', id, d),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>
     ipcRenderer.invoke('message:send', from, to, body),
-  addMemory: (text: string): Promise<void> => ipcRenderer.invoke('memory:add', text),
+  addMemory: (text: string, kind?: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:add', text, kind),
+  setMemoryKind: (id: string, kind: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:kind', id, kind),
+  saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
+  deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
+  setProjectPath: (id: string, path: string): Promise<void> => ipcRenderer.invoke('project:path', id, path),
+  sharedRuns: (id: string): Promise<RunShared[]> => ipcRenderer.invoke('task:shared-runs', id),
   deleteMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
   detectAdapters: (): Promise<AdapterInfo[]> => ipcRenderer.invoke('adapters:detect'),
   installCli: (id: Agent['adapter']): Promise<{ ok: boolean; message: string }> =>

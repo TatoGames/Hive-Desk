@@ -87,6 +87,7 @@ export default function Board({
                   live={output[t.id]}
                   progress={live[t.id]}
                   workDir={workDirOf(t)}
+                  projectName={snap.projects.find((p) => p.id === t.projectId)?.name}
                   waitingFor={snap.tasks.find((x) => x.id === snap.waiting[t.id])?.title}
                   limit={snap.limits[snap.roster.find((r) => r.id === t.assignee)?.adapter ?? '']}
                   adapter={snap.roster.find((r) => r.id === t.assignee)?.adapter}
@@ -129,8 +130,13 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const [dep, setDep] = useState('')
   const [more, setMore] = useState(false)
   const [perm, setPerm] = useState<PermissionLevel | undefined>(undefined)
+  const [project, setProject] = useState('')
   const [items, setItems] = useState<Dropped[]>([])
   const [problems, setProblems] = useState<string[]>([])
+
+  const picked = snap.roster.find((r) => r.id === assignee)
+  const badCheck =
+    picked?.check && !picked.check.ok && Date.now() - new Date(picked.check.at).getTime() < 24 * 3600e3 ? picked : null
 
   const submit = async (): Promise<void> => {
     if (!title.trim()) return
@@ -140,7 +146,8 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
       assignee: assignee || null,
       risky,
       dependsOn: dep ? [dep] : [],
-      permission: perm
+      permission: perm,
+      projectId: project || undefined
     })
     // materials are copied into the new task's folder (folders become reference folders)
     const errs = items.length ? await sendDropped(t.id, items) : []
@@ -171,6 +178,16 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
             </option>
           ))}
         </select>
+        {!!snap.projects.length && (
+          <select value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">프로젝트 없음</option>
+            {snap.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
         <button className="ghost" onClick={() => setMore(!more)}>
           {more ? '간단히' : '자세히'}
         </button>
@@ -178,6 +195,11 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
           추가
         </button>
       </div>
+      {badCheck && (
+        <div className="warn-text small">
+          ⚠ {badCheck.name}({badCheck.owner})의 최근 연결 확인이 실패했어요: {badCheck.check?.message} — 배정해도 실행되지 않을 수 있어요.
+        </div>
+      )}
       {more && (
         <div className="more">
           <textarea
@@ -240,6 +262,7 @@ function Card(props: {
   live?: string
   progress?: LiveSummary
   workDir: string
+  projectName?: string
   /** Title of the task this one waits for (same work folder). */
   waitingFor?: string
   limit?: { until: string; message: string; guessed: boolean }
@@ -260,6 +283,7 @@ function Card(props: {
       <div className="card-top" onClick={props.onToggle}>
         <div className="title">
           {t.risky && <span className="tag warn">위험</span>}
+          {props.projectName && <span className="tag">{props.projectName}</span>}
           {t.title}
         </div>
         <div className="meta">

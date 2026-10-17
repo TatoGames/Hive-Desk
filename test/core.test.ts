@@ -413,9 +413,9 @@ describe('engine', () => {
     const t = eng.createTask({ title: 'x' })
     eng.updateTask(t.id, { status: 'failed' })
     eng.updateTask(t.id, { status: 'todo' })
-    eng.updateTask(t.id, { title: 'renamed' }) // no status change → no event
+    eng.updateTask(t.id, { title: 'renamed' }) // rename → a 'changed' event (E3)
     const h = eng.taskHistory(t.id)
-    expect(h.events.map((e) => e.kind)).toEqual(['created', 'status', 'status'])
+    expect(h.events.map((e) => e.kind)).toEqual(['created', 'status', 'status', 'changed'])
     expect(h.events[2].text).toBe('상태를 직접 바꿨어요: 실패 → 할 일')
     expect(h.runs).toEqual([])
     expect(eng.runDetail(t.id, 'nope')).toBeNull()

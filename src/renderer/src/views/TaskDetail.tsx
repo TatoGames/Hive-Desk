@@ -35,7 +35,8 @@ const EVENT_LABEL: Record<TaskEventKind, string> = {
   need: '자료 요청',
   reply: '답변',
   instruction: '추가 지시',
-  rollback: '되돌리기'
+  rollback: '되돌리기',
+  changed: '변경'
 }
 
 const OUTCOME_LABEL: Record<RunResultKind, string> = {

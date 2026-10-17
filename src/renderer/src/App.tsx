@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
+import Projects from './views/Projects'
 import Inbox from './views/Inbox'
 import Approvals from './views/Approvals'
 import Settings from './views/Settings'
@@ -47,7 +48,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'board' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'board' | 'projects' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -73,6 +74,7 @@ export default function App(): JSX.Element {
 
   const tabs: { id: Tab; label: string; badge?: number }[] = [
     { id: 'board', label: '태스크 보드' },
+    { id: 'projects', label: '프로젝트' },
     { id: 'agents', label: '에이전트' },
     { id: 'inbox', label: '메시지 · 메모리', badge: unread },
     { id: 'approvals', label: '승인·확인·자료 요청', badge: pending },
@@ -122,6 +124,7 @@ export default function App(): JSX.Element {
           </div>
         )}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
+        {current === 'projects' && <Projects snap={snap} />}
         {current === 'agents' && <Agents snap={snap} goBoard={() => setTab('board')} />}
         {current === 'inbox' && <Inbox snap={snap} />}
         {current === 'approvals' && <Approvals snap={snap} />}

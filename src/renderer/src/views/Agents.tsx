@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AdapterId, AdapterInfo, Agent, Snapshot } from '@shared/types'
+import { fmtTime } from '../store'
 import { ConfirmButton } from './Materials'
 
 const ADAPTER_LABEL: Record<AdapterId, string> = {
@@ -93,6 +94,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
                   </div>
                   <div className="muted small">{a.role || '역할 미지정'}</div>
                   <div className="muted small">작업 폴더: {a.workDir || '(hive 폴더)'}</div>
+                  <CheckLine check={snap.roster.find((r) => r.id === a.id)?.check} />
                 </div>
                 <div className="usage">
                   <Meter label="오늘 실행" value={u.runs} max={a.dailyRunLimit} unit="회" />
@@ -126,6 +128,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
                 <div className="muted small">
                   {r.owner} · {r.role || '역할 미지정'}
                 </div>
+                <CheckLine check={r.check} />
               </div>
             ))}
           </div>
@@ -133,6 +136,16 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
       )}
 
       {draft && <AgentDialog draft={draft} onClose={() => setDraft(null)} />}
+    </div>
+  )
+}
+
+/** Last connection check of an agent's CLI: when, and whether it worked. */
+export function CheckLine({ check }: { check?: { at: string; ok: boolean; message: string } }): JSX.Element {
+  if (!check) return <div className="muted small">연결 확인 기록 없음</div>
+  return (
+    <div className={'small ' + (check.ok ? 'muted' : 'warn-text')}>
+      연결 확인 {fmtTime(check.at)} · {check.ok ? '정상' : '문제 있음 — ' + check.message}
     </div>
   )
 }

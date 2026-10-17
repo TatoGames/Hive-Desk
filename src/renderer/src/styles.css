@@ -234,3 +234,4 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .fail .fold { margin: 0; }
 .review { border-color: var(--accent, #d98e1f); }
 .card .report-row { grid-template-columns: 1fr; gap: 2px; }
+.briefing { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; margin: 8px 0; }
