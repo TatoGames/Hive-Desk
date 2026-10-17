@@ -25,6 +25,7 @@ function gitRepo(name = 'repo'): { work: string; g: (...a: string[]) => string }
   const g = (...a: string[]): string =>
     execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: work }).toString()
   g('init', '-b', 'main')
+  g('config', 'core.autocrlf', 'false') // Windows runners default to CRLF checkouts
   writeFileSync(join(work, 'a.txt'), 'original\n')
   writeFileSync(join(work, 'gone.txt'), 'will be deleted\n')
   g('add', '-A')
