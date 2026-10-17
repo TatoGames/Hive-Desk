@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -86,6 +86,11 @@ describe('markers & adapters', () => {
     expect(x.args[x.args.length - 1]).toBe('-')
     const a = buildCommand(makeAgent('a', { name: 'y', adapter: 'agy' }))
     expect(a.command).toBe('agy')
+    if (process.platform !== 'win32') {
+      // agy gets the prompt as the -p value, not via stdin
+      expect(a.args[a.args.length - 1]).toBe('-p')
+      expect(a.promptArg).toBe(true)
+    }
     expect(() => buildCommand(makeAgent('a', { name: 'z', adapter: 'custom' }))).toThrow()
   })
 
@@ -95,6 +100,18 @@ describe('markers & adapters', () => {
     expect(env.OPENAI_API_KEY).toBeUndefined()
     expect(env.PATH).toBe('/bin')
     expect(cleanEnv({ ANTHROPIC_API_KEY: 'k' }, false).ANTHROPIC_API_KEY).toBe('k')
+  })
+
+  it('passes the prompt as an argument when the adapter asks for it', async () => {
+    const script = join(dir, 'echo-args.cjs')
+    writeFileSync(script, "let i='';process.stdin.on('data',d=>i+=d);process.stdin.on('end',()=>console.log(JSON.stringify({args:process.argv.slice(2),stdin:i})))")
+    const r = await runCli(
+      { command: 'node', args: [script, '-p'], promptArg: true },
+      { cwd: dir, prompt: 'line one\n"quoted" line two', timeoutMs: 10000, env: process.env }
+    )
+    const out = JSON.parse(r.stdout)
+    if (process.platform === 'win32') expect(out.stdin).toContain('line one')
+    else expect(out).toEqual({ args: ['-p', 'line one\n"quoted" line two'], stdin: '' })
   })
 
   it('kills a hanging CLI on timeout', async () => {
