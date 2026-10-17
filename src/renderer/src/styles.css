@@ -93,8 +93,10 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .new-task { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; }
 .new-task .more { margin-top: 10px; display: grid; gap: 8px; }
 
-.board { display: grid; grid-template-columns: repeat(7, minmax(200px, 1fr)); gap: 12px; align-items: start; overflow-x: auto; }
-.col { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; min-height: 140px; }
+.board { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.col { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; min-height: 60px; flex: 1 1 220px; min-width: 200px; }
+.col.collapsed { flex: 0 0 auto; min-width: 0; min-height: 0; opacity: 0.65; }
+.col.collapsed .empty { display: none; }
 .col h2 { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); text-transform: none; }
 .col-awaiting_approval h2 { color: var(--warn); }
 .col-needs_input h2 { color: var(--warn); }
@@ -259,3 +261,35 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .company-card .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
 .company-card .stats > div { display: flex; flex-direction: column; }
 .company-card .num { font-size: 24px; font-weight: 700; }
+
+.filters { margin: 10px 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 4px 12px; }
+.seg button.on { background: var(--accent, #d98a1f); color: #fff; }
+.office .boardbox { margin: 8px 0; }
+.ticker { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; margin: 8px 0 14px; max-height: 150px; overflow: auto; }
+.ticker > div { cursor: pointer; padding: 1px 0; }
+.office-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .office-grid { grid-template-columns: 1fr; } }
+.floor { position: relative; }
+.floor .lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; color: var(--accent, #d98a1f); z-index: 2; overflow: visible; }
+.floor .lines path { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-dasharray: 5 4; opacity: 0.75; }
+.ofc-unit { margin-bottom: 12px; }
+.ofc-head { display: flex; gap: 8px; align-items: center; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; margin-bottom: 8px; }
+.emps { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.emp { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 5px; }
+.emp.vacant { opacity: 0.55; border-style: dashed; }
+.emp-top { display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+.state { color: #fff; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 99px; white-space: nowrap; }
+.ico { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--line); font-size: 10px; font-weight: 700; }
+.emp-task { cursor: pointer; background: var(--panel-2); border-radius: 8px; padding: 6px 8px; }
+.pbar { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; margin: 4px 0 2px; min-width: 60px; }
+.pbar > div { height: 100%; background: var(--accent, #d98a1f); }
+.queue { display: flex; flex-wrap: wrap; gap: 4px; }
+.qchip { background: var(--panel-2); border: 1px dashed var(--line); border-radius: 6px; padding: 1px 6px; font-size: 11px; cursor: grab; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.chip-emp { display: inline-flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.chip-emp i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.tree { position: sticky; top: 12px; max-height: 80vh; overflow: auto; }
+.tnode { padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.tnode.root { cursor: default; }

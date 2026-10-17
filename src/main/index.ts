@@ -151,6 +151,8 @@ function registerIpc(): void {
   ipcMain.handle('conn:auto-preview', () => engine.autoConnectPreview())
   ipcMain.handle('conn:auto-apply', (_e, rows) => engine.autoConnectApply(rows))
   ipcMain.handle('conn:order', (_e, order: string[], adapter?: string) => engine.setCompanyOrder(order, adapter))
+  ipcMain.handle('office:reassign', (_e, id: string, agentId: string) => engine.reassignTask(id, agentId))
+  ipcMain.handle('office:feed', () => engine.officeFeed())
   ipcMain.handle('agenda:open', (_e, title: string, body: string) => engine.openAgenda(title, body))
   ipcMain.handle('agenda:decide', (_e, id: string, choice: number, note?: string) => engine.decideAgenda(id, choice, note))
   ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))

@@ -90,6 +90,8 @@ const api = {
   autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
   autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
   setCompanyOrder: (order: string[], adapter?: string): Promise<void> => ipcRenderer.invoke('conn:order', order, adapter),
+  reassignTask: (id: string, agentId: string): Promise<Task> => ipcRenderer.invoke('office:reassign', id, agentId),
+  officeFeed: (): Promise<{ at: string; taskId: string; taskTitle: string; actor: string; text: string }[]> => ipcRenderer.invoke('office:feed'),
   decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
     ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>

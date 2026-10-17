@@ -426,6 +426,34 @@ export class Engine {
     this.changed()
   }
 
+  // ---- office: reassign and the news board ----
+  /** Hand a task that has not started to someone else (a running task cannot be moved). */
+  reassignTask(id: string, agentId: string): Task {
+    const t = this.hive.getTask(id)
+    if (!t) throw new Error('없는 업무예요.')
+    if (this.running.has(id) || t.status === 'running' || t.status === 'in_review') throw new Error('실행 중인 업무는 옮길 수 없어요. 끝난 뒤나 멈춘 뒤에 옮겨 주세요.')
+    if (t.status === 'done' || t.status === 'delegated') throw new Error('이미 끝났거나 하위 업무로 나뉜 업무는 옮길 수 없어요.')
+    const target = this.hive.listRoster().find((r) => r.id === agentId)
+    if (!target) throw new Error('없는 직원이에요.')
+    if (t.kind === 'plan' && !['lead', 'coo'].includes(target.job ?? '')) throw new Error('계획을 세우는 업무는 관리자에게만 맡길 수 있어요.')
+    if (t.assignee === agentId) return t
+    return this.updateTask(id, { assignee: agentId, ...(t.status === 'failed' ? { status: 'todo' as const } : {}) })
+  }
+
+  /** The latest things that happened in this company, newest first (one line each). */
+  officeFeed(limit = 40): { at: string; taskId: string; taskTitle: string; actor: string; text: string }[] {
+    const recent = this.hive
+      .listTasks()
+      .filter((t) => !t.hidden)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 25)
+    const nameOf = (id: string): string => this.hive.listRoster().find((r) => r.id === id)?.name ?? id
+    const all = recent.flatMap((t) =>
+      this.hive.listEvents(t.id).map((e) => ({ at: e.at, taskId: t.id, taskTitle: t.title, actor: nameOf(e.actor), text: e.text }))
+    )
+    return all.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit)
+  }
+
   // ---- connections, model agents, hiring ----
   private catalogOf(modelId: string): ModelEntry | undefined {
     return this.catalog().find((m) => m.id === modelId)
