@@ -477,3 +477,12 @@ describe('one-click setup', () => {
     expect(missing).toMatchObject({ ok: false, needsLogin: false })
   })
 })
+
+describe('task order', () => {
+  it('keeps creation order even for tasks made in the same millisecond', () => {
+    const h = new Hive(join(dir, 'hive-order'))
+    const titles = Array.from({ length: 30 }, (_, i) => 'sub ' + i)
+    for (const t of titles) h.createTask({ title: t, createdBy: 'minu' })
+    expect(h.listTasks().map((t) => t.title)).toEqual(titles)
+  })
+})

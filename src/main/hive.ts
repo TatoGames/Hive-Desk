@@ -70,6 +70,17 @@ function now(): string {
   return new Date().toISOString()
 }
 
+let lastCreated = 0
+/**
+ * Creation time that never repeats within this process. Lists are ordered by `createdAt`, so two
+ * items made in the same millisecond (e.g. the sub-tasks of one plan) would otherwise come back
+ * in random order.
+ */
+function createdNow(): string {
+  lastCreated = Math.max(Date.now(), lastCreated + 1)
+  return new Date(lastCreated).toISOString()
+}
+
 function writeJson(file: string, data: unknown): void {
   const tmp = file + '.' + randomBytes(3).toString('hex') + '.tmp'
   writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8')
@@ -150,7 +161,7 @@ export class Hive {
       risky: !!input.risky,
       dependsOn: input.dependsOn ?? [],
       createdBy: input.createdBy,
-      createdAt: now(),
+      createdAt: createdNow(),
       updatedAt: now(),
       cleared: [],
       notes: [],
