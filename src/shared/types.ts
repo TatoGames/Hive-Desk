@@ -71,6 +71,8 @@ export interface Project {
   briefing: string
   /** Shared name of the work folder. Each computer maps it to its own path (see Snapshot.projectPaths). */
   folderName: string
+  /** Most AI runs the project may use (0 = no limit). */
+  runBudget?: number
   createdBy: string
   createdAt: string
 }
@@ -104,6 +106,10 @@ export type TaskStatus =
   | 'running'
   /** The run finished and changed things; a human looks at the result before it counts as done. */
   | 'needs_review'
+  /** Delegated work waits for another agent (on a different model) to check it. */
+  | 'in_review'
+  /** A manager split the task up; it finishes when its sub-tasks are done. */
+  | 'delegated'
   | 'done'
   | 'failed'
 
@@ -163,6 +169,29 @@ export interface Task {
   /** Let the agent read secret-looking files (.env, keys). Off by default. */
   allowSecrets?: boolean
   projectId?: string
+  // ---- delegation (stage 3) ----
+  /** What this task is in the delegation flow. Missing = a plain task. */
+  kind?: TaskKind
+  parentId?: string
+  /** 0 = what the board handed over; each split adds one. */
+  depth?: number
+  /** Runs without the global auto-run switch (the delegation tree drives itself). */
+  auto?: boolean
+  /** The board named this manager itself: its first plan goes to the board. */
+  directed?: boolean
+  /** Completion criteria the planner wrote for this sub-task. */
+  criteria?: string
+  plan?: Plan
+  /** For a review task: the task (work or plan) being checked. */
+  reviewOf?: string
+  /** For a work task: how its cross review stands. */
+  reviewState?: ReviewState
+  /** Planning attempts rejected for form/size (before a plan is accepted). */
+  planTries?: number
+  /** Not shown on the board (committee runs). */
+  hidden?: boolean
+  /** The agenda a committee run belongs to. */
+  agendaId?: string
   error?: string
   startedAt?: string
   finishedAt?: string
@@ -175,6 +204,46 @@ export interface Report {
   verify: string
   risks: string
   next: string
+}
+
+export type TaskKind = 'work' | 'plan' | 'review' | 'integrate' | 'committee'
+
+/** One sub-task a manager proposes. */
+export interface SubtaskSpec {
+  title: string
+  /** Agent id (from the team list the manager was given). */
+  assignee: string
+  /** Completion criteria. */
+  done: string
+  /** 1-based numbers of sub-tasks that must finish first. */
+  after: number[]
+}
+
+export type PlanStatus = 'awaiting_board' | 'awaiting_superior' | 'approved' | 'rejected'
+
+export interface Plan {
+  items: SubtaskSpec[]
+  /** Expected number of AI runs (work + reviews + planning). */
+  estimateRuns: number
+  flags: string[]
+  status: PlanStatus
+  approver: 'board' | 'superior' | 'auto'
+  /** Why the board has to decide ("큰 일" reasons). */
+  boardReasons: string[]
+  /** How often a plan for this task was sent back. */
+  rejections: number
+  childIds?: string[]
+  note?: string
+}
+
+export interface ReviewState {
+  status: 'pending' | 'passed' | 'changes' | 'skipped'
+  /** How many times the reviewer sent it back to the same worker. */
+  round: number
+  /** After repeated rejections the task moved up to the unit's lead. */
+  escalations: number
+  by?: string
+  note?: string
 }
 
 export type FailureKind = 'login' | 'limit' | 'permission' | 'not_found' | 'network' | 'timeout' | 'unknown'
@@ -197,6 +266,8 @@ export type TaskEventKind =
   | 'rollback'
   /** A field of the task was changed by hand (assignee, title, permission ...). */
   | 'changed'
+  /** The delegation engine did something (plan, review, escalation ...). */
+  | 'delegation'
 
 /** One line of a task's timeline. Append-only: events are never rewritten. */
 export interface TaskEvent {
@@ -363,7 +434,7 @@ export interface TaskHistory {
   runs: RunSummary[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan'
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface Approval {
@@ -376,6 +447,8 @@ export interface Approval {
   createdAt: string
   decidedAt?: string
   decidedBy?: string
+  /** The decider's comment (a rejected plan's reason). */
+  note?: string
 }
 
 export interface Message {
@@ -460,7 +533,7 @@ export interface Snapshot {
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output' | 'setup' | 'activity'
+  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify'
   taskId?: string
   /** For `activity`: new feed lines and the up-to-date numbers. */
   events?: ActivityEvent[]
@@ -468,6 +541,9 @@ export interface EngineEvent {
   /** For `setup`: which CLI the installer output belongs to. */
   adapter?: AdapterId
   chunk?: string
+  /** For `notify`: a desktop notification. */
+  title?: string
+  body?: string
 }
 
 export interface SetupCheck {
@@ -512,4 +588,38 @@ export interface CompanySnapshot {
   /** [사용 확인] results on this computer (model id → result). */
   availability: Record<string, ModelAvailability>
   aptitude: AptitudeRecord[]
+  finals: FinalReport[]
+}
+
+export interface ReportNode {
+  taskId: string
+  title: string
+  kind: TaskKind | 'work'
+  agentId: string | null
+  agentName: string
+  job?: string
+  model: string
+  status: TaskStatus
+  runs: number
+  minutes: number
+  files: DiffFile[]
+  report?: Report
+  /** Cross review result in one line. */
+  review?: string
+  children: ReportNode[]
+}
+
+/** What the board reads at the end of a delegated job. */
+export interface FinalReport {
+  id: string
+  title: string
+  createdAt: string
+  summary: string
+  tree: ReportNode
+  totals: { runs: number; minutes: number; files: number; additions: number; deletions: number; tasks: number }
+  verification: string[]
+  risks: string[]
+  next: string[]
+  /** The board's decision on the report. */
+  decision?: { at: string; by: string; accepted: boolean; note?: string }
 }

@@ -24,6 +24,7 @@ import type {
   Project,
   RunShared,
   ConnectionCheck,
+  FinalReport,
   RosterEntry,
   RunRecord,
   RunSummary,
@@ -34,7 +35,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -58,7 +59,8 @@ export function slug(s: string): string {
 const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   'risky-task': '위험 작업',
   budget: '예산',
-  'agent-request': '에이전트 요청'
+  'agent-request': '에이전트 요청',
+  plan: '분배 계획'
 }
 
 function now(): string {
@@ -319,11 +321,11 @@ export class Hive {
   }
 
   /** Approve → task goes back to `todo` with the kind cleared. Reject → task fails. */
-  decideApproval(id: string, decision: 'approved' | 'rejected', by: string): Approval {
+  decideApproval(id: string, decision: 'approved' | 'rejected', by: string, note?: string): Approval {
     const a = readJson<Approval>(this.p('approvals', id + '.json'))
     if (!a) throw new Error('approval not found: ' + id)
     if (a.status !== 'pending') return a
-    const next: Approval = { ...a, status: decision, decidedAt: now(), decidedBy: by }
+    const next: Approval = { ...a, status: decision, decidedAt: now(), decidedBy: by, ...(note ? { note } : {}) }
     writeJson(this.p('approvals', id + '.json'), next)
     this.addEvent(
       a.taskId,
@@ -333,7 +335,8 @@ export class Hive {
     )
 
     const task = this.getTask(a.taskId)
-    if (task) {
+    // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
+    if (task && a.kind !== 'plan') {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'
@@ -456,6 +459,7 @@ export class Hive {
       description: (input.description ?? cur?.description ?? '').trim(),
       briefing: (input.briefing ?? cur?.briefing ?? '').trim(),
       folderName: (input.folderName ?? cur?.folderName ?? '').trim(),
+      ...((input.runBudget ?? cur?.runBudget) ? { runBudget: input.runBudget ?? cur?.runBudget } : {}),
       createdBy: cur?.createdBy ?? input.createdBy,
       createdAt: cur?.createdAt ?? now()
     }
@@ -550,6 +554,19 @@ export class Hive {
 
   listAptitude(): AptitudeRecord[] {
     return listJson<AptitudeRecord>(this.p('aptitude'))
+  }
+
+  // ---- final reports (shared) ----
+  getFinal(taskId: string): FinalReport | null {
+    return readJson<FinalReport>(this.p('finals', taskId + '.json'))
+  }
+
+  saveFinal(r: FinalReport): void {
+    writeJson(this.p('finals', r.id + '.json'), r)
+  }
+
+  listFinals(): FinalReport[] {
+    return listJson<FinalReport>(this.p('finals')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
 
   // ---- model availability on this computer ----

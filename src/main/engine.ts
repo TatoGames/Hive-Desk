@@ -23,6 +23,7 @@ import type {
 import type { LiveRun } from './activity'
 import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
 import { checkCli } from './setup'
+import { Delegation } from './delegation'
 import { newId } from './hive'
 import { STAGE_DIR } from './staging'
 import { attachmentAdvice } from './attachAdvice'
@@ -60,6 +61,8 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   needs_input: '자료 요청',
   running: '실행 중',
   needs_review: '사람 확인',
+  in_review: '교차 검토',
+  delegated: '위임 진행',
   done: '완료',
   failed: '실패'
 }
@@ -80,6 +83,7 @@ export class Engine {
   /** Finishing off runs that were cut short by the last shutdown (tests wait for it). */
   recovering: Promise<void> = Promise.resolve()
   private timer: NodeJS.Timeout | null = null
+  readonly delegation: Delegation
   private syncTimer: NodeJS.Timeout | null = null
   private ticking = false
 
@@ -89,6 +93,19 @@ export class Engine {
     private runner: Runner = runCli,
     private home: string = homedir()
   ) {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this
+    this.delegation = new Delegation({
+      // the hive is replaced when the workspace folder changes, so always read the current one
+      get hive(): Hive {
+        return self.hive
+      },
+      me: () => self.config.memberName || 'me',
+      catalog: () => self.catalog(),
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body),
+      aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d)
+    })
     this.config = loadConfig(configFile, this.home)
     mkdirSync(this.config.workspace, { recursive: true })
     this.hive = new Hive(this.config.workspace)
@@ -192,6 +209,11 @@ export class Engine {
     }
   }
 
+  /** A desktop notification (the main process shows it when the app allows). */
+  notify(title: string, body: string): void {
+    this.emit({ type: 'notify', title, body })
+  }
+
   private changed(): void {
     this.emit({ type: 'changed' })
   }
@@ -217,7 +239,8 @@ export class Engine {
         seats: this.hive.listSeats(),
         catalog: this.catalog(),
         availability: this.hive.availability(),
-        aptitude: this.hive.listAptitude()
+        aptitude: this.hive.listAptitude(),
+        finals: this.hive.listFinals()
       },
       projects: this.hive.listProjects(),
       projectPaths: this.hive.projectPaths(),
@@ -285,8 +308,20 @@ export class Engine {
     permission?: PermissionLevel
     refDirs?: string[]
     projectId?: string
+    /** Hand the job to the company: a manager plans it, workers do it, another model reviews it. */
+    delegate?: boolean
+    /** Hand it to the lead of this unit (implies delegate). */
+    unitId?: string
   }): Task {
-    const t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
+    let t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
+    if (input.delegate || input.unitId) {
+      try {
+        t = this.delegation.begin(t, { unitId: input.unitId, delegate: true })
+      } catch (e) {
+        this.hive.deleteTask(t.id)
+        throw e
+      }
+    }
     this.changed()
     return t
   }
@@ -427,6 +462,8 @@ export class Engine {
         })
         outcome = await this.runOnce(agent, id, ac)
       }
+      // delegation: what a plan / review / work run produced decides what happens next
+      if (!ac.signal.aborted) this.delegation.onRunFinished(id)
       return outcome
     } finally {
       if (locked) this.unlockFolder(key)
@@ -447,6 +484,7 @@ export class Engine {
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
+      promptExtras: (task, a) => this.delegation.promptExtras(task, a),
       onRunEnd: ({ agent: a, taskId, ms, result }) =>
         this.noteAptitude(a, taskId, {
           runs: 1,
@@ -696,12 +734,15 @@ export class Engine {
       this.hive.updateTask(id, { status: 'done' })
       this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
       this.noteTaskAptitude(t, { approved: 1 })
+      this.delegation.recordDecision(id, true, by)
     } else {
       const body = text.trim()
       if (!body) return
       this.hive.updateTask(id, { status: 'todo', reply: body })
       this.hive.addEvent(id, 'review', by, `수정을 요청했어요: ${body}`)
       this.noteTaskAptitude(t, { changes: 1 })
+      this.delegation.recordDecision(id, false, by, body)
+      if (t.kind === 'integrate') this.delegation.reopenIntegration(id)
       if (this.localAgent(t.assignee)) void this.runTask(id)
     }
     this.changed()
@@ -733,8 +774,14 @@ export class Engine {
     return r
   }
 
-  decideApproval(id: string, decision: 'approved' | 'rejected'): void {
-    this.hive.decideApproval(id, decision, this.config.memberName || 'me')
+  decideApproval(id: string, decision: 'approved' | 'rejected', note?: string): void {
+    const by = this.config.memberName || 'me'
+    const a = this.hive.listApprovals().find((x) => x.id === id)
+    this.hive.decideApproval(id, decision, by, note)
+    if (a?.kind === 'plan' && a.status === 'pending') {
+      if (decision === 'approved') this.delegation.approvePlan(a.taskId, by)
+      else this.delegation.rejectPlan(a.taskId, note?.trim() || '이사회가 계획을 반려했어요.', by, true)
+    }
     this.changed()
   }
 
@@ -970,6 +1017,20 @@ export class Engine {
     return Object.keys(picks).length
   }
 
+  /** Same as noteAptitude, for an agent that may live on another computer (only the roster is known). */
+  noteAptitudeFor(agentId: string | null, taskId: string, d: { approved?: number; changes?: number }): void {
+    if (!agentId) return
+    const local = this.localAgent(agentId)
+    if (local) return this.noteAptitude(local, taskId, d)
+    const r = this.hive.listRoster().find((x) => x.id === agentId)
+    if (!r) return
+    this.noteAptitude(
+      { id: r.id, name: r.name, owner: r.owner, adapter: r.adapter, role: r.role, workDir: '', extraArgs: '', dailyRunLimit: 0, dailyMinuteLimit: 0, timeoutMinutes: 15, requireApproval: false, model: r.model, job: r.job, ...(r.modelId ? { modelRef: { id: r.modelId, pin: 'pinned' as const } } : {}) },
+      taskId,
+      d
+    )
+  }
+
   /** Review results count for the model that did the work (the task's assignee, if it is one of ours). */
   private noteTaskAptitude(t: Task, d: { approved?: number; changes?: number }): void {
     const a = this.localAgent(t.assignee)
@@ -1045,7 +1106,7 @@ export class Engine {
   // ---- auto-run ----
   /** Start ready tasks assigned to local agents, up to maxConcurrent. */
   async tick(): Promise<void> {
-    if (this.ticking || !this.config.autoRun) return
+    if (this.ticking) return
     this.ticking = true
     try {
       const all = this.hive.listTasks()
@@ -1054,6 +1115,7 @@ export class Engine {
       )
       for (const t of all) {
         if (this.running.size >= this.config.maxConcurrent) break
+        if (!this.config.autoRun && !t.auto) continue
         const agent = this.localAgent(t.assignee)
         if (!agent || busyAgents.has(agent.id) || !this.hive.isReady(t, all)) continue
         if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue

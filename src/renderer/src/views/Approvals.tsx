@@ -5,7 +5,8 @@ import { NeedBox, ReviewBox } from './Materials'
 const KIND: Record<ApprovalKind, string> = {
   'risky-task': '위험 태스크',
   budget: '예산 초과',
-  'agent-request': '에이전트 요청'
+  'agent-request': '에이전트 요청',
+  plan: '분배 계획'
 }
 
 export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {

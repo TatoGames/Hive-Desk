@@ -115,6 +115,8 @@ export function buildPrompt(opts: {
   maxMemory?: number
   /** Where the attachments were copied for this run (see staging.ts). */
   staged?: Map<string, string>
+  /** Extra instructions of a delegation step (planner / reviewer / integrator). */
+  extras?: string[]
 }): string {
   const { agent, task, hive } = opts
   const mem = hive.memoryForPrompt(opts.maxMemory ?? 20)
@@ -169,6 +171,7 @@ export function buildPrompt(opts: {
     lines.push('', '## Teammates you can message')
     for (const r of roster) lines.push(`- ${r.id} (${r.role || r.adapter})`)
   }
+  if (opts.extras?.length) lines.push(...opts.extras)
   lines.push(
     '',
     '## Reply protocol',
@@ -218,6 +221,8 @@ export interface RunnerDeps {
   humanReview?: HumanReview
   /** The CLI reported that its usage limit is used up. */
   onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
+  /** Extra prompt lines for delegation steps (see delegation.ts). */
+  promptExtras?: (task: Task, agent: Agent) => string[]
   /** A run ended: feeds the aptitude record. `pending` = waits for a human check. */
   onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'other' }) => void
   /** Name of this computer's member, shown on shared run summaries. */
@@ -372,7 +377,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const staged = stageAttachments(task, hive, cwd)
   const prompt = resumeSession
     ? buildFollowUp(task, hive, staged.paths)
-    : buildPrompt({ agent, task, hive, staged: staged.paths })
+    : buildPrompt({ agent, task, hive, staged: staged.paths, extras: deps.promptExtras?.(task, agent) })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
   let built
@@ -642,9 +647,10 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'needs_input'
   }
 
-  const review = needsReview(deps.humanReview ?? 'off', level, diff)
+  // delegated tasks are checked by another model instead of waiting for a human
+  const review = task.kind ? false : needsReview(deps.humanReview ?? 'off', level, diff)
   const lastRunId = saveRun('done', { report: parsed.report })
-  deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: review ? 'pending' : 'approved' })
+  deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: review || task.kind ? 'pending' : 'approved' })
   if (review) {
     hive.addEvent(task.id, 'review', 'system', `사람 확인을 기다려요: ${reviewReason(diff)}`, runId)
   }

@@ -1,0 +1,776 @@
+import {
+  FLAG_LABEL,
+  LIMITS,
+  estimateRuns,
+  parsePlan,
+  parseVerdict,
+  validateAfter
+} from '../shared/delegation'
+import {
+  TIER_LABEL,
+  jobLabel,
+  modelLabel,
+  tierRank,
+  type Company,
+  type ModelEntry,
+  type OrgUnit,
+  type Seat
+} from '../shared/company'
+import type {
+  Agent,
+  FinalReport,
+  Plan,
+  ReportNode,
+  RosterEntry,
+  Task
+} from '../shared/types'
+import type { Hive } from './hive'
+
+export interface DelegationCtx {
+  hive: Hive
+  me: () => string
+  catalog: () => ModelEntry[]
+  changed: () => void
+  notify: (title: string, body: string) => void
+  /** Credit/charge the model that did a task (cross review result). */
+  aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
+}
+
+const MANAGER_JOBS = ['lead', 'coo']
+const isManagerJob = (j?: string): boolean => !!j && MANAGER_JOBS.includes(j)
+
+/**
+ * The delegation engine (design ch.4–5, 9): requirement check and distribution plan by a manager,
+ * approval by the right level, splitting into sub-tasks, cross review by a different model,
+ * roll-up and the final report. Every step is an ordinary task run by the normal runner;
+ * this class only reads what a run produced and decides what happens next.
+ */
+export class Delegation {
+  constructor(private c: DelegationCtx) {}
+
+  // ---- the organisation, as the engine needs it ----
+  private get company(): Company | null {
+    return this.c.hive.getCompany()
+  }
+  private get units(): OrgUnit[] {
+    return this.c.hive.listUnits()
+  }
+  private get seats(): Seat[] {
+    return this.c.hive.listSeats()
+  }
+  private roster(): RosterEntry[] {
+    return this.c.hive.listRoster()
+  }
+  private rosterOf(id: string | null | undefined): RosterEntry | undefined {
+    return id ? this.roster().find((r) => r.id === id) : undefined
+  }
+  seatOf(agentId: string | null | undefined): Seat | undefined {
+    return agentId ? this.seats.find((s) => s.agentId === agentId) : undefined
+  }
+  private subtree(unitId: string): Set<string> {
+    const units = this.units
+    const out = new Set<string>([unitId])
+    const walk = (id: string): void => {
+      for (const u of units) if (u.parentId === id && !out.has(u.id)) (out.add(u.id), walk(u.id))
+    }
+    walk(unitId)
+    return out
+  }
+  isManager(agentId: string | null | undefined): boolean {
+    return isManagerJob(this.seatOf(agentId)?.job)
+  }
+  cooAgent(): string | null {
+    return this.seats.find((s) => s.job === 'coo' && s.agentId)?.agentId ?? null
+  }
+  leadOfUnit(unitId: string): string | null {
+    return this.seats.find((s) => s.unitId === unitId && s.job === 'lead' && s.agentId)?.agentId ?? null
+  }
+
+  /** The agent one level up: the lead of the nearest unit above (or of the same unit for a worker), else the COO. */
+  superiorOf(agentId: string): string | null {
+    const seat = this.seatOf(agentId)
+    if (!seat || seat.job === 'coo') return null
+    const units = this.units
+    let unit: OrgUnit | undefined = units.find((u) => u.id === seat.unitId)
+    // a lead reports to the unit above; a worker to the lead of its own unit
+    if (seat.job === 'lead') unit = unit?.parentId ? units.find((u) => u.id === unit!.parentId) : undefined
+    while (unit) {
+      const lead = this.seats.find((s) => s.unitId === unit!.id && s.job === 'lead' && s.agentId && s.agentId !== agentId)
+      if (lead) return lead.agentId!
+      unit = unit.parentId ? units.find((u) => u.id === unit!.parentId) : undefined
+    }
+    return this.cooAgent()
+  }
+
+  /** Who a manager may hand work to: its unit's members, and the leads of the units directly below. */
+  teamOf(agentId: string): { agent: RosterEntry; seat: Seat }[] {
+    const seat = this.seatOf(agentId)
+    if (!seat) return []
+    const units = this.units
+    const out: { agent: RosterEntry; seat: Seat }[] = []
+    const add = (s: Seat): void => {
+      const a = this.rosterOf(s.agentId)
+      if (a && s.agentId !== agentId) out.push({ agent: a, seat: s })
+    }
+    if (seat.job === 'coo') {
+      // the COO hands work to the heads of the top-level units (not to the executive unit itself)
+      for (const u of units.filter((x) => !x.parentId && x.id !== seat.unitId)) {
+        const lead = this.seats.find((s) => s.unitId === u.id && s.job === 'lead' && s.agentId)
+        if (lead) add(lead)
+        else this.seats.filter((s) => s.unitId === u.id).forEach(add)
+      }
+      return out
+    }
+    this.seats.filter((s) => s.unitId === seat.unitId && s.id !== seat.id && !isManagerJob(s.job)).forEach(add)
+    for (const child of units.filter((u) => u.parentId === seat.unitId)) {
+      const lead = this.seats.find((s) => s.unitId === child.id && s.job === 'lead' && s.agentId)
+      if (lead) add(lead)
+      else this.seats.filter((s) => s.unitId === child.id).forEach(add)
+    }
+    return out
+  }
+
+  private modelKeyOf(agentId: string): string {
+    const r = this.rosterOf(agentId)
+    return r?.modelId ?? `${r?.adapter ?? '?'}:${r?.model ?? 'default'}`
+  }
+  private modelOf(agentId: string): ModelEntry | undefined {
+    const id = this.rosterOf(agentId)?.modelId
+    return id ? this.c.catalog().find((m) => m.id === id) : undefined
+  }
+  private modelName(agentId: string | null | undefined): string {
+    if (!agentId) return '-'
+    const m = this.modelOf(agentId)
+    if (m) return modelLabel(m)
+    const r = this.rosterOf(agentId)
+    return r?.model ?? r?.adapter ?? '-'
+  }
+
+  /** A reviewer on a different model (same or higher tier), preferably a reviewer/QA seat close to the worker. */
+  pickReviewer(workerId: string | null): string | null {
+    if (!workerId) return null
+    const wkey = this.modelKeyOf(workerId)
+    const wtier = this.modelOf(workerId)?.tier
+    const wseat = this.seatOf(workerId)
+    const near = wseat ? this.subtree(wseat.unitId) : new Set<string>()
+    type Cand = { id: string; score: number }
+    const cands: Cand[] = []
+    for (const s of this.seats) {
+      if (!s.agentId || s.agentId === workerId) continue
+      if (this.modelKeyOf(s.agentId) === wkey) continue
+      const m = this.modelOf(s.agentId)
+      let score = 0
+      if (s.job === 'review') score -= 6
+      else if (s.job === 'qa') score -= 4
+      else if (isManagerJob(s.job)) score -= 1
+      if (near.has(s.unitId)) score -= 3
+      if (wtier && m && tierRank(m.tier) < tierRank(wtier)) score += 5 // weaker than the worker: last resort
+      cands.push({ id: s.agentId, score })
+    }
+    // agents without a seat can still review when nobody on a seat qualifies
+    if (!cands.length) {
+      for (const r of this.roster()) {
+        if (r.id !== workerId && this.modelKeyOf(r.id) !== wkey && !this.seatOf(r.id)) cands.push({ id: r.id, score: 0 })
+      }
+    }
+    cands.sort((a, b) => a.score - b.score || a.id.localeCompare(b.id))
+    return cands[0]?.id ?? null
+  }
+
+  // ---- entry: the board hands over a job ----
+  /**
+   * Decide how a freshly created task enters the flow (design ch.4): an employee works at once and is
+   * cross-reviewed; a manager (or a unit) plans; nobody named → the COO takes it.
+   */
+  begin(task: Task, opts: { unitId?: string; delegate?: boolean }): Task {
+    const h = this.c.hive
+    let assignee = task.assignee
+    let kind: Task['kind'] = 'work'
+    let directed = false
+    if (opts.unitId) {
+      const lead = this.leadOfUnit(opts.unitId)
+      if (!lead) throw new Error('그 조직에는 에이전트가 배치된 관리자 자리가 없어요.')
+      assignee = lead
+      kind = 'plan'
+      directed = true
+    } else if (assignee) {
+      if (this.isManager(assignee)) {
+        kind = 'plan'
+        directed = true
+      }
+    } else {
+      const coo = this.cooAgent()
+      if (!coo) throw new Error('총괄 본부장 자리에 에이전트를 배치해야 미지정 업무를 접수할 수 있어요.')
+      assignee = coo
+      kind = 'plan'
+    }
+    const next = h.updateTask(task.id, {
+      assignee,
+      kind,
+      depth: 0,
+      auto: true,
+      directed,
+      ...(kind === 'plan' ? { permission: 'read' as const } : {})
+    })
+    const who = this.rosterOf(assignee)?.name ?? assignee
+    h.addEvent(
+      task.id,
+      'delegation',
+      this.c.me(),
+      kind === 'plan'
+        ? `${who}에게 맡겼어요. 요구사항을 점검하고 분배 계획을 세워요.`
+        : `${who}가 바로 작업하고, 끝나면 다른 모델이 교차 검토해요.`
+    )
+    return next
+  }
+
+  // ---- prompts ----
+  /** Extra instructions for a delegation step; the runner appends them to the normal prompt. */
+  promptExtras(task: Task, agent: Agent): string[] {
+    if (task.kind === 'plan') return this.planPrompt(task, agent)
+    if (task.kind === 'review') return this.reviewPrompt(task)
+    if (task.kind === 'integrate') return this.integratePrompt(task)
+    return []
+  }
+
+  private planPrompt(task: Task, agent: Agent): string[] {
+    const team = this.teamOf(agent.id)
+    const ranks = this.company?.ranks ?? []
+    const lines = [
+      '',
+      '## Your role in this task: MANAGER (planner)',
+      'You are a manager. Your job is to plan, not to do the work — unless it is small.',
+      'Step 1 — Requirement check. Check the request for: goal, scope, completion criteria, constraints, deliverable format, priority.',
+      'If something essential is missing, do NOT plan. Ask the board exactly what you need with [[NEED: your specific questions]] and stop.',
+      'Step 2 — Size. If the job is small enough that you can do it yourself, answer only [[SELF: why it is small]] (no sub-tasks).',
+      'Step 3 — Otherwise write a distribution plan, one line per sub-task, in this exact form:',
+      '[[SUBTASK: <title> | assignee=<agent id from the list below> | done=<completion criteria> | after=<numbers of sub-tasks that must finish first, comma separated, or none>]]',
+      'Sub-tasks are numbered 1, 2, 3 … in the order you write them; "after" may only point at earlier numbers.',
+      `Write at most ${LIMITS.maxSubtasks} sub-tasks. Give each piece to the lowest rank that can do it well.`,
+      'Then write [[ESTIMATE: <total AI runs expected, counting reviews>]] and [[FLAGS: <comma separated of: risky, scope, other-unit, conflict — or none>]].',
+      'FLAGS: risky = mass delete/change, deploy or sending data out; scope = goes beyond the original request; other-unit = needs people outside your unit; conflict = contradicts a CEO committee decision in the team memory.',
+      '',
+      'Agents you may assign to (use the id exactly):'
+    ]
+    if (!team.length) lines.push('(nobody is available — say so with [[NEED: ...]])')
+    for (const t of team) {
+      const m = this.modelOf(t.agent.id)
+      const rank = ranks.find((r) => r.id === t.seat.rankId)?.name ?? ''
+      lines.push(
+        `- ${t.agent.id} | ${t.seat.title} | ${jobLabel(t.seat.job)}${isManagerJob(t.seat.job) ? ' (manager: will split further)' : ''} | ${rank} | ${m ? TIER_LABEL[m.tier] : this.modelName(t.agent.id)}`
+      )
+    }
+    if (task.reply) lines.push('', 'Note: your previous answer was sent back — follow the feedback you were given above.')
+    return lines
+  }
+
+  private lastRun(taskId: string) {
+    const runs = this.c.hive.listSharedRuns(taskId)
+    return runs[runs.length - 1]
+  }
+
+  private reviewPrompt(task: Task): string[] {
+    const target = task.reviewOf ? this.c.hive.getTask(task.reviewOf) : null
+    if (!target) return ['', '## Your role: REVIEWER', 'The task you should review no longer exists. Answer [[VERDICT: pass]].']
+    if (target.kind === 'plan') {
+      const p = target.plan
+      return [
+        '',
+        '## Your role in this task: PLAN REVIEWER (the manager above)',
+        `Review the distribution plan of "${target.title}". Check: does it cover the request, are the completion criteria clear, are the assignees right (lowest rank that fits), is the estimate plausible?`,
+        `Original request: ${target.description || target.title}`,
+        'Plan:',
+        ...(p?.items ?? []).map((it, i) => `${i + 1}. ${it.title} → ${it.assignee} | done: ${it.done} | after: ${it.after.join(',') || 'none'}`),
+        `Estimated AI runs: ${p?.estimateRuns ?? '?'}; flags: ${p?.flags.join(', ') || 'none'}`,
+        'Answer with exactly one verdict line: [[VERDICT: approve]] or [[VERDICT: reject: what must change]].'
+      ]
+    }
+    const run = this.lastRun(target.id)
+    const r = target.report
+    const lines = [
+      '',
+      '## Your role in this task: CROSS REVIEWER',
+      `Check the work of another agent (a different model): "${target.title}".`,
+      `Completion criteria: ${target.criteria || '(none given — judge against the task description)'}`,
+      `Task description: ${target.description || target.title}`,
+      'The agent reported:'
+    ]
+    if (r) lines.push(`- did: ${r.did}`, `- files: ${r.files}`, `- how to verify: ${r.verify}`, `- risks: ${r.risks}`)
+    else lines.push((target.result ?? '(no report)').slice(0, 3000))
+    if (run) {
+      lines.push(`Changes (${run.diffStat.files} files, +${run.diffStat.additions} −${run.diffStat.deletions}):`)
+      lines.push(...run.files.slice(0, 30).map((f) => `- ${f.status} ${f.path}`))
+      if (run.patch) lines.push('```diff', run.patch.slice(0, 12000), '```')
+    }
+    lines.push(
+      'Inspect the files in the work folder yourself (read only — do not change anything). Be strict but fair.',
+      'Answer with exactly one verdict line: [[VERDICT: pass]] or [[VERDICT: changes: the concrete things to fix]].'
+    )
+    return lines
+  }
+
+  private integratePrompt(task: Task): string[] {
+    const kids = this.children(task.id)
+    const lines = [
+      '',
+      '## Your role in this task: INTEGRATION (confirm and report up)',
+      'Every sub-task is finished and was cross-reviewed. Confirm that each result meets its completion criteria, integrate them, and report on the whole job.',
+      'Give the final report in the usual DID / FILES / VERIFY / RISK / NEXT markers, covering the whole job (not just your part).',
+      '',
+      'Sub-task results:'
+    ]
+    for (const k of kids) {
+      lines.push(`### ${k.title} — ${this.rosterOf(k.assignee)?.name ?? k.assignee} (${this.modelName(k.assignee)})`)
+      lines.push(`criteria: ${k.criteria || '-'}`)
+      if (k.report) lines.push(`did: ${k.report.did}`, `files: ${k.report.files}`, `verify: ${k.report.verify}`, `risks: ${k.report.risks}`)
+      else lines.push((k.result ?? '').slice(0, 1500))
+    }
+    return lines
+  }
+
+  private children(id: string): Task[] {
+    return this.c.hive.listTasks().filter((t) => t.parentId === id && t.kind !== 'review')
+  }
+
+  // ---- after a run ----
+  /** Called by the engine when a run of `taskId` has ended (whatever the outcome). */
+  onRunFinished(taskId: string): void {
+    const t = this.c.hive.getTask(taskId)
+    if (!t || !t.kind) return
+    if (t.status === 'failed') {
+      if (t.parentId) this.c.notify('하위 작업이 실패했어요', `${t.title}: 보드에서 다시 실행하거나 확인해 주세요.`)
+      return
+    }
+    if (t.status !== 'done') return
+    if (t.kind === 'plan') this.afterPlan(t)
+    else if (t.kind === 'review') this.afterReview(t)
+    else if (t.kind === 'work') this.afterWork(t)
+    else if (t.kind === 'integrate') this.afterIntegrate(t)
+    this.c.changed()
+  }
+
+  private event(taskId: string, text: string): void {
+    this.c.hive.addEvent(taskId, 'delegation', 'system', text)
+  }
+
+  /** Send a plan/review answer back to its author with a reason; fail after too many tries. */
+  private sendBack(t: Task, message: string): void {
+    const tries = (t.planTries ?? 0) + 1
+    if (tries > LIMITS.planFormatTries) {
+      this.c.hive.updateTask(t.id, {
+        status: 'failed',
+        error: `답변 형식이 계속 맞지 않아 멈췄어요: ${message}`,
+        planTries: tries,
+        finishedAt: new Date().toISOString()
+      })
+      this.event(t.id, `형식 문제로 멈췄어요: ${message}`)
+      this.c.notify('위임이 멈췄어요', `${t.title}: ${message}`)
+      return
+    }
+    this.c.hive.updateTask(t.id, { status: 'todo', reply: message, planTries: tries, auto: true })
+    this.event(t.id, `다시 요청했어요: ${message}`)
+  }
+
+  private afterPlan(t: Task): void {
+    const h = this.c.hive
+    const parsed = parsePlan(t.result ?? '')
+    if (parsed.self !== undefined && !parsed.items.length) {
+      h.updateTask(t.id, { kind: 'work', status: 'todo', auto: true, permission: undefined, notes: [...t.notes, `직접 처리할 크기로 판단했어요: ${parsed.self}`] })
+      this.event(t.id, `작은 일이라 직접 처리해요 (분배 생략): ${parsed.self}`)
+      return
+    }
+    if (!t.assignee) return
+    const team = this.teamOf(t.assignee)
+    const ids = new Set(team.map((x) => x.agent.id))
+    if (!parsed.items.length) {
+      return this.sendBack(t, '[[SUBTASK: 제목 | assignee=<id> | done=<완료 조건> | after=none]] 형식으로 하위 작업을 적어 주세요. 직접 처리할 크기면 [[SELF: 이유]]만 적으세요.')
+    }
+    if (parsed.bad.length) {
+      return this.sendBack(t, `읽을 수 없는 줄이 있어요(assignee가 필요해요): ${parsed.bad.join(' / ')}`)
+    }
+    if (parsed.items.length > LIMITS.maxSubtasks) {
+      return this.sendBack(t, `하위 작업은 최대 ${LIMITS.maxSubtasks}개예요. 묶어서 다시 적어 주세요.`)
+    }
+    const after = validateAfter(parsed.items)
+    if (after) return this.sendBack(t, after)
+    const unknown = parsed.items.filter((i) => !ids.has(i.assignee)).map((i) => i.assignee)
+    if (unknown.length) {
+      return this.sendBack(t, `목록에 없는 담당자예요: ${[...new Set(unknown)].join(', ')}. 목록의 id만 쓰세요: ${[...ids].join(', ')}`)
+    }
+    const depth = t.depth ?? 0
+    const managers = parsed.items.map((i) => this.isManager(i.assignee))
+    if (depth + 1 >= LIMITS.maxDepth && managers.some(Boolean)) {
+      return this.sendBack(t, `분배 단계가 너무 깊어요(최대 ${LIMITS.maxDepth}단계). 관리자에게 다시 나누지 말고 담당자에게 직접 맡기세요.`)
+    }
+
+    const company = this.company
+    const flags = new Set(parsed.flags)
+    const mySeat = this.seatOf(t.assignee)
+    if (mySeat && mySeat.job !== 'coo') {
+      const mine = this.subtree(mySeat.unitId)
+      if (parsed.items.some((i) => {
+        const s = this.seatOf(i.assignee)
+        return s && !mine.has(s.unitId)
+      })) flags.add('other-unit')
+    }
+    const estimate = Math.max(parsed.estimate ?? 0, estimateRuns(managers.map((m) => ({ manager: m }))))
+    const budget = this.budgetOf(t.projectId)
+    if (budget && this.runsUsed(t.projectId) + estimate > budget) flags.add('budget')
+
+    const reasons: string[] = []
+    if (company && estimate > company.bigJobRuns) reasons.push(`예상 AI 실행 ${estimate}회 (기준 ${company.bigJobRuns}회 초과)`)
+    for (const f of flags) reasons.push(FLAG_LABEL[f])
+    if (t.risky) reasons.push('위험 작업으로 표시된 태스크예요')
+    if (t.directed) reasons.push('이사회가 관리자를 직접 지정했어요 (첫 분배 계획은 이사회 결재)')
+    const rejections = t.plan?.rejections ?? 0
+    if (rejections > LIMITS.planRejectLimit) reasons.push('계획이 반복해서 반려됐어요')
+
+    let approver: Plan['approver'] = 'board'
+    let superior: string | null = null
+    if (!reasons.length) {
+      if (mySeat?.job === 'coo') approver = 'auto'
+      else {
+        superior = this.superiorOf(t.assignee)
+        if (superior) approver = 'superior'
+        else reasons.push('결재해 줄 윗 직책이 없어요')
+      }
+    }
+    const plan: Plan = {
+      items: parsed.items,
+      estimateRuns: estimate,
+      flags: [...flags],
+      status: approver === 'board' ? 'awaiting_board' : approver === 'superior' ? 'awaiting_superior' : 'approved',
+      approver,
+      boardReasons: reasons,
+      rejections
+    }
+    h.updateTask(t.id, { plan, planTries: 0 })
+    this.event(t.id, `분배 계획 ${parsed.items.length}개 작업 · 예상 실행 ${estimate}회 · 결재: ${approver === 'board' ? '이사회' : approver === 'superior' ? this.rosterOf(superior)?.name : '필요 없음(자동)'}`)
+
+    if (approver === 'auto') return void this.approvePlan(t.id, 'system')
+    if (approver === 'board') {
+      h.createApproval({ kind: 'plan', taskId: t.id, agentId: t.assignee, reason: `분배 계획 결재: ${reasons.join(' / ')}` })
+      h.updateTask(t.id, { status: 'awaiting_approval' })
+      this.c.notify('분배 계획 결재가 필요해요', `${t.title}: ${reasons[0] ?? ''}`)
+      return
+    }
+    // superior approves: a plan-review task runs on the superior's agent
+    this.makeReviewTask(t, superior!, `[계획 검토] ${t.title}`)
+    h.updateTask(t.id, { status: 'in_review' })
+  }
+
+  private makeReviewTask(target: Task, reviewer: string, title: string): Task {
+    const h = this.c.hive
+    const r = h.createTask({
+      title,
+      description: `검토 대상: ${target.title}`,
+      assignee: reviewer,
+      permission: 'read',
+      createdBy: 'system'
+    })
+    return h.updateTask(r.id, {
+      kind: 'review',
+      reviewOf: target.id,
+      depth: target.depth ?? 0,
+      auto: true,
+      projectId: target.projectId
+    })
+  }
+
+  /** Create the sub-tasks of an approved plan; the task now waits for them. */
+  approvePlan(taskId: string, by: string): void {
+    const h = this.c.hive
+    const t = h.getTask(taskId)
+    if (!t?.plan) return
+    const created: string[] = []
+    t.plan.items.forEach((it, idx) => {
+      const manager = this.isManager(it.assignee)
+      const c = h.createTask({
+        title: it.title,
+        description: `${it.title}\n\n상위 업무: ${t.title}${t.description ? `\n상위 업무 설명: ${t.description}` : ''}\n완료 조건: ${it.done || '(정해지지 않음)'}`,
+        assignee: it.assignee,
+        dependsOn: it.after.map((n) => created[n - 1]).filter(Boolean),
+        projectId: t.projectId,
+        ...(manager ? { permission: 'read' as const } : {}),
+        createdBy: by
+      })
+      h.updateTask(c.id, {
+        kind: manager ? 'plan' : 'work',
+        parentId: t.id,
+        depth: (t.depth ?? 0) + 1,
+        auto: true,
+        criteria: it.done,
+        projectId: t.projectId
+      })
+      created.push(c.id)
+    })
+    h.updateTask(t.id, { status: 'delegated', plan: { ...t.plan, status: 'approved', childIds: created } })
+    this.event(t.id, `${by === 'system' ? '자동 승인' : by + ' 승인'}: 하위 작업 ${created.length}개를 만들었어요.`)
+  }
+
+  /** A plan is sent back with a reason (by the superior or by the board). */
+  rejectPlan(taskId: string, reason: string, by: string, byBoard = false): void {
+    const h = this.c.hive
+    const t = h.getTask(taskId)
+    if (!t?.plan) return
+    const rejections = t.plan.rejections + 1
+    if (!byBoard && rejections > LIMITS.planRejectLimit) {
+      // sent back too often: the board decides
+      const plan: Plan = {
+        ...t.plan,
+        rejections,
+        status: 'awaiting_board',
+        approver: 'board',
+        boardReasons: [...t.plan.boardReasons, '윗 직책이 계획을 반복해서 반려했어요']
+      }
+      h.updateTask(t.id, { plan, status: 'awaiting_approval' })
+      h.createApproval({ kind: 'plan', taskId: t.id, agentId: t.assignee ?? '', reason: `분배 계획 결재: 반복 반려 — 마지막 이유: ${reason}` })
+      this.event(t.id, `반려가 ${rejections}번째라 이사회 결재로 올렸어요: ${reason}`)
+      this.c.notify('분배 계획 결재가 필요해요', `${t.title}: 반복 반려`)
+      return
+    }
+    h.updateTask(t.id, {
+      plan: { ...t.plan, rejections, status: 'rejected', note: reason },
+      status: 'todo',
+      reply: `분배 계획이 반려됐어요 (${by}): ${reason}\n이유를 반영해서 계획을 다시 써 주세요.`,
+      auto: true
+    })
+    this.event(t.id, `계획 반려 (${by}): ${reason}`)
+  }
+
+  private afterWork(w: Task): void {
+    const h = this.c.hive
+    if (w.reviewState?.status === 'pending') return
+    const reviewer = this.pickReviewer(w.assignee)
+    const prev = w.reviewState
+    if (!reviewer) {
+      h.updateTask(w.id, { reviewState: { status: 'skipped', round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, note: '다른 모델의 검토자가 없어서 검토 없이 끝냈어요.' } })
+      this.event(w.id, '다른 모델의 검토자를 찾지 못해 교차 검토를 건너뛰었어요 (회사 탭에서 검토자 자리에 다른 모델 에이전트를 두세요).')
+      this.c.aptitude(w.assignee, w.id, { approved: 1 })
+      return void this.rollUp(w)
+    }
+    this.makeReviewTask(w, reviewer, `[검토] ${w.title}`)
+    h.updateTask(w.id, {
+      status: 'in_review',
+      reviewState: { status: 'pending', round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, by: reviewer }
+    })
+    this.event(w.id, `${this.rosterOf(reviewer)?.name ?? reviewer}(${this.modelName(reviewer)})가 교차 검토해요.`)
+  }
+
+  private afterReview(r: Task): void {
+    const h = this.c.hive
+    const target = r.reviewOf ? h.getTask(r.reviewOf) : null
+    const v = parseVerdict(r.result ?? '')
+    if (!target) return
+    if (!v) {
+      const tries = (r.planTries ?? 0) + 1
+      if (tries <= LIMITS.planFormatTries) {
+        h.updateTask(r.id, { status: 'todo', reply: '마지막에 [[VERDICT: pass]] 또는 [[VERDICT: changes: 고칠 점]] 한 줄로 결론을 적어 주세요.', planTries: tries, auto: true })
+        return
+      }
+      // the reviewer never gave a verdict: a human has to look
+      this.event(target.id, '검토자가 결론을 내지 못했어요. 사람이 확인해야 해요.')
+      if (target.kind === 'plan') {
+        this.escalatePlanToBoard(target, '검토자가 결론을 내지 못했어요')
+      } else {
+        h.updateTask(target.id, { status: 'needs_review', reviewState: { status: 'skipped', round: target.reviewState?.round ?? 0, escalations: target.reviewState?.escalations ?? 0, note: '검토자가 결론을 내지 못했어요.' } })
+        this.c.notify('사람 확인이 필요해요', `${target.title}: 검토자가 결론을 내지 못했어요`)
+      }
+      return
+    }
+    const reviewerName = this.rosterOf(r.assignee)?.name ?? r.assignee ?? ''
+    if (target.kind === 'plan') {
+      if (v.pass) {
+        this.event(target.id, `${reviewerName}가 계획을 승인했어요.`)
+        this.approvePlan(target.id, reviewerName)
+      } else {
+        this.rejectPlan(target.id, v.note, reviewerName)
+      }
+      return
+    }
+    // a work task
+    const st = target.reviewState
+    if (v.pass) {
+      h.updateTask(target.id, {
+        status: 'done',
+        reviewState: { status: 'passed', round: st?.round ?? 0, escalations: st?.escalations ?? 0, by: r.assignee ?? undefined, note: v.note || undefined }
+      })
+      this.event(target.id, `교차 검토 통과 (${reviewerName}).${v.note ? ' ' + v.note : ''}`)
+      this.c.aptitude(target.assignee, target.id, { approved: 1 })
+      return void this.rollUp(h.getTask(target.id)!)
+    }
+    this.handleChanges(target, v.note, reviewerName)
+  }
+
+  private escalatePlanToBoard(t: Task, why: string): void {
+    const h = this.c.hive
+    if (!t.plan) return
+    h.updateTask(t.id, { plan: { ...t.plan, status: 'awaiting_board', approver: 'board', boardReasons: [...t.plan.boardReasons, why] }, status: 'awaiting_approval' })
+    h.createApproval({ kind: 'plan', taskId: t.id, agentId: t.assignee ?? '', reason: `분배 계획 결재: ${why}` })
+    this.c.notify('분배 계획 결재가 필요해요', `${t.title}: ${why}`)
+  }
+
+  /** The reviewer wants changes: back to the worker, then up to the lead, then to the board. */
+  private handleChanges(w: Task, note: string, reviewerName: string): void {
+    const h = this.c.hive
+    const st = w.reviewState ?? { status: 'pending' as const, round: 0, escalations: 0 }
+    this.c.aptitude(w.assignee, w.id, { changes: 1 })
+    const round = st.round + 1
+    if (round <= LIMITS.rejectLimit) {
+      h.updateTask(w.id, {
+        status: 'todo',
+        auto: true,
+        reply: `교차 검토(${reviewerName})에서 수정을 요청했어요 (${round}/${LIMITS.rejectLimit}):\n${note}`,
+        reviewState: { status: 'changes', round, escalations: st.escalations, by: st.by, note }
+      })
+      this.event(w.id, `수정 요청 ${round}/${LIMITS.rejectLimit} (${reviewerName}): ${note}`)
+      return
+    }
+    const lead = st.escalations === 0 && w.assignee ? this.superiorOf(w.assignee) : null
+    if (lead) {
+      h.updateTask(w.id, {
+        assignee: lead,
+        status: 'todo',
+        auto: true,
+        reply: `이 작업은 담당자가 ${LIMITS.rejectLimit}번 반려돼서 당신에게 올라왔어요. 검토 의견:\n${note}\n직접 고쳐서 끝내 주세요.`,
+        reviewState: { status: 'changes', round: 0, escalations: 1, by: st.by, note }
+      })
+      this.event(w.id, `반려가 ${LIMITS.rejectLimit}번 반복돼서 ${this.rosterOf(lead)?.name ?? lead}(윗 직책)에게 올렸어요.`)
+      this.c.notify('작업이 윗 직책으로 올라갔어요', w.title)
+      return
+    }
+    h.createApproval({ kind: 'agent-request', taskId: w.id, agentId: w.assignee ?? '', reason: `끝까지 막혔어요 — 마지막 검토 의견: ${note}` })
+    h.updateTask(w.id, {
+      status: 'awaiting_approval',
+      reviewState: { status: 'changes', round, escalations: st.escalations, by: st.by, note }
+    })
+    this.event(w.id, '끝까지 막혀서 이사회에 올렸어요.')
+    this.c.notify('이사회 결정이 필요해요', `${w.title}: 반복 반려로 막혔어요`)
+  }
+
+  /** When a sub-task is done, see whether its parent can move on to integration. */
+  private rollUp(child: Task): void {
+    if (!child.parentId) return
+    this.checkParent(child.parentId)
+  }
+
+  private checkParent(parentId: string): void {
+    const h = this.c.hive
+    const p = h.getTask(parentId)
+    if (!p || p.status !== 'delegated') return
+    const kids = this.children(p.id)
+    if (!kids.length || !kids.every((k) => k.status === 'done')) return
+    h.updateTask(p.id, { kind: 'integrate', status: 'todo', auto: true, permission: 'read', reply: undefined })
+    this.event(p.id, '하위 작업이 모두 끝났어요. 담당 관리자가 확인하고 통합해요.')
+  }
+
+  private afterIntegrate(t: Task): void {
+    const h = this.c.hive
+    if (t.parentId) {
+      this.event(t.id, '통합을 마쳤어요. 상위로 보고해요.')
+      return void this.checkParent(t.parentId)
+    }
+    const report = this.buildFinal(t.id)
+    h.saveFinal(report)
+    h.updateTask(t.id, { status: 'needs_review' })
+    this.event(t.id, '최종 보고서를 이사회에 제출했어요.')
+    this.c.notify('최종 보고서가 도착했어요', t.title)
+  }
+
+  /** The board answered the final report (the usual review buttons). */
+  recordDecision(taskId: string, accepted: boolean, by: string, note?: string): void {
+    const t = this.c.hive.getTask(taskId)
+    const r = this.c.hive.getFinal(taskId)
+    if (!t || t.kind !== 'integrate' || t.parentId || !r) return
+    this.c.hive.saveFinal({ ...r, decision: { at: new Date().toISOString(), by, accepted, note } })
+  }
+
+  /** After the board asked for changes on a final report: integrate again with their note. */
+  reopenIntegration(taskId: string): void {
+    this.c.hive.updateTask(taskId, { kind: 'integrate', auto: true })
+  }
+
+  // ---- project budget ----
+  private budgetOf(projectId?: string): number {
+    return this.c.hive.getProject(projectId)?.runBudget ?? 0
+  }
+  runsUsed(projectId?: string): number {
+    if (!projectId) return 0
+    const ids = new Set(this.c.hive.listTasks().filter((t) => t.projectId === projectId).map((t) => t.id))
+    return this.c.hive.listAptitude().filter((a) => ids.has(a.taskId.split('~')[0])).reduce((n, a) => n + a.runs, 0)
+  }
+
+  // ---- final report ----
+  buildFinal(rootId: string): FinalReport {
+    const h = this.c.hive
+    const all = h.listTasks()
+    const apt = h.listAptitude()
+    const root = all.find((t) => t.id === rootId)!
+    let additions = 0
+    let deletions = 0
+    const changed = new Set<string>()
+    let tasks = 0
+    const verification: string[] = []
+    const risks: string[] = []
+
+    const node = (t: Task): ReportNode => {
+      tasks++
+      const ids = [t.id, ...all.filter((x) => x.kind === 'review' && x.reviewOf === t.id).map((x) => x.id)]
+      let runs = 0
+      let ms = 0
+      for (const a of apt) {
+        const base = a.taskId.split('~')[0]
+        if (ids.includes(base)) (runs += a.runs, (ms += a.ms))
+      }
+      const shared = h.listSharedRuns(t.id)
+      const files = new Map<string, ReportNode['files'][number]>()
+      for (const run of shared) {
+        additions += run.diffStat.additions
+        deletions += run.diffStat.deletions
+        for (const f of run.files) (files.set(f.path, f), changed.add(f.path))
+      }
+      if (t.report?.verify && t.report.verify.toLowerCase() !== 'none') verification.push(`${t.title}: ${t.report.verify.replace(/\n/g, ' ')}`)
+      if (t.report?.risks && t.report.risks.toLowerCase() !== 'none') risks.push(`${t.title}: ${t.report.risks.replace(/\n/g, ' ')}`)
+      const rs = t.reviewState
+      const review = rs
+        ? rs.status === 'passed'
+          ? `통과${rs.round ? ` (수정 ${rs.round}회)` : ''}`
+          : rs.status === 'skipped'
+            ? '검토 생략'
+            : '수정 요청 중'
+        : undefined
+      const seat = this.seatOf(t.assignee)
+      return {
+        taskId: t.id,
+        title: t.title,
+        kind: t.kind ?? 'work',
+        agentId: t.assignee,
+        agentName: this.rosterOf(t.assignee)?.name ?? t.assignee ?? '-',
+        job: seat ? jobLabel(seat.job) : undefined,
+        model: this.modelName(t.assignee),
+        status: t.status,
+        runs,
+        minutes: Math.round(ms / 60000),
+        files: [...files.values()],
+        report: t.report,
+        review,
+        children: all.filter((x) => x.parentId === t.id && x.kind !== 'review').map(node)
+      }
+    }
+    const tree = node(root)
+    const sum = (n: ReportNode): { runs: number; minutes: number } =>
+      n.children.reduce((a, c) => ({ runs: a.runs + sum(c).runs, minutes: a.minutes + sum(c).minutes }), { runs: n.runs, minutes: n.minutes })
+    const total = sum(tree)
+    return {
+      id: rootId,
+      title: root.title,
+      createdAt: new Date().toISOString(),
+      summary: root.report?.did || (root.result ?? '').slice(0, 1500),
+      tree,
+      totals: { ...total, files: changed.size, additions, deletions, tasks },
+      verification,
+      risks,
+      next: root.report?.next && root.report.next.toLowerCase() !== 'none' ? [root.report.next] : []
+    }
+  }
+}
