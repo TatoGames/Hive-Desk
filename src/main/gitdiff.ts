@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { DiffFile, RunDiff } from '../shared/types'
+import type { DiffFile, RunDiff, TrackMode } from '../shared/types'
 import { SHARED_DIRS } from './hive'
 
 export const PATCH_LIMIT = 200_000
@@ -55,7 +55,7 @@ function samePath(a: string, b: string): boolean {
 }
 
 export function unavailable(reason: string): RunDiff {
-  return { available: false, reason, files: [], patch: '', truncated: false }
+  return { available: false, lines: false, reason, files: [], patch: '', truncated: false }
 }
 
 /**
@@ -83,26 +83,121 @@ async function snapshotTree(toplevel: string, exclude: string[]): Promise<string
 }
 
 export interface ChangeTracker {
-  /** Compare the folder now with how it was when tracking started. Never throws. */
+  mode: TrackMode
+  /** Compare the folder now with how it was when tracking started. Never throws; safe to call repeatedly. */
   finish(): Promise<RunDiff>
 }
 
+const SKIP_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.next',
+  '.cache',
+  'target',
+  'Library',
+  'Temp',
+  'obj'
+])
+const SCAN_LIMIT = 20_000
+
+interface FileStamp {
+  size: number
+  mtimeMs: number
+}
+
+/** Cheap file inventory for folders that are not git repos. Returns null if the folder is too big. */
+export function scanFolder(root: string, skipTop: string[] = []): Map<string, FileStamp> | null {
+  const out = new Map<string, FileStamp>()
+  const stack: string[] = [root]
+  while (stack.length) {
+    const dir = stack.pop()!
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const full = join(dir, name)
+      const rel = full.slice(root.length + 1).split('\\').join('/')
+      if (dir === root && skipTop.includes(name)) continue
+      let st
+      try {
+        st = statSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        if (!SKIP_DIRS.has(name)) stack.push(full)
+      } else if (st.isFile()) {
+        out.set(rel, { size: st.size, mtimeMs: Math.floor(st.mtimeMs) })
+        if (out.size > SCAN_LIMIT) return null
+      }
+    }
+  }
+  return out
+}
+
+export function diffScans(before: Map<string, FileStamp>, after: Map<string, FileStamp>, root = ''): RunDiff {
+  const files: DiffFile[] = []
+  for (const [path, a] of after) {
+    const b = before.get(path)
+    if (!b) files.push({ path, status: 'A', additions: 0, deletions: 0, binary: false })
+    else if (b.size !== a.size || b.mtimeMs !== a.mtimeMs) {
+      files.push({ path, status: 'M', additions: 0, deletions: 0, binary: false })
+    }
+  }
+  for (const path of before.keys()) {
+    if (!after.has(path)) files.push({ path, status: 'D', additions: 0, deletions: 0, binary: false })
+  }
+  files.sort((a, b) => a.path.localeCompare(b.path))
+  return {
+    available: true,
+    lines: false,
+    root,
+    reason: '작업 폴더가 git 저장소가 아니라서 바뀐 파일 목록만 보여줘요 (줄 수·내용 비교는 "변경 추적 켜기" 후 가능).',
+    files: files.slice(0, MAX_FILES),
+    patch: '',
+    truncated: files.length > MAX_FILES
+  }
+}
+
 /**
- * Start watching a work folder. If it is inside a git repo, `finish()` reports exactly what
- * changed since this call — even if the folder already had uncommitted changes.
+ * Start watching a work folder. Inside a git repo, `finish()` reports exactly what changed since
+ * this call (with line counts and a patch) — even if the folder already had uncommitted changes.
+ * Outside git it falls back to a file-list comparison.
  * `hiveRoot`: when the work folder IS the hive workspace, the hive's own data files are ignored.
  */
 export async function trackChanges(cwd: string, opts: { hiveRoot?: string } = {}): Promise<ChangeTracker> {
-  const fail = (reason: string): ChangeTracker => ({ finish: async () => unavailable(reason) })
+  const fail = (reason: string, mode: TrackMode = 'none'): ChangeTracker => ({
+    mode,
+    finish: async () => unavailable(reason)
+  })
   try {
     const top = await git(cwd, ['rev-parse', '--show-toplevel'])
-    if (!top.ok) return fail('작업 폴더가 git 저장소가 아니라서 변경 내용을 비교할 수 없어요.')
+    if (!top.ok) {
+      const hiveHere = !!opts.hiveRoot && samePath(cwd, opts.hiveRoot)
+      const skip = hiveHere ? [...SHARED_DIRS, '.local'] : []
+      const before = scanFolder(cwd, skip)
+      if (!before) return fail('작업 폴더에 파일이 너무 많아서 변경 내용을 비교하지 않아요 (git 저장소로 만들면 가능해요).')
+      return {
+        mode: 'scan',
+        finish: async () => {
+          const after = scanFolder(cwd, skip)
+          return after ? diffScans(before, after, cwd) : unavailable('변경 내용을 비교하지 못했어요: 파일이 너무 많아요.')
+        }
+      }
+    }
     const toplevel = top.out.trim()
     // `.local/` is already in the hive's own .gitignore; naming an ignored path makes `git add` fail.
     const exclude = opts.hiveRoot && samePath(toplevel, opts.hiveRoot) ? [...SHARED_DIRS] : []
     const before = await snapshotTree(toplevel, exclude)
     if (typeof before !== 'string') return fail('실행 전 상태를 저장하지 못했어요: ' + before.error)
     return {
+      mode: 'git',
       finish: async () => {
         try {
           const after = await snapshotTree(toplevel, exclude)
@@ -118,8 +213,20 @@ export async function trackChanges(cwd: string, opts: { hiveRoot?: string } = {}
   }
 }
 
+/** Turn the work folder into a git repo so changes can be compared line by line. */
+export async function enableTracking(cwd: string): Promise<{ ok: boolean; message: string }> {
+  const r = await git(cwd, ['init', '-b', 'main'])
+  return r.ok
+    ? { ok: true, message: '변경 추적을 켰어요 (이 폴더에 git 저장소를 만들었어요).' }
+    : { ok: false, message: 'git 저장소를 만들지 못했어요: ' + (r.err || r.out) }
+}
+
+export async function isInsideGit(cwd: string): Promise<boolean> {
+  return (await git(cwd, ['rev-parse', '--show-toplevel'])).ok
+}
+
 export async function diffTrees(toplevel: string, before: string, after: string): Promise<RunDiff> {
-  if (before === after) return { available: true, files: [], patch: '', truncated: false }
+  if (before === after) return { available: true, lines: true, root: toplevel, files: [], patch: '', truncated: false }
   const base = ['diff', '--no-color', '--no-ext-diff', '--no-renames']
   const [num, st, patch] = await Promise.all([
     git(toplevel, [...base, '--numstat', before, after]),
@@ -151,6 +258,8 @@ export async function diffTrees(toplevel: string, before: string, after: string)
   const truncated = patch.overflow || text.length > PATCH_LIMIT || files.length > MAX_FILES
   return {
     available: true,
+    lines: true,
+    root: toplevel,
     files: files.slice(0, MAX_FILES),
     patch: text.slice(0, PATCH_LIMIT),
     truncated

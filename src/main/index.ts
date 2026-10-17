@@ -52,6 +52,21 @@ function registerIpc(): void {
   ipcMain.handle('task:delete', (_e, id: string) => engine.deleteTask(id))
   ipcMain.handle('task:history', (_e, id: string) => engine.taskHistory(id))
   ipcMain.handle('task:run-detail', (_e, taskId: string, runId: string) => engine.runDetail(taskId, runId))
+  ipcMain.handle('task:live', (_e, id: string) => engine.liveState(id))
+  ipcMain.handle('task:preflight', (_e, id: string) => engine.preflight(id))
+  ipcMain.handle('task:track', (_e, id: string) => engine.enableTracking(id))
+  ipcMain.handle('task:attach-paths', (_e, id: string, paths: string[]) => engine.attachPaths(id, paths))
+  ipcMain.handle('task:attach-data', (_e, id: string, name: string, data: Uint8Array) =>
+    engine.attachData(id, name, data)
+  )
+  ipcMain.handle('task:detach', (_e, id: string, rel: string) => engine.removeAttachment(id, rel))
+  ipcMain.handle('task:reply', (_e, id: string, text: string) => engine.replyToTask(id, text))
+  ipcMain.handle('task:instruct', (_e, id: string, text: string) => engine.addInstruction(id, text))
+  ipcMain.handle('dialog:files', async () => {
+    if (!win) return []
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'] })
+    return r.canceled ? [] : r.filePaths
+  })
   ipcMain.handle('task:run', (_e, id: string) => engine.runTask(id))
   ipcMain.handle('task:stop', (_e, id: string) => engine.stopTask(id))
   ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected') =>

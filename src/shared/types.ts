@@ -34,7 +34,29 @@ export interface RosterEntry {
   role: string
 }
 
-export type TaskStatus = 'todo' | 'awaiting_approval' | 'running' | 'done' | 'failed'
+export type TaskStatus =
+  | 'todo'
+  | 'awaiting_approval'
+  /** The agent asked the human for a file, info or decision and stopped. */
+  | 'needs_input'
+  | 'running'
+  | 'done'
+  | 'failed'
+
+/** What the agent may do in this task. `edit` is the default (the agent's own settings apply). */
+export type PermissionLevel = 'read' | 'edit' | 'exec'
+
+/** A file the human handed to the task. Stored in the hive, so teammates get it too. */
+export interface Attachment {
+  name: string
+  /** Path relative to the hive folder. */
+  rel: string
+  size: number
+  /** Too big to share: kept on this machine only (`.local/`). */
+  local: boolean
+  addedBy: string
+  addedAt: string
+}
 
 export interface Task {
   id: string
@@ -54,6 +76,18 @@ export interface Task {
   result?: string
   /** Structured report from the latest run (the agent's own account). */
   report?: Report
+  attachments?: Attachment[]
+  /** Extra folders (outside the work folder) the agent may read. Absolute paths on the runner's machine. */
+  refDirs?: string[]
+  permission?: PermissionLevel
+  /** CLI session of the latest run, so a follow-up can continue the same conversation. */
+  sessionId?: string
+  /** What the agent is waiting for (status `needs_input`). */
+  question?: string
+  /** The human's answer, consumed by the next run. */
+  reply?: string
+  /** Extra instructions added while a run was in progress; applied when the step ends. */
+  followups?: string[]
   /** Id of the latest run record (kept on the machine that ran it). */
   lastRunId?: string
   error?: string
@@ -80,6 +114,10 @@ export type TaskEventKind =
   | 'run_finished'
   | 'review'
   | 'status'
+  /** The agent asked for material / a decision. */
+  | 'need'
+  | 'reply'
+  | 'instruction'
 
 /** One line of a task's timeline. Append-only: events are never rewritten. */
 export interface TaskEvent {
@@ -93,7 +131,66 @@ export interface TaskEvent {
   runId?: string
 }
 
-export type RunResultKind = 'done' | 'failed' | 'cancelled' | 'awaiting_approval'
+export type RunResultKind = 'done' | 'failed' | 'cancelled' | 'awaiting_approval' | 'needs_input'
+
+/** One human-readable line of what the agent is doing right now. */
+export type ActivityKind =
+  | 'read'
+  | 'edit'
+  | 'write'
+  | 'command'
+  | 'search'
+  | 'message'
+  | 'plan'
+  | 'tool'
+  | 'error'
+  | 'note'
+
+export interface ActivityEvent {
+  /** Increasing per run. */
+  n: number
+  at: string
+  kind: ActivityKind
+  text: string
+  path?: string
+  /** Lines added / removed, as reported by the agent (the diff is the ground truth). */
+  add?: number
+  del?: number
+}
+
+export interface PlanItem {
+  text: string
+  done: boolean
+}
+
+export type TrackMode = 'git' | 'scan' | 'none'
+
+/** Cheap progress numbers for a running task (sent with every update). */
+export interface LiveSummary {
+  taskId: string
+  runId: string
+  cwd: string
+  startedAt: string
+  steps: number
+  files: number
+  add: number
+  del: number
+  plan: PlanItem[]
+  tracking: TrackMode
+  /** Last thing the agent did, for the card. */
+  last?: string
+}
+
+/** Everything the detail panel shows for a running task. */
+export interface LiveState extends LiveSummary {
+  events: ActivityEvent[]
+  changes: DiffFile[]
+  patch: string
+  /** `scan` mode lists files but cannot count lines. */
+  lines: boolean
+  /** Folder `changes[].path` is relative to. */
+  root: string
+}
 
 export interface DiffFile {
   path: string
@@ -107,8 +204,12 @@ export interface DiffFile {
 /** What a run changed in the agent's work folder (only when it is a git repo). */
 export interface RunDiff {
   available: boolean
-  /** Why there is no diff (not a git repo, git failed, ...). */
+  /** Why there is no diff (git failed, folder too big, ...), or a caveat when `lines` is false. */
   reason?: string
+  /** false = file list only (folder is not a git repo), so additions/deletions are not counted. */
+  lines?: boolean
+  /** Folder the file paths are relative to (the git root, which may sit above the work folder). */
+  root?: string
   files: DiffFile[]
   patch: string
   truncated: boolean
@@ -134,6 +235,12 @@ export interface RunRecord {
   error?: string
   report?: Report
   diff: RunDiff
+  /** The work folder the CLI ran in. */
+  cwd: string
+  permission?: PermissionLevel
+  sessionId?: string
+  /** Step-by-step feed (read / edit / command ...), as the agent reported it. */
+  activity: ActivityEvent[]
 }
 
 /** A run without the heavy fields, for lists. */
@@ -183,6 +290,8 @@ export interface Usage {
 }
 
 export interface AppConfig {
+  /** Attachments above this size (MB) stay on this machine instead of syncing to the team. */
+  attachShareMaxMB: number
   memberName: string
   workspace: string
   agents: Agent[]
@@ -221,11 +330,16 @@ export interface Snapshot {
   usage: Record<string, Usage>
   running: string[]
   gitEnabled: boolean
+  /** Progress of tasks that are running right now (this machine). */
+  live: Record<string, LiveSummary>
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output' | 'setup'
+  type: 'changed' | 'output' | 'setup' | 'activity'
   taskId?: string
+  /** For `activity`: new feed lines and the up-to-date numbers. */
+  events?: ActivityEvent[]
+  summary?: LiveSummary
   /** For `setup`: which CLI the installer output belongs to. */
   adapter?: AdapterId
   chunk?: string
@@ -235,4 +349,26 @@ export interface SetupCheck {
   ok: boolean
   needsLogin: boolean
   message: string
+}
+
+export interface PreflightItem {
+  level: 'ok' | 'warn' | 'error'
+  text: string
+  /** A one-click fix the UI can offer. */
+  fix?: 'git-init'
+}
+
+/** The "before you run" screen: what the agent will touch and what could go wrong. */
+export interface Preflight {
+  workDir: string
+  items: PreflightItem[]
+  /** false when something blocks the run (e.g. the work folder is gone). */
+  canRun: boolean
+}
+
+export interface AttachResult {
+  attached: Attachment[]
+  /** Dropped folders become reference folders. */
+  folders: string[]
+  errors: string[]
 }

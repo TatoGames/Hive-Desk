@@ -1,5 +1,6 @@
 import type { ApprovalKind, Snapshot } from '@shared/types'
 import { fmtTime } from '../store'
+import { NeedBox } from './Materials'
 
 const KIND: Record<ApprovalKind, string> = {
   'risky-task': '위험 태스크',
@@ -9,6 +10,7 @@ const KIND: Record<ApprovalKind, string> = {
 
 export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
   const pending = snap.approvals.filter((a) => a.status === 'pending')
+  const asking = snap.tasks.filter((t) => t.status === 'needs_input')
   const past = snap.approvals.filter((a) => a.status !== 'pending').slice(0, 30)
   const task = (id: string) => snap.tasks.find((t) => t.id === id)
   const agent = (id: string) => snap.roster.find((r) => r.id === id)?.name ?? id
@@ -16,13 +18,26 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
   return (
     <div className="page">
       <header className="page-head">
-        <h1>승인 대기</h1>
+        <h1>승인·자료 요청</h1>
       </header>
       <p className="muted">
         위험한 작업, 예산 초과, 에이전트가 직접 멈추고 물어본 일은 여기서 사람이 결정해요. 승인하면 태스크가 다시
-        &lsquo;할 일&rsquo;로 돌아가요.
+        &lsquo;할 일&rsquo;로 돌아가요. 에이전트가 파일이나 정보를 요청하면 답하거나 파일을 넣어 주세요. 같은 대화를
+        이어서 계속해요.
       </p>
-      {!pending.length && <div className="panel empty">대기 중인 승인이 없어요.</div>}
+      {!!asking.length && <h2 className="sec">에이전트가 자료를 기다려요</h2>}
+      {asking.map((t) => (
+        <div key={t.id} className="panel">
+          <div>
+            <b>{t.title}</b>
+          </div>
+          <div className="muted small">
+            {snap.roster.find((r) => r.id === t.assignee)?.name ?? t.assignee} · {fmtTime(t.finishedAt)}
+          </div>
+          <NeedBox task={t} />
+        </div>
+      ))}
+      {!pending.length && !asking.length && <div className="panel empty">대기 중인 승인이나 자료 요청이 없어요.</div>}
       {pending.map((a) => {
         const t = task(a.taskId)
         return (

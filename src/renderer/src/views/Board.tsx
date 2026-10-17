@@ -1,11 +1,21 @@
 import { useState } from 'react'
-import type { Snapshot, Task, TaskStatus } from '@shared/types'
+import type { LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
+import {
+  DropZone,
+  NeedBox,
+  PermissionSelect,
+  PreflightDialog,
+  ProgressStrip,
+  sendDropped,
+  type Dropped
+} from './Materials'
 
 const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'todo', label: '할 일' },
   { id: 'awaiting_approval', label: '승인 대기' },
+  { id: 'needs_input', label: '자료 요청' },
   { id: 'running', label: '실행 중' },
   { id: 'done', label: '완료' },
   { id: 'failed', label: '실패' }
@@ -13,13 +23,21 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
 
 export default function Board({
   snap,
-  output
+  output,
+  live
 }: {
   snap: Snapshot
   output: Record<string, string>
+  live: Record<string, LiveSummary>
 }): JSX.Element {
   const [open, setOpen] = useState<string | null>(null)
   const [detail, setDetail] = useState<string | null>(null)
+  const [pre, setPre] = useState<string | null>(null)
+  /** The folder a task's agent works in (shown on the card, so it is clear where work happens). */
+  const workDirOf = (t: Task): string => {
+    const a = snap.config.agents.find((x) => x.id === t.assignee)
+    return a?.workDir || snap.config.workspace
+  }
   const localIds = new Set(snap.config.agents.map((a) => a.id))
   const nameOf = (id: string | null): string => {
     if (!id) return '미배정'
@@ -60,6 +78,9 @@ export default function Board({
                   isLocal={!!t.assignee && localIds.has(t.assignee)}
                   running={snap.running.includes(t.id)}
                   live={output[t.id]}
+                  progress={live[t.id]}
+                  workDir={workDirOf(t)}
+                  onRun={() => setPre(t.id)}
                   expanded={open === t.id}
                   onToggle={() => setOpen(open === t.id ? null : t.id)}
                   onDetail={() => setDetail(t.id)}
@@ -71,10 +92,15 @@ export default function Board({
         })}
       </div>
 
+      {pre && snap.tasks.find((t) => t.id === pre) && (
+        <PreflightDialog task={snap.tasks.find((t) => t.id === pre)!} onClose={() => setPre(null)} />
+      )}
+
       {detail && snap.tasks.find((t) => t.id === detail) && (
         <TaskDetail
           task={snap.tasks.find((t) => t.id === detail)!}
           assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
+          workDir={workDirOf(snap.tasks.find((t) => t.id === detail)!)}
           onClose={() => setDetail(null)}
         />
       )}
@@ -89,20 +115,29 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const [risky, setRisky] = useState(false)
   const [dep, setDep] = useState('')
   const [more, setMore] = useState(false)
+  const [perm, setPerm] = useState<PermissionLevel>('edit')
+  const [items, setItems] = useState<Dropped[]>([])
+  const [problems, setProblems] = useState<string[]>([])
 
   const submit = async (): Promise<void> => {
     if (!title.trim()) return
-    await window.hive.createTask({
+    const t = await window.hive.createTask({
       title,
       description: desc,
       assignee: assignee || null,
       risky,
-      dependsOn: dep ? [dep] : []
+      dependsOn: dep ? [dep] : [],
+      permission: perm === 'edit' ? undefined : perm
     })
+    // materials are copied into the new task's folder (folders become reference folders)
+    const errs = items.length ? await sendDropped(t.id, items) : []
+    setProblems(errs)
     setTitle('')
     setDesc('')
     setRisky(false)
     setDep('')
+    setPerm('edit')
+    setItems([])
   }
 
   return (
@@ -139,6 +174,29 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
             onChange={(e) => setDesc(e.target.value)}
           />
           <div className="row">
+            <span className="muted small">권한</span>
+            <PermissionSelect value={perm} onChange={setPerm} />
+          </div>
+          <DropZone compact onItems={(added) => setItems((cur) => [...cur, ...added])} />
+          {!!items.length && (
+            <ul className="mat-list">
+              {items.map((it, i) => (
+                <li key={i}>
+                  <span>{it.path ? it.path.split(/[\\/]/).pop() : it.name}</span>
+                  <span className="muted small">{it.path ?? '끌어다 놓은 파일'}</span>
+                  <button className="sm ghost" onClick={() => setItems((cur) => cur.filter((_, k) => k !== i))}>
+                    빼기
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {problems.map((e, i) => (
+            <div key={i} className="err-text small">
+              {e}
+            </div>
+          ))}
+          <div className="row">
             <label className="toggle">
               <input type="checkbox" checked={risky} onChange={(e) => setRisky(e.target.checked)} />
               위험한 작업 (실행 전 사람 승인 필요)
@@ -167,6 +225,9 @@ function Card(props: {
   isLocal: boolean
   running: boolean
   live?: string
+  progress?: LiveSummary
+  workDir: string
+  onRun: () => void
   expanded: boolean
   onToggle: () => void
   onDetail: () => void
@@ -192,6 +253,8 @@ function Card(props: {
         {!!blockedBy.length && (
           <div className="meta small">⏳ 대기: {blockedBy.map((b) => b.title).join(', ')}</div>
         )}
+        {props.running && props.progress && <ProgressStrip s={props.progress} />}
+        {t.status === 'needs_input' && t.question && <div className="meta small need-q">❓ {t.question}</div>}
       </div>
 
       {props.expanded && (
@@ -204,7 +267,15 @@ function Card(props: {
               ))}
             </ul>
           )}
-          {props.running && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
+          <div className="meta small where">
+            <span title={props.workDir}>📂 {props.workDir}</span>
+            <button className="sm ghost" onClick={() => void window.hive.openPath(props.workDir)}>
+              폴더 열기
+            </button>
+          </div>
+          {t.status === 'needs_input' && <NeedBox task={t} />}
+          {props.running && !props.progress && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
+          {props.running && props.progress && props.live && <pre className="out live small-log">{props.live.slice(-1200)}</pre>}
           {!props.running && t.report && <ReportView report={t.report} />}
           {!props.running && t.result && <pre className="out">{t.result}</pre>}
           {t.error && <pre className="out err">{t.error}</pre>}
@@ -220,7 +291,7 @@ function Card(props: {
           기록·변경
         </button>
         {props.isLocal && t.status === 'todo' && !props.running && (
-          <button className="primary sm" onClick={() => void window.hive.runTask(t.id)}>
+          <button className="primary sm" onClick={props.onRun}>
             실행
           </button>
         )}

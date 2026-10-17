@@ -1,6 +1,16 @@
 import { existsSync } from 'node:fs'
-import type { Agent, Report, RunDiff, RunRecord, RunResultKind, Task } from '../shared/types'
-import { buildCommand, cleanEnv, type Runner } from './adapters'
+import type {
+  ActivityEvent,
+  Agent,
+  PermissionLevel,
+  Report,
+  RunDiff,
+  RunRecord,
+  RunResultKind,
+  Task
+} from '../shared/types'
+import { createParser, LiveRun } from './activity'
+import { adapterAccess, buildCommand, cleanEnv, type Runner } from './adapters'
 import { diffStat, trackChanges } from './gitdiff'
 import { Hive, newId } from './hive'
 
@@ -9,6 +19,8 @@ export interface ParsedMarkers {
   memory: string[]
   messages: { to: string; body: string }[]
   approvals: string[]
+  /** What the agent needs from the human to continue (`[[NEED: …]]`). */
+  needs: string[]
   /** Present when the agent used at least one report marker (DID/FILES/VERIFY/RISK/NEXT). */
   report?: Report
 }
@@ -26,16 +38,19 @@ export function parseMarkers(text: string): ParsedMarkers {
   const memory: string[] = []
   const messages: { to: string; body: string }[] = []
   const approvals: string[] = []
+  const needs: string[] = []
   const parts: Partial<Record<keyof Report, string[]>> = {}
   const re =
-    /^[ \t]*\[\[(MEMORY|MSG|APPROVAL|DID|FILES|VERIFY|RISK|NEXT)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
+    /^[ \t]*\[\[(MEMORY|MSG|APPROVAL|NEED|PLAN|STEP|DID|FILES|VERIFY|RISK|NEXT)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
   const clean = text.replace(re, (_m, kind: string, to: string | undefined, body: string) => {
     const b = body.trim()
     if (!b) return ''
     if (kind === 'MEMORY') memory.push(b)
     else if (kind === 'MSG' && to) messages.push({ to, body: b })
     else if (kind === 'APPROVAL') approvals.push(b)
+    else if (kind === 'NEED') needs.push(b)
     else if (REPORT_KEYS[kind]) (parts[REPORT_KEYS[kind]] ??= []).push(b)
+    // PLAN / STEP only drive the live progress bar; they are dropped from the result
     return ''
   })
   const report = Object.keys(parts).length
@@ -47,7 +62,45 @@ export function parseMarkers(text: string): ParsedMarkers {
         next: (parts.next ?? []).join('\n')
       }
     : undefined
-  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals, report }
+  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals, needs, report }
+}
+
+function fmtSize(n: number): string {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB'
+  if (n >= 1024) return Math.round(n / 1024) + ' KB'
+  return n + ' B'
+}
+
+const PERMISSION_TEXT: Record<PermissionLevel, string | null> = {
+  edit: null,
+  read:
+    'Permission level for this task: READ-ONLY. Do not create, modify, move or delete any file, and do not run commands that change anything. Read, analyse and report only.',
+  exec:
+    'Permission level for this task: COMMANDS ALLOWED. You may run the shell commands the task needs (build, test, install). Avoid anything destructive outside the task.'
+}
+
+/** Attachments and reference folders, as the agent should see them. */
+function materialLines(task: Task, hive: Hive): string[] {
+  const lines: string[] = []
+  const atts = task.attachments ?? []
+  if (atts.length) {
+    lines.push('', '## Materials the human attached (read these first)')
+    for (const a of atts) {
+      const abs = hive.attachmentPath(a)
+      lines.push(
+        existsSync(abs)
+          ? `- ${abs} (${fmtSize(a.size)})`
+          : `- ${a.name}: not available on this machine${a.local ? ' (too large to share)' : ''}`
+      )
+    }
+  }
+  const dirs = (task.refDirs ?? []).filter((d) => existsSync(d))
+  if (dirs.length) {
+    lines.push('', '## Reference folders you may read (outside your work folder)')
+    for (const d of dirs) lines.push(`- ${d}`)
+    lines.push('Only read from them; put your changes in the work folder.')
+  }
+  return lines
 }
 
 export function buildPrompt(opts: {
@@ -72,6 +125,17 @@ export function buildPrompt(opts: {
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
+  const perm = PERMISSION_TEXT[task.permission ?? 'edit']
+  if (perm) lines.push('', perm)
+  lines.push(...materialLines(task, hive))
+
+  // The human answered an earlier question: tell this fresh run what happened so far.
+  if (task.reply !== undefined) {
+    lines.push('', '## Earlier in this task')
+    if (task.question) lines.push('You asked the human:', task.question)
+    if (task.result) lines.push('Your earlier output:', task.result.slice(0, 4000))
+    lines.push('', 'The human replied:', task.reply, '', 'Continue the task with this answer.')
+  }
   if (deps.length) {
     lines.push('', '## Results from tasks this depends on')
     for (const d of deps) lines.push(`### ${d.title}`, (d.result ?? '').slice(0, 4000))
@@ -91,7 +155,9 @@ export function buildPrompt(opts: {
   lines.push(
     '',
     '## Reply protocol',
-    'Reply in the same language as the task. Give your result first, then end with a short structured report using these markers.',
+    'Reply in the same language as the task.',
+    'Before you start, write your plan on ONE line: [[PLAN: first step | second step | third step]]. After finishing each step write [[STEP: n]] on its own line (n = the step number). The human watches this progress live.',
+    'Give your result, then end with a short structured report using these markers.',
     'Each marker starts at the beginning of a line; a part may span several lines and ends with ]] at the end of a line:',
     '[[DID: what you did]]',
     '[[FILES: files you changed or created, one per line, or "none"]]',
@@ -101,9 +167,19 @@ export function buildPrompt(opts: {
     'You may also use these lines, each alone on its own line:',
     '[[MEMORY: a durable fact the whole team should remember]]',
     '[[MSG to=<teammate-id>: a short message to a teammate]]',
+    '[[NEED: the exact file, information or decision you need from the human]]',
     '[[APPROVAL: why a human must approve before you continue]]',
+    'Use NEED when you cannot continue without something only the human can give (a file, a path, an answer); then stop and wait.',
     'Use APPROVAL before anything destructive, irreversible, expensive, or outside the task scope, then stop and wait.'
   )
+  return lines.join('\n')
+}
+
+/** The human's answer, sent into an existing CLI session (the CLI already remembers the rest). */
+export function buildFollowUp(task: Task, hive: Hive): string {
+  const lines: string[] = ['The human replied:', task.reply ?? '']
+  lines.push(...materialLines(task, hive))
+  lines.push('', 'Continue the task. Keep using the same [[PLAN]]/[[STEP]], report and NEED/APPROVAL markers.')
   return lines.join('\n')
 }
 
@@ -113,7 +189,14 @@ export interface RunnerDeps {
   runner: Runner
   /** Where to run when the agent has no workDir. */
   defaultCwd: string
+  /** Raw text from CLIs that print plain text. */
   onOutput?: (taskId: string, chunk: string) => void
+  /** Called once when a run starts, with the object that tracks it. */
+  onLive?: (live: LiveRun) => void
+  /** New feed lines and/or refreshed numbers. */
+  onActivity?: (taskId: string, events: ActivityEvent[], live: LiveRun) => void
+  /** How often to look at the work folder while a run is in progress (ms). */
+  watchMs?: number
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
   now?: () => Date
@@ -123,6 +206,7 @@ export type RunOutcome =
   | 'done'
   | 'failed'
   | 'awaiting_approval'
+  | 'needs_input'
   | 'not_ready'
   | 'cancelled'
 
@@ -138,16 +222,17 @@ export function budgetProblem(hive: Hive, agent: Agent, d: Date): string | null 
   return null
 }
 
-/** Run one task with its agent: budget gate → approval gate → CLI → parse → record. */
+/** Run one task with its agent: approval gate → budget gate → CLI (watched) → parse → record. */
 export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): Promise<RunOutcome> {
   const { hive } = deps
   const nowFn = deps.now ?? (() => new Date())
   const task = hive.getTask(taskId)
   if (!task || task.assignee !== agent.id) return 'not_ready'
   if (task.status !== 'todo') return 'not_ready'
+  const level: PermissionLevel = task.permission ?? 'edit'
 
-  // Gate 1: human approval for risky tasks / cautious agents.
-  if ((task.risky || agent.requireApproval) && !task.cleared.includes('risky-task')) {
+  // Gate 1: human approval for risky tasks / cautious agents / command-running tasks.
+  if ((task.risky || agent.requireApproval || level === 'exec') && !task.cleared.includes('risky-task')) {
     if (!hive.hasPendingApproval(task.id, 'risky-task')) {
       hive.createApproval({
         kind: 'risky-task',
@@ -155,7 +240,9 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
         agentId: agent.id,
         reason: task.risky
           ? '위험한 태스크로 표시되어 실행 전 승인이 필요해요.'
-          : `${agent.name} 에이전트는 모든 태스크에 승인이 필요하도록 설정돼 있어요.`
+          : agent.requireApproval
+            ? `${agent.name} 에이전트는 모든 태스크에 승인이 필요하도록 설정돼 있어요.`
+            : '이 태스크는 "명령 실행" 권한이라 실행 전 승인이 필요해요.'
       })
     }
     hive.updateTask(task.id, { status: 'awaiting_approval' })
@@ -175,21 +262,40 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const cwd = agent.workDir && existsSync(agent.workDir) ? agent.workDir : deps.defaultCwd
   const started = nowFn()
   const runId = newId()
+  const answering = task.reply !== undefined
+  // Same conversation when the CLI can continue it; otherwise the prompt retells what happened.
+  const resumeSession =
+    answering && task.sessionId && adapterAccess(agent.adapter).resume === 'session'
+      ? task.sessionId
+      : undefined
   hive.updateTask(task.id, {
     status: 'running',
     startedAt: started.toISOString(),
     error: undefined,
     result: undefined,
-    report: undefined
+    report: undefined,
+    reply: undefined, // consumed by this run (the prompt was built from the snapshot above)
+    question: undefined
   })
-  hive.addEvent(task.id, 'run_started', agent.id, `${agent.name} 실행 시작`, runId)
+  hive.addEvent(
+    task.id,
+    'run_started',
+    agent.id,
+    `${agent.name} 실행 시작${resumeSession ? ' (이전 대화를 이어서)' : answering ? ' (답변을 반영해 다시)' : ''}`,
+    runId
+  )
 
-  const prompt = buildPrompt({ agent, task, hive })
+  const prompt = resumeSession ? buildFollowUp(task, hive) : buildPrompt({ agent, task, hive })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
   let built
   try {
-    built = buildCommand(agent)
+    built = buildCommand(agent, {
+      stream: true,
+      permission: level,
+      refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
+      resumeSession
+    })
   } catch (e) {
     const finishedAt = nowFn().toISOString()
     hive.addEvent(task.id, 'run_finished', agent.id, '실패 · ' + (e as Error).message, runId)
@@ -197,22 +303,80 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'failed'
   }
 
-  // Remember how the work folder looked, so we can show exactly what this run changed.
+  // Remember how the work folder looked, so we can show exactly what this run changed — also live.
   const tracker = await trackChanges(cwd, { hiveRoot: hive.root })
+  const live = new LiveRun(task.id, runId, cwd, started.toISOString())
+  live.setTracking(tracker.mode)
+  deps.onLive?.(live)
+  const parser = createParser(built.stream ?? 'text', nowFn)
+  const push = (evs: ActivityEvent[]): void => {
+    live.add(evs)
+    live.setPlan(parser.plan())
+    deps.onActivity?.(task.id, evs, live)
+  }
 
-  const res = await deps.runner(built, {
-    cwd,
-    prompt,
-    timeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
-    env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
-    onOutput: deps.onOutput ? (c) => deps.onOutput?.(task.id, c) : undefined,
-    signal: deps.signal
-  })
+  const watchMs = deps.watchMs ?? 3000
+  let watching = true
+  let watchTimer: NodeJS.Timeout | undefined
+  const poll = async (): Promise<void> => {
+    if (!watching) return
+    const t0 = Date.now()
+    const d = await tracker.finish()
+    if (!watching) return
+    live.setDiff(d)
+    live.setPlan(parser.plan())
+    deps.onActivity?.(task.id, [], live)
+    // big folders: look less often so watching never slows the agent down
+    watchTimer = setTimeout(() => void poll(), Math.max(watchMs, (Date.now() - t0) * 3))
+  }
+  watchTimer = setTimeout(() => void poll(), watchMs)
 
+  let res
+  try {
+    res = await deps.runner(built, {
+      cwd,
+      prompt,
+      timeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
+      env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
+      onOutput: (c) => {
+        push(parser.push(c))
+        if (!built.stream) deps.onOutput?.(task.id, c)
+      },
+      signal: deps.signal
+    })
+  } finally {
+    watching = false
+    if (watchTimer) clearTimeout(watchTimer)
+  }
+  push(parser.end())
+
+  const stdout = parser.finalText(res.stdout)
+  const sessionId = parser.sessionId() ?? resumeSession
   const elapsed = nowFn().getTime() - started.getTime()
   hive.recordUsage(agent.id, elapsed, nowFn())
   const finishedAt = nowFn().toISOString()
   const diff = await tracker.finish()
+  live.setDiff(diff)
+
+  // Things the CLI refused because of the permission level: tell the human what to change.
+  const denied = parser.denials()
+  if (denied.length) {
+    push([
+      {
+        n: live.all().length + 1,
+        at: nowFn().toISOString(),
+        kind: 'error',
+        text: `권한 때문에 거부된 작업 ${denied.length}건: ${denied.join(', ')}`
+      }
+    ])
+    const cur = hive.getTask(task.id)
+    hive.updateTask(task.id, {
+      notes: [
+        ...(cur?.notes ?? task.notes),
+        `권한 때문에 거부된 작업이 있어요 (${denied.join(', ')}). 필요하면 권한 단계를 올리거나 참고 폴더를 추가하고 다시 실행하세요.`
+      ]
+    })
+  }
 
   /** Save the full record of this execution (never overwritten) and log it on the timeline. */
   const saveRun = (outcome: RunResultKind, extra: { error?: string; report?: Report } = {}): string => {
@@ -228,20 +392,31 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       outcome,
       exitCode: res.code,
       prompt: cap(prompt, 100_000),
-      response: cap(res.stdout, 300_000),
+      response: cap(stdout, 300_000),
       stderr: cap(res.stderr, 20_000),
       error: extra.error,
       report: extra.report,
-      diff
+      diff,
+      cwd,
+      permission: level,
+      sessionId,
+      activity: live.all().slice(-1000)
     }
     hive.addRun(rec)
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
     return runId
   }
+  const lastError = [...live.all()].reverse().find((e) => e.kind === 'error')?.text
 
   if (res.aborted) {
     const error = '사용자가 중지했어요.'
-    hive.updateTask(task.id, { status: 'todo', error, finishedAt, lastRunId: saveRun('cancelled', { error }) })
+    hive.updateTask(task.id, {
+      status: 'todo',
+      error,
+      finishedAt,
+      sessionId,
+      lastRunId: saveRun('cancelled', { error })
+    })
     return 'cancelled'
   }
   if (res.spawnError) {
@@ -254,20 +429,21 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     hive.updateTask(task.id, {
       status: 'failed',
       error,
-      result: res.stdout.trim() || undefined,
+      result: stdout.trim() || undefined,
       finishedAt,
+      sessionId,
       lastRunId: saveRun('failed', { error })
     })
     return 'failed'
   }
   if (res.code !== 0) {
-    const detail = (res.stderr.trim() || res.stdout.trim()).slice(-1500)
+    const detail = (res.stderr.trim() || stdout.trim() || lastError || '').slice(-1500)
     const error = `CLI가 오류 코드 ${res.code}로 끝났어요.${detail ? '\n' + detail : ''}`
     hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
 
-  const parsed = parseMarkers(res.stdout)
+  const parsed = parseMarkers(stdout)
   for (const m of unread) hive.markRead(agent.id, m.id)
   const known = new Set(hive.listMemory(1000).map((m) => m.text.trim().toLowerCase()))
   for (const text of parsed.memory) {
@@ -282,15 +458,33 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     const reason = parsed.approvals.join(' / ')
     const lastRunId = saveRun('awaiting_approval', { report: parsed.report })
     hive.createApproval({ kind: 'agent-request', taskId: task.id, agentId: agent.id, reason })
+    const cur = hive.getTask(task.id)
     hive.updateTask(task.id, {
       status: 'awaiting_approval',
-      notes: [...task.notes, `${agent.name}이(가) 멈추고 승인을 요청했어요: ${reason}`],
+      notes: [...(cur?.notes ?? task.notes), `${agent.name}이(가) 멈추고 승인을 요청했어요: ${reason}`],
       result: parsed.clean || undefined,
       report: parsed.report,
       finishedAt,
+      sessionId,
       lastRunId
     })
     return 'awaiting_approval'
+  }
+
+  if (parsed.needs.length) {
+    const question = parsed.needs.join('\n')
+    const lastRunId = saveRun('needs_input', { report: parsed.report })
+    hive.addEvent(task.id, 'need', agent.id, `자료 요청: ${question}`, runId)
+    hive.updateTask(task.id, {
+      status: 'needs_input',
+      question,
+      result: parsed.clean || undefined,
+      report: parsed.report,
+      finishedAt,
+      sessionId,
+      lastRunId
+    })
+    return 'needs_input'
   }
 
   hive.updateTask(task.id, {
@@ -298,7 +492,9 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     result: parsed.clean,
     report: parsed.report,
     error: undefined,
+    question: undefined,
     finishedAt,
+    sessionId,
     lastRunId: saveRun('done', { report: parsed.report })
   })
   return 'done'
@@ -312,7 +508,8 @@ const OUTCOME_LABEL: Record<RunResultKind, string> = {
   done: '완료',
   failed: '실패',
   cancelled: '중지됨',
-  awaiting_approval: '승인 대기'
+  awaiting_approval: '승인 대기',
+  needs_input: '자료 요청'
 }
 
 export function runLine(outcome: RunResultKind, ms: number, diff: RunDiff): string {
@@ -323,6 +520,8 @@ export function runLine(outcome: RunResultKind, ms: number, diff: RunDiff): stri
     ? '변경 비교 불가'
     : st.files === 0
       ? '파일 변경 없음'
-      : `파일 ${st.files}개 변경 (+${st.additions} −${st.deletions})`
+      : diff.lines === false
+        ? `파일 ${st.files}개 변경`
+        : `파일 ${st.files}개 변경 (+${st.additions} −${st.deletions})`
   return `${OUTCOME_LABEL[outcome]} · ${time} · ${change}`
 }

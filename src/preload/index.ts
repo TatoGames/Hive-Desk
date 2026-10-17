@@ -1,9 +1,13 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   Agent,
   AppConfig,
   AdapterInfo,
+  AttachResult,
   EngineEvent,
+  LiveState,
+  PermissionLevel,
+  Preflight,
   RunRecord,
   Snapshot,
   SyncResult,
@@ -24,6 +28,8 @@ const api = {
     assignee?: string | null
     risky?: boolean
     dependsOn?: string[]
+    permission?: PermissionLevel
+    refDirs?: string[]
   }): Promise<Task> => ipcRenderer.invoke('task:create', t),
   updateTask: (id: string, patch: Partial<Task>): Promise<Task> =>
     ipcRenderer.invoke('task:update', id, patch),
@@ -31,6 +37,26 @@ const api = {
   taskHistory: (id: string): Promise<TaskHistory> => ipcRenderer.invoke('task:history', id),
   runDetail: (taskId: string, runId: string): Promise<RunRecord | null> =>
     ipcRenderer.invoke('task:run-detail', taskId, runId),
+  liveState: (id: string): Promise<LiveState | null> => ipcRenderer.invoke('task:live', id),
+  preflight: (id: string): Promise<Preflight> => ipcRenderer.invoke('task:preflight', id),
+  enableTracking: (id: string): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('task:track', id),
+  attachPaths: (id: string, paths: string[]): Promise<AttachResult> =>
+    ipcRenderer.invoke('task:attach-paths', id, paths),
+  attachData: (id: string, name: string, data: Uint8Array): Promise<AttachResult> =>
+    ipcRenderer.invoke('task:attach-data', id, name, data),
+  removeAttachment: (id: string, rel: string): Promise<void> => ipcRenderer.invoke('task:detach', id, rel),
+  replyToTask: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:reply', id, text),
+  addInstruction: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:instruct', id, text),
+  pickFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:files'),
+  /** Absolute path of a dropped File ('' if the browser gave no real file). */
+  pathForFile: (f: File): string => {
+    try {
+      return webUtils.getPathForFile(f)
+    } catch {
+      return ''
+    }
+  },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
   decideApproval: (id: string, d: 'approved' | 'rejected'): Promise<void> =>

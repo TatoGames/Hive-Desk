@@ -1,20 +1,24 @@
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type {
   Agent,
   Approval,
   ApprovalKind,
+  Attachment,
   MemoryEntry,
   Message,
+  PermissionLevel,
   RosterEntry,
   RunRecord,
   RunSummary,
@@ -25,7 +29,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -88,7 +92,7 @@ function listJson<T>(dir: string): T[] {
  */
 export class Hive {
   constructor(public readonly root: string) {
-    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs']) {
+    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
@@ -114,6 +118,8 @@ export class Hive {
     assignee?: string | null
     risky?: boolean
     dependsOn?: string[]
+    permission?: PermissionLevel
+    refDirs?: string[]
     createdBy: string
   }): Task {
     const t: Task = {
@@ -128,14 +134,17 @@ export class Hive {
       createdAt: now(),
       updatedAt: now(),
       cleared: [],
-      notes: []
+      notes: [],
+      ...(input.permission && input.permission !== 'edit' ? { permission: input.permission } : {}),
+      ...(input.refDirs?.length ? { refDirs: input.refDirs } : {})
     }
     writeJson(this.p('tasks', t.id + '.json'), t)
+    const perm = t.permission === 'read' ? ' · 읽기만' : t.permission === 'exec' ? ' · 명령 실행 허용' : ''
     this.addEvent(
       t.id,
       'created',
       t.createdBy,
-      `태스크를 만들었어요 · 담당 ${t.assignee ?? '미배정'}${t.risky ? ' · 위험 표시' : ''}`
+      `태스크를 만들었어요 · 담당 ${t.assignee ?? '미배정'}${t.risky ? ' · 위험 표시' : ''}${perm}`
     )
     return t
   }
@@ -152,6 +161,62 @@ export class Hive {
     rmSync(this.p('tasks', id + '.json'), { force: true })
     rmSync(this.p('events', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'runs', id), { recursive: true, force: true })
+    rmSync(this.p('attachments', id), { recursive: true, force: true })
+    rmSync(this.p('.local', 'attachments', id), { recursive: true, force: true })
+  }
+
+  // ---- attachments (files the human hands to a task) ----
+  /** Absolute path of an attachment on this machine. */
+  attachmentPath(a: Attachment): string {
+    return this.p(...a.rel.split('/'))
+  }
+
+  /**
+   * Copy a file into the task's folder. Files up to `shareMaxMB` live in the shared hive (teammates
+   * get them through git); bigger ones stay on this machine only.
+   */
+  addAttachment(
+    taskId: string,
+    source: { path: string } | { name: string; data: Buffer },
+    by: string,
+    shareMaxMB: number
+  ): Attachment {
+    const task = this.getTask(taskId)
+    if (!task) throw new Error('task not found: ' + taskId)
+    const rawName = 'path' in source ? basename(source.path) : source.name
+    const clean = rawName.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file'
+    const size = 'path' in source ? statSync(source.path).size : source.data.length
+    const local = size > Math.max(0, shareMaxMB) * 1024 * 1024
+    const root = local ? ['.local', 'attachments', taskId] : ['attachments', taskId]
+    const dir = this.p(...root)
+    mkdirSync(dir, { recursive: true })
+    const dot = clean.lastIndexOf('.')
+    const stem = dot > 0 ? clean.slice(0, dot) : clean
+    const ext = dot > 0 ? clean.slice(dot) : ''
+    let name = clean
+    for (let i = 2; existsSync(join(dir, name)); i++) name = `${stem}-${i}${ext}`
+    if ('path' in source) copyFileSync(source.path, join(dir, name))
+    else writeFileSync(join(dir, name), source.data)
+    const att: Attachment = {
+      name,
+      rel: [...root, name].join('/'),
+      size,
+      local,
+      addedBy: by,
+      addedAt: now()
+    }
+    this.updateTask(taskId, { attachments: [...(task.attachments ?? []), att] })
+    this.addEvent(taskId, 'status', by, `자료를 첨부했어요: ${name}${local ? ' (용량이 커서 이 컴퓨터에만 보관)' : ''}`)
+    return att
+  }
+
+  removeAttachment(taskId: string, rel: string, by: string): void {
+    const task = this.getTask(taskId)
+    const att = task?.attachments?.find((a) => a.rel === rel)
+    if (!task || !att) return
+    rmSync(this.attachmentPath(att), { force: true })
+    this.updateTask(taskId, { attachments: (task.attachments ?? []).filter((a) => a.rel !== rel) })
+    this.addEvent(taskId, 'status', by, `첨부를 뺐어요: ${att.name}`)
   }
 
   // ---- timeline events (append-only, shared) ----

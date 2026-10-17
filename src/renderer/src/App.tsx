@@ -9,7 +9,7 @@ import Settings from './views/Settings'
 type Tab = 'board' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
-  const { snap, output, refresh } = useHive()
+  const { snap, output, live, refresh } = useHive()
   const [tab, setTab] = useState<Tab>('board')
   const routed = useRef(false)
 
@@ -23,7 +23,9 @@ export default function App(): JSX.Element {
   if (!snap) return <div className="loading">불러오는 중…</div>
 
   const needsSetup = !snap.config.memberName
-  const pending = snap.approvals.filter((a) => a.status === 'pending').length
+  const pending =
+    snap.approvals.filter((a) => a.status === 'pending').length +
+    snap.tasks.filter((t) => t.status === 'needs_input').length
   const unread = snap.messages.filter((m) => !m.read).length
   const current: Tab = needsSetup ? 'settings' : tab
 
@@ -31,7 +33,7 @@ export default function App(): JSX.Element {
     { id: 'board', label: '태스크 보드' },
     { id: 'agents', label: '에이전트' },
     { id: 'inbox', label: '메시지 · 메모리', badge: unread },
-    { id: 'approvals', label: '승인 대기', badge: pending },
+    { id: 'approvals', label: '승인·자료 요청', badge: pending },
     { id: 'settings', label: '설정' }
   ]
 
@@ -62,7 +64,7 @@ export default function App(): JSX.Element {
         </div>
       </aside>
       <main className="main">
-        {current === 'board' && <Board snap={snap} output={output} />}
+        {current === 'board' && <Board snap={snap} output={output} live={live} />}
         {current === 'agents' && <Agents snap={snap} goBoard={() => setTab('board')} />}
         {current === 'inbox' && <Inbox snap={snap} />}
         {current === 'approvals' && <Approvals snap={snap} />}

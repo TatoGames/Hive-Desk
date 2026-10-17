@@ -6,6 +6,7 @@ import { defaultExtraArgs } from './adapters'
 
 export function defaultConfig(home: string): AppConfig {
   return {
+    attachShareMaxMB: 5,
     memberName: '',
     workspace: join(home, 'HiveDesk'),
     agents: [],

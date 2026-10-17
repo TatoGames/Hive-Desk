@@ -360,7 +360,9 @@ describe('transparency: change diff', () => {
     const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
     await runTask(agent, t.id, deps(h))
     const run = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
-    expect(run.diff.available).toBe(false)
+    // not a git repo: we still list changed files, just without line counts
+    expect(run.diff.available).toBe(true)
+    expect(run.diff.lines).toBe(false)
     expect(run.diff.reason).toMatch(/git 저장소가 아니/)
   })
 

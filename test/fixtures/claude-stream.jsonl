@@ -1,0 +1,9 @@
+{"type": "system", "subtype": "init", "session_id": "sess-real-1", "model": "claude-sonnet-5-5", "cwd": "/work"}
+{"type": "stream_event", "event": {"type": "content_block_delta"}, "session_id": "sess-real-1"}
+{"type": "stream_event", "event": {"type": "content_block_delta"}, "session_id": "sess-real-1"}
+{"type": "assistant", "session_id": "sess-real-1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01P25Rc7hzv93V48YX52pGw3", "name": "Read", "input": {"file_path": "/tmp/cl-probe/note.txt"}}]}}
+{"type": "user", "session_id": "sess-real-1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01P25Rc7hzv93V48YX52pGw3", "content": "1\thi\n2\t"}]}}
+{"type": "assistant", "session_id": "sess-real-1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_018TxUdsuf71LtUDymanUHGu", "name": "Write", "input": {"file_path": "/tmp/cl-probe/out.txt", "content": "ok\n"}}]}}
+{"type": "user", "session_id": "sess-real-1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_018TxUdsuf71LtUDymanUHGu", "content": "File created successfully at: /tmp/cl-probe/out.txt (file state is current in your context — no need to Read it back)"}]}}
+{"type": "assistant", "session_id": "sess-real-1", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}}
+{"type": "result", "subtype": "success", "is_error": false, "result": "done", "session_id": "sess-real-1", "permission_denials": [], "num_turns": 3}

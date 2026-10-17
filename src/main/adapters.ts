@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import type { AdapterId, AdapterInfo, Agent } from '../shared/types'
+import type { AdapterId, AdapterInfo, Agent, PermissionLevel } from '../shared/types'
+import type { StreamKind } from './activity'
 
 /**
  * Each adapter wraps a CLI the user is ALREADY logged into with their own
@@ -109,18 +110,118 @@ export interface BuiltCommand {
   args: string[]
   /** Append the prompt as the last argument instead of writing it to stdin. */
   promptArg?: boolean
+  /** How to read the CLI's stdout: structured events (claude/codex) or plain text. */
+  stream?: StreamKind
+  /** The CLI continues an earlier session; the prompt is only the new message. */
+  resumed?: boolean
 }
 
-export function buildCommand(agent: Agent): BuiltCommand {
+export interface BuildOptions {
+  /** Ask for the CLI's step-by-step event output (activity feed). Off for one-shot checks. */
+  stream?: boolean
+  permission?: PermissionLevel
+  /** Extra folders the agent may read. */
+  refDirs?: string[]
+  /** Continue this CLI session instead of starting a new one. */
+  resumeSession?: string
+}
+
+/** What HiveDesk can really enforce per CLI (the pre-run check shows this honestly). */
+export interface AdapterAccess {
+  /** `flag` = the CLI itself enforces it; `prompt` = only asked for in the instructions. */
+  permission: 'flag' | 'prompt'
+  refDirs: 'flag' | 'prompt'
+  /** `session` = same conversation continues; `replay` = a new run that is told what happened. */
+  resume: 'session' | 'replay'
+  stream: boolean
+}
+
+export function adapterAccess(id: AdapterId): AdapterAccess {
+  switch (id) {
+    case 'claude':
+      return { permission: 'flag', refDirs: 'flag', resume: 'session', stream: true }
+    case 'codex':
+      // Reference folders: `--add-dir` makes them WRITABLE for the sandbox; reading is what we ask for.
+      return { permission: 'flag', refDirs: 'flag', resume: 'replay', stream: true }
+    default:
+      return { permission: 'prompt', refDirs: 'prompt', resume: 'replay', stream: false }
+  }
+}
+
+/** Remove `--flag value` (and `--flag=value`) pairs from an arg list. */
+function dropFlag(args: string[], names: string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (names.includes(a)) {
+      i++ // skip its value
+      continue
+    }
+    if (names.some((n) => a.startsWith(n + '='))) continue
+    out.push(a)
+  }
+  return out
+}
+
+export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltCommand {
   const spec = ADAPTERS[agent.adapter]
   const command = agent.adapter === 'custom' ? (agent.command ?? '').trim() : spec.command
   if (!command) throw new Error('이 에이전트에 실행할 명령이 지정되지 않았어요.')
   const parts = agent.adapter === 'custom' ? splitArgs(agent.extraArgs) : [...spec.baseArgs]
   const args: string[] = [...parts]
+  const level = opts.permission ?? 'edit'
+  const dirs = (opts.refDirs ?? []).filter(Boolean)
+  let stream: StreamKind | undefined
+  let resumed = false
+
+  if (agent.adapter === 'claude') {
+    if (opts.stream) {
+      args.push('--output-format', 'stream-json', '--verbose')
+      stream = 'claude'
+    }
+    if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
+    let extra = splitArgs(agent.extraArgs)
+    if (level === 'read') {
+      extra = dropFlag(extra, ['--permission-mode'])
+      extra.push(
+        '--permission-mode',
+        'default',
+        '--allowedTools',
+        'Read,Grep,Glob',
+        '--disallowedTools',
+        'Edit,Write,MultiEdit,NotebookEdit,Bash'
+      )
+    } else if (level === 'exec') {
+      extra = dropFlag(extra, ['--permission-mode'])
+      extra.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
+    }
+    args.push(...extra)
+    for (const d of dirs) args.push(`--add-dir=${d}`)
+    if (opts.resumeSession) {
+      args.push('--resume', opts.resumeSession)
+      resumed = true
+    }
+    return { command, args, stream, resumed }
+  }
+
+  if (agent.adapter === 'codex') {
+    if (opts.stream) {
+      args.push('--json')
+      stream = 'codex'
+    }
+    if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
+    let extra = splitArgs(agent.extraArgs)
+    if (level === 'read') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'read-only']
+    else if (level === 'exec') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'danger-full-access']
+    args.push(...extra)
+    for (const d of dirs) args.push('--add-dir', d)
+    args.push('-') // read prompt from stdin
+    return { command, args, stream, resumed }
+  }
+
   if (agent.adapter !== 'custom') {
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     args.push(...splitArgs(agent.extraArgs))
-    if (agent.adapter === 'codex') args.push('-') // read prompt from stdin
     if (agent.adapter === 'agy') {
       if (process.platform === 'win32') {
         // cmd.exe cannot safely carry a long multi-line argument; use stdin there
