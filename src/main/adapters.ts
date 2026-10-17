@@ -57,7 +57,10 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     id: 'agy',
     label: 'Antigravity CLI (agy)',
     command: 'agy',
-    baseArgs: ['-p', 'Follow the task given on stdin.', '--input-format', 'text'],
+    // The prompt goes in as the -p value (see buildCommand): given only an
+    // instruction to read stdin, agy tries a shell command to read it, which
+    // headless mode denies, and the run ends with no output.
+    baseArgs: [],
     defaultExtraArgs: '',
     install: 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
     login: '`agy`를 한 번 실행하면 브라우저가 열려 Google 계정으로 로그인해요. 무료 계정도 쓸 수 있어요.',
@@ -104,6 +107,8 @@ export function splitArgs(s: string): string[] {
 export interface BuiltCommand {
   command: string
   args: string[]
+  /** Append the prompt as the last argument instead of writing it to stdin. */
+  promptArg?: boolean
 }
 
 export function buildCommand(agent: Agent): BuiltCommand {
@@ -116,6 +121,15 @@ export function buildCommand(agent: Agent): BuiltCommand {
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     args.push(...splitArgs(agent.extraArgs))
     if (agent.adapter === 'codex') args.push('-') // read prompt from stdin
+    if (agent.adapter === 'agy') {
+      if (process.platform === 'win32') {
+        // cmd.exe cannot safely carry a long multi-line argument; use stdin there
+        args.push('-p', 'Follow the task given on stdin.', '--input-format', 'text')
+      } else {
+        args.push('-p') // prompt is appended as this flag's value by runCli
+        return { command, args, promptArg: true }
+      }
+    }
   }
   return { command, args }
 }
@@ -194,7 +208,10 @@ export const runCli: Runner = (built, opts) =>
             shell: true,
             windowsHide: true
           })
-        : spawn(built.command, built.args, { cwd: opts.cwd, env: opts.env })
+        : spawn(built.command, built.promptArg ? [...built.args, opts.prompt] : built.args, {
+            cwd: opts.cwd,
+            env: opts.env
+          })
     } catch (e) {
       resolve({
         code: null,
@@ -268,7 +285,7 @@ export const runCli: Runner = (built, opts) =>
     child.stdin?.on('error', () => {
       /* EPIPE if the CLI exits before reading stdin */
     })
-    child.stdin?.end(opts.prompt)
+    child.stdin?.end(built.promptArg && !win ? '' : opts.prompt)
   })
 
 /** Is the CLI installed? (`<cmd> --version`) */
