@@ -4,6 +4,7 @@ import type { Agent, AppConfig, EngineEvent, Task } from '../shared/types'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
+import { fixPath } from './shellPath'
 
 let win: BrowserWindow | null = null
 let engine: Engine
@@ -58,9 +59,10 @@ function registerIpc(): void {
   )
   ipcMain.handle('memory:add', (_e, text: string) => engine.addMemory(text))
   ipcMain.handle('memory:delete', (_e, id: string) => engine.deleteMemory(id))
-  ipcMain.handle('adapters:detect', () =>
-    detectAll(cleanEnv(process.env, false))
-  )
+  ipcMain.handle('adapters:detect', () => {
+    fixPath() // pick up CLIs installed while the app was open
+    return detectAll(cleanEnv(process.env, false))
+  })
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
   ipcMain.handle('share:sync', () => engine.sync())
   ipcMain.handle('dialog:folder', async () => {
@@ -72,6 +74,7 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  fixPath()
   engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
   registerIpc()
   createWindow()

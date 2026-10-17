@@ -27,7 +27,7 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     baseArgs: ['-p'],
     modelFlag: '--model',
     defaultExtraArgs: '--permission-mode acceptEdits',
-    install: 'npm i -g @anthropic-ai/claude-code',
+    install: 'curl -fsSL https://claude.ai/install.sh | bash',
     login: '터미널에서 `claude`를 한 번 실행해 Claude Pro/Max 계정으로 로그인하세요.',
     note: '추가 인자에 --bare를 넣지 마세요. bare 모드는 구독 로그인을 쓰지 않고 API 키를 요구해요.'
   },
@@ -38,7 +38,7 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     baseArgs: ['exec', '--skip-git-repo-check'],
     modelFlag: '-m',
     defaultExtraArgs: '--sandbox workspace-write',
-    install: 'npm i -g @openai/codex',
+    install: 'npm install -g --prefix ~/.npm-global @openai/codex',
     login: '`codex login`을 실행하고 "Sign in with ChatGPT"를 고르세요.',
     note: 'ChatGPT 요금제로 로그인하면 API 과금 없이 쓸 수 있어요.'
   },
@@ -59,7 +59,7 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     command: 'agy',
     baseArgs: ['-p', 'Follow the task given on stdin.', '--input-format', 'text'],
     defaultExtraArgs: '',
-    install: 'Antigravity CLI 설치 안내를 따라 agy를 설치하세요',
+    install: 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
     login: '`agy`를 한 번 실행하면 브라우저가 열려 Google 계정으로 로그인해요. 무료 계정도 쓸 수 있어요.',
     note: 'stdin 입력 방식은 공식 문서에 자세히 나와 있지 않아요. 에이전트를 만든 뒤 "테스트" 버튼으로 먼저 확인하세요.'
   },

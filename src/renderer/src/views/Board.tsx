@@ -22,7 +22,7 @@ export default function Board({
   const nameOf = (id: string | null): string => {
     if (!id) return '미배정'
     const r = snap.roster.find((x) => x.id === id)
-    return r ? `${r.name} (${r.owner})` : id
+    return r ? `${r.name} (${r.owner})` : `${id} (삭제된 에이전트)`
   }
 
   return (
@@ -173,7 +173,9 @@ function Card(props: {
         </div>
         <div className="meta">
           {props.assigneeName}
-          {!props.isLocal && t.assignee && <span className="tag">팀원</span>}
+          {!props.isLocal && t.assignee && !props.assigneeName.endsWith('(삭제된 에이전트)') && (
+            <span className="tag">팀원</span>
+          )}
         </div>
         {!!blockedBy.length && (
           <div className="meta small">⏳ 대기: {blockedBy.map((b) => b.title).join(', ')}</div>

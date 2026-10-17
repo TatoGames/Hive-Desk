@@ -258,3 +258,15 @@ describe('git sharing', () => {
     expect(execFileSync('git', ['ls-files'], { cwd: a.root }).toString()).not.toContain('.local')
   }, 30000)
 })
+
+describe('PATH discovery', () => {
+  it('adds common CLI folders, keeps order, drops missing and duplicates', async () => {
+    const { mergePath, candidateDirs } = await import('../src/main/shellPath')
+    const dirs = candidateDirs('/Users/minu', 'darwin')
+    expect(dirs).toContain('/Users/minu/.local/bin')
+    expect(dirs).toContain('/Users/minu/.npm-global/bin')
+    expect(dirs).toContain('/opt/homebrew/bin')
+    const exists = (p: string) => p !== '/nope'
+    expect(mergePath(['/usr/bin:/bin', '/nope:/usr/bin:/a', '/b'], exists)).toBe('/usr/bin:/bin:/a:/b')
+  })
+})

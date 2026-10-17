@@ -49,11 +49,14 @@ Claude Code · OpenAI Codex · Antigravity(agy) · Gemini CLI를 각자 **자기
 
 | AI | 설치 | 로그인 (API 키 없이) |
 |---|---|---|
-| Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude` 실행 → Claude Pro/Max 계정 로그인 |
-| OpenAI Codex | `npm i -g @openai/codex` | `codex login` → *Sign in with ChatGPT* |
-| Antigravity (agy) | Antigravity CLI 설치 안내 참고 | `agy` 실행 → Google 계정 로그인 (무료 계정 가능) |
+| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` (Windows: `irm https://claude.ai/install.ps1 \| iex`) | `claude` 실행 → Claude Pro/Max 계정 로그인 |
+| OpenAI Codex | `npm install -g --prefix ~/.npm-global @openai/codex` (관리자 암호 없이 설치) | `codex login` → *Sign in with ChatGPT* |
+| Antigravity (agy) | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` 실행 → Google 계정 로그인 (무료 계정 가능) |
 | Gemini CLI | `npm i -g @google/gemini-cli` | Google 로그인. **2026-06-18부터 무료·AI Pro·Ultra 개인 계정은 agy로 이전**되어, Gemini CLI는 Code Assist 라이선스·Vertex·API 키가 있을 때만 써요 |
 | 기타 | 직접 지정 | stdin으로 프롬프트를 받아 stdout으로 답하는 CLI면 무엇이든 (예: `ollama run llama3`) |
+
+> 설치 후 터미널에서 `claude`를 못 찾는다고 나와도 괜찮아요. HiveDesk는 `~/.local/bin`, `~/.npm-global/bin`, Homebrew, nvm 폴더를 알아서 찾아요.
+> 앱이 열려 있는 동안 설치했다면 에이전트 탭의 *다시 확인*을 누르세요.
 
 > **API 요금 방지:** 설정의 *API 키 환경변수 숨기기*(기본 켜짐)는 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` 등을
 > CLI 실행 환경에서 빼서, CLI가 API 과금 대신 로그인한 계정을 쓰게 해요.
