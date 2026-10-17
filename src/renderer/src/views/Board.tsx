@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
+import TaskDetail, { ReportView } from './TaskDetail'
 
 const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'todo', label: '할 일' },
@@ -18,6 +19,7 @@ export default function Board({
   output: Record<string, string>
 }): JSX.Element {
   const [open, setOpen] = useState<string | null>(null)
+  const [detail, setDetail] = useState<string | null>(null)
   const localIds = new Set(snap.config.agents.map((a) => a.id))
   const nameOf = (id: string | null): string => {
     if (!id) return '미배정'
@@ -60,6 +62,7 @@ export default function Board({
                   live={output[t.id]}
                   expanded={open === t.id}
                   onToggle={() => setOpen(open === t.id ? null : t.id)}
+                  onDetail={() => setDetail(t.id)}
                 />
               ))}
               {!items.length && <div className="empty">없음</div>}
@@ -67,6 +70,14 @@ export default function Board({
           )
         })}
       </div>
+
+      {detail && snap.tasks.find((t) => t.id === detail) && (
+        <TaskDetail
+          task={snap.tasks.find((t) => t.id === detail)!}
+          assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   )
 }
@@ -158,6 +169,7 @@ function Card(props: {
   live?: string
   expanded: boolean
   onToggle: () => void
+  onDetail: () => void
 }): JSX.Element {
   const { task: t, all } = props
   const blockedBy = t.dependsOn
@@ -193,6 +205,7 @@ function Card(props: {
             </ul>
           )}
           {props.running && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
+          {!props.running && t.report && <ReportView report={t.report} />}
           {!props.running && t.result && <pre className="out">{t.result}</pre>}
           {t.error && <pre className="out err">{t.error}</pre>}
           <div className="muted small">
@@ -203,6 +216,9 @@ function Card(props: {
       )}
 
       <div className="card-actions">
+        <button className="sm ghost" onClick={props.onDetail}>
+          기록·변경
+        </button>
         {props.isLocal && t.status === 'todo' && !props.running && (
           <button className="primary sm" onClick={() => void window.hive.runTask(t.id)}>
             실행

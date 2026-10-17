@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -221,6 +221,161 @@ describe('runTask', () => {
   })
 })
 
+describe('transparency: reports, run records, timeline', () => {
+  it('parses a multi-line structured report and strips it from the result', () => {
+    const p = parseMarkers(
+      'Fixed it.\n[[DID: fixed the bug]]\n[[FILES: a.ts\nb.ts]]\n[[VERIFY: run npm test]]\n[[RISK: none]]\n[[NEXT: release]]'
+    )
+    expect(p.clean).toBe('Fixed it.')
+    expect(p.report).toEqual({
+      did: 'fixed the bug',
+      files: 'a.ts\nb.ts',
+      verify: 'run npm test',
+      risks: 'none',
+      next: 'release'
+    })
+    expect(parseMarkers('plain answer').report).toBeUndefined()
+  })
+
+  it('keeps every run, never overwrites, and builds the timeline', async () => {
+    const h = new Hive(join(dir, 'hive'))
+    const agent = fakeAgent()
+    const t = h.createTask({ title: 'Do it SCENARIO:report', assignee: agent.id, createdBy: 'alice' })
+    expect(await runTask(agent, t.id, deps(h))).toBe('done')
+    const first = h.getTask(t.id)!
+    expect(first.report?.did).toBe('wrote the files')
+    expect(first.result).toBe('All finished.')
+    expect(first.lastRunId).toBeTruthy()
+
+    h.updateTask(t.id, { status: 'todo' })
+    expect(await runTask(agent, t.id, deps(h))).toBe('done')
+    const runs = h.listRuns(t.id)
+    expect(runs).toHaveLength(2)
+    expect(new Set(runs.map((r) => r.id)).size).toBe(2)
+    const full = h.getRun(t.id, runs[0].id)!
+    expect(full.prompt).toContain('## Your task')
+    expect(full.response).toContain('[[DID: wrote the files]]') // raw answer is kept as-is
+    expect(full.exitCode).toBe(0)
+    expect(full.outcome).toBe('done')
+    expect(full.report?.next).toBe('add tests')
+
+    const kinds = h.listEvents(t.id).map((e) => e.kind)
+    expect(kinds).toEqual(['created', 'run_started', 'run_finished', 'run_started', 'run_finished'])
+  })
+
+  it('records failures and approvals on the timeline', async () => {
+    const h = new Hive(join(dir, 'hive'))
+    const agent = fakeAgent()
+    const bad = h.createTask({ title: 'SCENARIO:fail', assignee: agent.id, createdBy: 'alice' })
+    expect(await runTask(agent, bad.id, deps(h))).toBe('failed')
+    const [run] = h.listRuns(bad.id)
+    expect(run.outcome).toBe('failed')
+    expect(run.exitCode).toBe(3)
+    expect(h.getRun(bad.id, run.id)!.stderr).toContain('boom')
+    expect(h.listEvents(bad.id).at(-1)!.text).toMatch(/^실패/)
+
+    const risky = h.createTask({ title: 'Deploy', assignee: agent.id, risky: true, createdBy: 'alice' })
+    await runTask(agent, risky.id, deps(h))
+    h.decideApproval(h.listApprovals().find((a) => a.taskId === risky.id)!.id, 'approved', 'alice')
+    await runTask(agent, risky.id, deps(h))
+    expect(h.listEvents(risky.id).map((e) => e.kind)).toEqual([
+      'created',
+      'approval_requested',
+      'approval_decided',
+      'run_started',
+      'run_finished'
+    ])
+  })
+
+  it('deleting a task removes its timeline and run records', async () => {
+    const h = new Hive(join(dir, 'hive'))
+    const agent = fakeAgent()
+    const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
+    await runTask(agent, t.id, deps(h))
+    h.deleteTask(t.id)
+    expect(h.listEvents(t.id)).toEqual([])
+    expect(h.listRuns(t.id)).toEqual([])
+  })
+
+  it('run records stay on this machine, events are shared', async () => {
+    const remote = join(dir, 'remote.git')
+    execFileSync('git', ['init', '--bare', '-b', 'main', remote])
+    const h = new Hive(join(dir, 'a'))
+    await initSync(h.root, remote)
+    const agent = fakeAgent()
+    const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
+    await runTask(agent, t.id, deps(h))
+    expect((await syncNow(h.root, 'alice')).ok).toBe(true)
+    const files = execFileSync('git', ['ls-files'], { cwd: h.root }).toString()
+    expect(files).toContain('events/')
+    expect(files).not.toContain('.local')
+  }, 30000)
+})
+
+describe('transparency: change diff', () => {
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd }).toString()
+
+  function repo(): string {
+    const work = join(dir, 'work')
+    mkdirSync(work)
+    git(work, 'init', '-b', 'main')
+    writeFileSync(join(work, 'a.txt'), 'one\n')
+    writeFileSync(join(work, 'gone.txt'), 'bye\n')
+    writeFileSync(join(work, 'dirty.txt'), 'v1\n')
+    git(work, 'add', '-A')
+    git(work, 'commit', '-m', 'init')
+    return work
+  }
+
+  it('shows exactly what one run changed, ignoring earlier uncommitted work', async () => {
+    const work = repo()
+    writeFileSync(join(work, 'dirty.txt'), 'v2 (edited by the human before the run)\n')
+    const h = new Hive(join(dir, 'hive'))
+    const agent = fakeAgent({ workDir: work })
+    const t = h.createTask({ title: 'SCENARIO:write', assignee: agent.id, createdBy: 'alice' })
+    expect(await runTask(agent, t.id, deps(h))).toBe('done')
+
+    const run = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
+    expect(run.diff.available).toBe(true)
+    const byPath = Object.fromEntries(run.diff.files.map((f) => [f.path, f]))
+    expect(Object.keys(byPath).sort()).toEqual(['a.txt', 'gone.txt', 'out.txt'])
+    expect(byPath['out.txt']).toMatchObject({ status: 'A', additions: 1, deletions: 0 })
+    expect(byPath['a.txt']).toMatchObject({ status: 'M', additions: 1 })
+    expect(byPath['gone.txt']).toMatchObject({ status: 'D', deletions: 1 })
+    expect(run.diff.patch).toContain('+changed')
+    expect(h.listRuns(t.id)[0].diffStat).toEqual({ available: true, files: 3, additions: 2, deletions: 1 })
+    expect(h.listEvents(t.id).at(-1)!.text).toMatch(/파일 3개 변경 \(\+2 −1\)/)
+
+    // the user's own repo state is untouched: nothing staged, nothing committed
+    expect(git(work, 'diff', '--cached', '--name-only').trim()).toBe('')
+    expect(git(work, 'log', '--oneline').trim().split('\n')).toHaveLength(1)
+  })
+
+  it('says so when the work folder is not a git repo', async () => {
+    const work = join(dir, 'plain')
+    mkdirSync(work)
+    const h = new Hive(join(dir, 'hive'))
+    const agent = fakeAgent({ workDir: work })
+    const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
+    await runTask(agent, t.id, deps(h))
+    const run = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
+    expect(run.diff.available).toBe(false)
+    expect(run.diff.reason).toMatch(/git 저장소가 아니/)
+  })
+
+  it('ignores the hive\'s own files when the hive folder is the work folder', async () => {
+    const h = new Hive(join(dir, 'hive'))
+    await initSync(h.root, '')
+    const agent = fakeAgent()
+    const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
+    await runTask(agent, t.id, deps(h, { defaultCwd: h.root }))
+    const run = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
+    expect(run.diff.available).toBe(true)
+    expect(run.diff.files).toEqual([])
+  })
+})
+
 describe('engine', () => {
   it('auto-run executes ready tasks in dependency order', async () => {
     const events: string[] = []
@@ -246,6 +401,21 @@ describe('engine', () => {
     }
     expect(eng.hive.getTask(second.id)!.status).toBe('done')
     expect(eng.snapshot().roster.map((r) => r.id)).toContain('alice-dev')
+    eng.shutdown()
+  })
+
+  it('logs manual status changes and serves task history', async () => {
+    const eng = new Engine(join(dir, 'config.json'), () => {}, runCli, dir)
+    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws') })
+    const t = eng.createTask({ title: 'x' })
+    eng.updateTask(t.id, { status: 'failed' })
+    eng.updateTask(t.id, { status: 'todo' })
+    eng.updateTask(t.id, { title: 'renamed' }) // no status change → no event
+    const h = eng.taskHistory(t.id)
+    expect(h.events.map((e) => e.kind)).toEqual(['created', 'status', 'status'])
+    expect(h.events[2].text).toBe('상태를 직접 바꿨어요: 실패 → 할 일')
+    expect(h.runs).toEqual([])
+    expect(eng.runDetail(t.id, 'nope')).toBeNull()
     eng.shutdown()
   })
 })

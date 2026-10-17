@@ -16,12 +16,26 @@ import type {
   MemoryEntry,
   Message,
   RosterEntry,
+  RunRecord,
+  RunSummary,
   Task,
+  TaskEvent,
+  TaskEventKind,
   Usage
 } from '../shared/types'
 
+/** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events']
+
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
+}
+
+let eventSeq = 0
+/** Sortable in creation order even when several events land in the same millisecond. */
+function eventId(): string {
+  const n = (eventSeq++ % 1_679_616).toString(36).padStart(4, '0')
+  return Date.now().toString(36) + '-' + n + '-' + randomBytes(2).toString('hex')
 }
 
 export function slug(s: string): string {
@@ -30,6 +44,12 @@ export function slug(s: string): string {
     .replace(/[^a-z0-9가-힣]+/g, '-')
     .replace(/^-+|-+$/g, '')
   return out || 'x'
+}
+
+const APPROVAL_LABEL: Record<ApprovalKind, string> = {
+  'risky-task': '위험 작업',
+  budget: '예산',
+  'agent-request': '에이전트 요청'
 }
 
 function now(): string {
@@ -68,7 +88,7 @@ function listJson<T>(dir: string): T[] {
  */
 export class Hive {
   constructor(public readonly root: string) {
-    for (const d of ['tasks', 'approvals', 'inbox', 'memory', 'agents', '.local/usage']) {
+    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
@@ -111,6 +131,12 @@ export class Hive {
       notes: []
     }
     writeJson(this.p('tasks', t.id + '.json'), t)
+    this.addEvent(
+      t.id,
+      'created',
+      t.createdBy,
+      `태스크를 만들었어요 · 담당 ${t.assignee ?? '미배정'}${t.risky ? ' · 위험 표시' : ''}`
+    )
     return t
   }
 
@@ -124,6 +150,57 @@ export class Hive {
 
   deleteTask(id: string): void {
     rmSync(this.p('tasks', id + '.json'), { force: true })
+    rmSync(this.p('events', id), { recursive: true, force: true })
+    rmSync(this.p('.local', 'runs', id), { recursive: true, force: true })
+  }
+
+  // ---- timeline events (append-only, shared) ----
+  addEvent(
+    taskId: string,
+    kind: TaskEventKind,
+    actor: string,
+    text: string,
+    runId?: string
+  ): TaskEvent {
+    const e: TaskEvent = { id: eventId(), taskId, at: now(), kind, actor, text, ...(runId ? { runId } : {}) }
+    const dir = this.p('events', taskId)
+    mkdirSync(dir, { recursive: true })
+    writeJson(join(dir, e.id + '.json'), e)
+    return e
+  }
+
+  listEvents(taskId: string): TaskEvent[] {
+    return listJson<TaskEvent>(this.p('events', taskId)).sort(
+      (a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id)
+    )
+  }
+
+  // ---- run records (per machine, never overwritten: one file per execution) ----
+  addRun(r: RunRecord): void {
+    const dir = this.p('.local', 'runs', r.taskId)
+    mkdirSync(dir, { recursive: true })
+    writeJson(join(dir, r.id + '.json'), r)
+  }
+
+  getRun(taskId: string, runId: string): RunRecord | null {
+    return readJson<RunRecord>(this.p('.local', 'runs', taskId, runId + '.json'))
+  }
+
+  listRuns(taskId: string): RunSummary[] {
+    return listJson<RunRecord>(this.p('.local', 'runs', taskId))
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))
+      .map((r) => {
+        const { prompt: _p, response: _r, stderr: _s, diff, ...rest } = r
+        return {
+          ...rest,
+          diffStat: {
+            available: diff.available,
+            files: diff.files.length,
+            additions: diff.files.reduce((n, f) => n + f.additions, 0),
+            deletions: diff.files.reduce((n, f) => n + f.deletions, 0)
+          }
+        }
+      })
   }
 
   /** A task is ready when it is `todo` and every dependency is `done`. */
@@ -147,6 +224,7 @@ export class Hive {
   }): Approval {
     const a: Approval = { id: newId(), status: 'pending', createdAt: now(), ...input }
     writeJson(this.p('approvals', a.id + '.json'), a)
+    this.addEvent(a.taskId, 'approval_requested', a.agentId, `결재 요청 (${APPROVAL_LABEL[a.kind]}): ${a.reason}`)
     return a
   }
 
@@ -163,6 +241,12 @@ export class Hive {
     if (a.status !== 'pending') return a
     const next: Approval = { ...a, status: decision, decidedAt: now(), decidedBy: by }
     writeJson(this.p('approvals', id + '.json'), next)
+    this.addEvent(
+      a.taskId,
+      'approval_decided',
+      by,
+      `${decision === 'approved' ? '승인' : '거절'} (${APPROVAL_LABEL[a.kind]})`
+    )
 
     const task = this.getTask(a.taskId)
     if (task) {

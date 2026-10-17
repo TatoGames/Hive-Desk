@@ -50,6 +50,8 @@ function registerIpc(): void {
   ipcMain.handle('task:create', (_e, t) => engine.createTask(t))
   ipcMain.handle('task:update', (_e, id: string, patch: Partial<Task>) => engine.updateTask(id, patch))
   ipcMain.handle('task:delete', (_e, id: string) => engine.deleteTask(id))
+  ipcMain.handle('task:history', (_e, id: string) => engine.taskHistory(id))
+  ipcMain.handle('task:run-detail', (_e, taskId: string, runId: string) => engine.runDetail(taskId, runId))
   ipcMain.handle('task:run', (_e, id: string) => engine.runTask(id))
   ipcMain.handle('task:stop', (_e, id: string) => engine.stopTask(id))
   ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected') =>

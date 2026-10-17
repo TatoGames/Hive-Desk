@@ -1,13 +1,24 @@
 import { existsSync } from 'node:fs'
-import type { Agent, Task } from '../shared/types'
+import type { Agent, Report, RunDiff, RunRecord, RunResultKind, Task } from '../shared/types'
 import { buildCommand, cleanEnv, type Runner } from './adapters'
-import { Hive } from './hive'
+import { diffStat, trackChanges } from './gitdiff'
+import { Hive, newId } from './hive'
 
 export interface ParsedMarkers {
   clean: string
   memory: string[]
   messages: { to: string; body: string }[]
   approvals: string[]
+  /** Present when the agent used at least one report marker (DID/FILES/VERIFY/RISK/NEXT). */
+  report?: Report
+}
+
+const REPORT_KEYS: Record<string, keyof Report> = {
+  DID: 'did',
+  FILES: 'files',
+  VERIFY: 'verify',
+  RISK: 'risks',
+  NEXT: 'next'
 }
 
 /** Agents talk back to the hive with marker lines, e.g. `[[MEMORY: we use pnpm]]`. */
@@ -15,16 +26,28 @@ export function parseMarkers(text: string): ParsedMarkers {
   const memory: string[] = []
   const messages: { to: string; body: string }[] = []
   const approvals: string[] = []
-  const re = /^[ \t]*\[\[(MEMORY|MSG|APPROVAL)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
+  const parts: Partial<Record<keyof Report, string[]>> = {}
+  const re =
+    /^[ \t]*\[\[(MEMORY|MSG|APPROVAL|DID|FILES|VERIFY|RISK|NEXT)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
   const clean = text.replace(re, (_m, kind: string, to: string | undefined, body: string) => {
     const b = body.trim()
     if (!b) return ''
     if (kind === 'MEMORY') memory.push(b)
     else if (kind === 'MSG' && to) messages.push({ to, body: b })
     else if (kind === 'APPROVAL') approvals.push(b)
+    else if (REPORT_KEYS[kind]) (parts[REPORT_KEYS[kind]] ??= []).push(b)
     return ''
   })
-  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals }
+  const report = Object.keys(parts).length
+    ? {
+        did: (parts.did ?? []).join('\n'),
+        files: (parts.files ?? []).join('\n'),
+        verify: (parts.verify ?? []).join('\n'),
+        risks: (parts.risks ?? []).join('\n'),
+        next: (parts.next ?? []).join('\n')
+      }
+    : undefined
+  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals, report }
 }
 
 export function buildPrompt(opts: {
@@ -68,7 +91,14 @@ export function buildPrompt(opts: {
   lines.push(
     '',
     '## Reply protocol',
-    'Reply in the same language as the task. Finish with a concise result. You may also use these lines, each alone on its own line:',
+    'Reply in the same language as the task. Give your result first, then end with a short structured report using these markers.',
+    'Each marker starts at the beginning of a line; a part may span several lines and ends with ]] at the end of a line:',
+    '[[DID: what you did]]',
+    '[[FILES: files you changed or created, one per line, or "none"]]',
+    '[[VERIFY: how a human can check that it works]]',
+    '[[RISK: remaining risks or open questions, or "none"]]',
+    '[[NEXT: what should happen next, or "none"]]',
+    'You may also use these lines, each alone on its own line:',
     '[[MEMORY: a durable fact the whole team should remember]]',
     '[[MSG to=<teammate-id>: a short message to a teammate]]',
     '[[APPROVAL: why a human must approve before you continue]]',
@@ -144,12 +174,15 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
 
   const cwd = agent.workDir && existsSync(agent.workDir) ? agent.workDir : deps.defaultCwd
   const started = nowFn()
+  const runId = newId()
   hive.updateTask(task.id, {
     status: 'running',
     startedAt: started.toISOString(),
     error: undefined,
-    result: undefined
+    result: undefined,
+    report: undefined
   })
+  hive.addEvent(task.id, 'run_started', agent.id, `${agent.name} 실행 시작`, runId)
 
   const prompt = buildPrompt({ agent, task, hive })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
@@ -158,13 +191,14 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   try {
     built = buildCommand(agent)
   } catch (e) {
-    hive.updateTask(task.id, {
-      status: 'failed',
-      error: (e as Error).message,
-      finishedAt: nowFn().toISOString()
-    })
+    const finishedAt = nowFn().toISOString()
+    hive.addEvent(task.id, 'run_finished', agent.id, '실패 · ' + (e as Error).message, runId)
+    hive.updateTask(task.id, { status: 'failed', error: (e as Error).message, finishedAt })
     return 'failed'
   }
+
+  // Remember how the work folder looked, so we can show exactly what this run changed.
+  const tracker = await trackChanges(cwd, { hiveRoot: hive.root })
 
   const res = await deps.runner(built, {
     cwd,
@@ -178,31 +212,58 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const elapsed = nowFn().getTime() - started.getTime()
   hive.recordUsage(agent.id, elapsed, nowFn())
   const finishedAt = nowFn().toISOString()
+  const diff = await tracker.finish()
+
+  /** Save the full record of this execution (never overwritten) and log it on the timeline. */
+  const saveRun = (outcome: RunResultKind, extra: { error?: string; report?: Report } = {}): string => {
+    const rec: RunRecord = {
+      id: runId,
+      taskId: task.id,
+      agentId: agent.id,
+      adapter: agent.adapter,
+      model: agent.model,
+      startedAt: started.toISOString(),
+      finishedAt,
+      durationMs: elapsed,
+      outcome,
+      exitCode: res.code,
+      prompt: cap(prompt, 100_000),
+      response: cap(res.stdout, 300_000),
+      stderr: cap(res.stderr, 20_000),
+      error: extra.error,
+      report: extra.report,
+      diff
+    }
+    hive.addRun(rec)
+    hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
+    return runId
+  }
 
   if (res.aborted) {
-    hive.updateTask(task.id, { status: 'todo', error: '사용자가 중지했어요.', finishedAt })
+    const error = '사용자가 중지했어요.'
+    hive.updateTask(task.id, { status: 'todo', error, finishedAt, lastRunId: saveRun('cancelled', { error }) })
     return 'cancelled'
   }
   if (res.spawnError) {
-    hive.updateTask(task.id, { status: 'failed', error: res.spawnError, finishedAt })
+    const error = res.spawnError
+    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
   if (res.timedOut) {
+    const error = `제한 시간 ${agent.timeoutMinutes}분을 넘겨 중지했어요.`
     hive.updateTask(task.id, {
       status: 'failed',
-      error: `제한 시간 ${agent.timeoutMinutes}분을 넘겨 중지했어요.`,
+      error,
       result: res.stdout.trim() || undefined,
-      finishedAt
+      finishedAt,
+      lastRunId: saveRun('failed', { error })
     })
     return 'failed'
   }
   if (res.code !== 0) {
     const detail = (res.stderr.trim() || res.stdout.trim()).slice(-1500)
-    hive.updateTask(task.id, {
-      status: 'failed',
-      error: `CLI가 오류 코드 ${res.code}로 끝났어요.${detail ? '\n' + detail : ''}`,
-      finishedAt
-    })
+    const error = `CLI가 오류 코드 ${res.code}로 끝났어요.${detail ? '\n' + detail : ''}`
+    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
 
@@ -219,16 +280,49 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
 
   if (parsed.approvals.length) {
     const reason = parsed.approvals.join(' / ')
+    const lastRunId = saveRun('awaiting_approval', { report: parsed.report })
     hive.createApproval({ kind: 'agent-request', taskId: task.id, agentId: agent.id, reason })
     hive.updateTask(task.id, {
       status: 'awaiting_approval',
       notes: [...task.notes, `${agent.name}이(가) 멈추고 승인을 요청했어요: ${reason}`],
       result: parsed.clean || undefined,
-      finishedAt
+      report: parsed.report,
+      finishedAt,
+      lastRunId
     })
     return 'awaiting_approval'
   }
 
-  hive.updateTask(task.id, { status: 'done', result: parsed.clean, error: undefined, finishedAt })
+  hive.updateTask(task.id, {
+    status: 'done',
+    result: parsed.clean,
+    report: parsed.report,
+    error: undefined,
+    finishedAt,
+    lastRunId: saveRun('done', { report: parsed.report })
+  })
   return 'done'
+}
+
+function cap(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + `\n…(${s.length - n}자 생략)` : s
+}
+
+const OUTCOME_LABEL: Record<RunResultKind, string> = {
+  done: '완료',
+  failed: '실패',
+  cancelled: '중지됨',
+  awaiting_approval: '승인 대기'
+}
+
+export function runLine(outcome: RunResultKind, ms: number, diff: RunDiff): string {
+  const sec = Math.max(1, Math.round(ms / 1000))
+  const time = sec >= 60 ? `${Math.floor(sec / 60)}분 ${sec % 60}초` : `${sec}초`
+  const st = diffStat(diff)
+  const change = !st.available
+    ? '변경 비교 불가'
+    : st.files === 0
+      ? '파일 변경 없음'
+      : `파일 ${st.files}개 변경 (+${st.additions} −${st.deletions})`
+  return `${OUTCOME_LABEL[outcome]} · ${time} · ${change}`
 }

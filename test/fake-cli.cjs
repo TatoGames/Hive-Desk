@@ -16,6 +16,22 @@ process.stdin.on('end', () => {
     console.log('[[APPROVAL: about to drop the old table]]')
     return
   }
+  if (input.includes('SCENARIO:report') || input.includes('SCENARIO:write')) {
+    if (input.includes('SCENARIO:write')) {
+      const fs = require('fs')
+      fs.writeFileSync('out.txt', 'hello\n')
+      fs.appendFileSync('a.txt', 'changed\n')
+      fs.rmSync('gone.txt', { force: true })
+    }
+    console.log('All finished.')
+    console.log('[[DID: wrote the files]]')
+    console.log('[[FILES: out.txt')
+    console.log('a.txt]]')
+    console.log('[[VERIFY: open out.txt]]')
+    console.log('[[RISK: none]]')
+    console.log('[[NEXT: add tests]]')
+    return
+  }
   console.log('Done: ' + (input.match(/## Your task\n(.*)/) || [])[1])
   console.log('[[MEMORY: project uses pnpm]]')
   console.log('[[MSG to=bob-tester: please test the login page]]')

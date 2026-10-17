@@ -4,9 +4,12 @@ import type {
   Agent,
   AppConfig,
   EngineEvent,
+  RunRecord,
   Snapshot,
   SyncResult,
-  Task
+  Task,
+  TaskHistory,
+  TaskStatus
 } from '../shared/types'
 import { runCli, type Runner } from './adapters'
 import { loadConfig, makeAgent, saveConfig } from './config'
@@ -15,6 +18,14 @@ import { runTask } from './runner'
 import { initSync, isGitRepo, syncNow } from './sync'
 
 export type Emit = (e: EngineEvent) => void
+
+const STATUS_LABEL: Record<TaskStatus, string> = {
+  todo: '할 일',
+  awaiting_approval: '승인 대기',
+  running: '실행 중',
+  done: '완료',
+  failed: '실패'
+}
 
 /** Owns config + hive, runs tasks (manually or via auto-run), and schedules git sync. */
 export class Engine {
@@ -47,6 +58,7 @@ export class Engine {
           status: 'todo',
           notes: [...t.notes, '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.']
         })
+        this.hive.addEvent(t.id, 'status', 'system', '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.')
       }
     }
   }
@@ -138,9 +150,27 @@ export class Engine {
   }
 
   updateTask(id: string, patch: Partial<Task>): Task {
+    const before = this.hive.getTask(id)
     const t = this.hive.updateTask(id, patch)
+    if (before && patch.status && patch.status !== before.status) {
+      this.hive.addEvent(
+        id,
+        'status',
+        this.config.memberName || 'me',
+        `상태를 직접 바꿨어요: ${STATUS_LABEL[before.status]} → ${STATUS_LABEL[patch.status]}`
+      )
+    }
     this.changed()
     return t
+  }
+
+  /** Timeline (shared) + run list (this machine) for one task. */
+  taskHistory(id: string): TaskHistory {
+    return { events: this.hive.listEvents(id), runs: this.hive.listRuns(id) }
+  }
+
+  runDetail(taskId: string, runId: string): RunRecord | null {
+    return this.hive.getRun(taskId, runId)
   }
 
   deleteTask(id: string): void {

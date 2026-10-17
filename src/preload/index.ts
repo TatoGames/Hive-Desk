@@ -4,10 +4,12 @@ import type {
   AppConfig,
   AdapterInfo,
   EngineEvent,
+  RunRecord,
   Snapshot,
   SyncResult,
   SetupCheck,
-  Task
+  Task,
+  TaskHistory
 } from '../shared/types'
 
 const api = {
@@ -26,6 +28,9 @@ const api = {
   updateTask: (id: string, patch: Partial<Task>): Promise<Task> =>
     ipcRenderer.invoke('task:update', id, patch),
   deleteTask: (id: string): Promise<void> => ipcRenderer.invoke('task:delete', id),
+  taskHistory: (id: string): Promise<TaskHistory> => ipcRenderer.invoke('task:history', id),
+  runDetail: (taskId: string, runId: string): Promise<RunRecord | null> =>
+    ipcRenderer.invoke('task:run-detail', taskId, runId),
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
   decideApproval: (id: string, d: 'approved' | 'rejected'): Promise<void> =>

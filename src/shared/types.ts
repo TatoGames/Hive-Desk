@@ -52,9 +52,98 @@ export interface Task {
   cleared: ApprovalKind[]
   notes: string[]
   result?: string
+  /** Structured report from the latest run (the agent's own account). */
+  report?: Report
+  /** Id of the latest run record (kept on the machine that ran it). */
+  lastRunId?: string
   error?: string
   startedAt?: string
   finishedAt?: string
+}
+
+/** Standard report format: what was done / files changed / how to verify / risks / next. */
+export interface Report {
+  did: string
+  files: string
+  verify: string
+  risks: string
+  next: string
+}
+
+export type TaskEventKind =
+  | 'created'
+  /** Reserved for the delegation engine (stage 3): requirement check, review. */
+  | 'check'
+  | 'approval_requested'
+  | 'approval_decided'
+  | 'run_started'
+  | 'run_finished'
+  | 'review'
+  | 'status'
+
+/** One line of a task's timeline. Append-only: events are never rewritten. */
+export interface TaskEvent {
+  id: string
+  taskId: string
+  at: string
+  kind: TaskEventKind
+  /** Who/what caused it: a member name, an agent id, or "system". */
+  actor: string
+  text: string
+  runId?: string
+}
+
+export type RunResultKind = 'done' | 'failed' | 'cancelled' | 'awaiting_approval'
+
+export interface DiffFile {
+  path: string
+  /** A(dded) M(odified) D(eleted) T(ype changed) */
+  status: string
+  additions: number
+  deletions: number
+  binary: boolean
+}
+
+/** What a run changed in the agent's work folder (only when it is a git repo). */
+export interface RunDiff {
+  available: boolean
+  /** Why there is no diff (not a git repo, git failed, ...). */
+  reason?: string
+  files: DiffFile[]
+  patch: string
+  truncated: boolean
+}
+
+/** Everything about one execution. Stored per machine under `.local/runs`; never overwritten. */
+export interface RunRecord {
+  id: string
+  taskId: string
+  agentId: string
+  adapter: AdapterId
+  model?: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  outcome: RunResultKind
+  exitCode: number | null
+  /** The exact instruction sent to the CLI. */
+  prompt: string
+  /** The CLI's raw answer (markers included). */
+  response: string
+  stderr: string
+  error?: string
+  report?: Report
+  diff: RunDiff
+}
+
+/** A run without the heavy fields, for lists. */
+export type RunSummary = Omit<RunRecord, 'prompt' | 'response' | 'stderr' | 'diff'> & {
+  diffStat: { available: boolean; files: number; additions: number; deletions: number }
+}
+
+export interface TaskHistory {
+  events: TaskEvent[]
+  runs: RunSummary[]
 }
 
 export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request'
