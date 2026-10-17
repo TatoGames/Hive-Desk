@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Snapshot } from '@shared/types'
 import {
   JOBS,
@@ -71,6 +71,7 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
   const [name, setName] = useState('')
   const [editUnit, setEditUnit] = useState<(Partial<OrgUnit> & { name: string }) | null>(null)
   const [editSeat, setEditSeat] = useState<(Partial<Seat> & { unitId: string; title: string }) | null>(null)
+  const [auto, setAuto] = useState(false)
 
   const input: PlacementInput = useMemo(
     () => ({
@@ -147,7 +148,18 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
           {seats.map((s) => {
             const agent = s.agentId ? snap.roster.find((r) => r.id === s.agentId) : undefined
             return (
-              <div key={s.id} className="seat">
+              <div
+                key={s.id}
+                className="seat"
+                onDragOver={(e) => e.dataTransfer.types.includes('text/model-agent') && e.preventDefault()}
+                onDrop={(e) => {
+                  const ma = e.dataTransfer.getData('text/model-agent')
+                  if (ma && (!s.agentId || window.confirm('이 자리에 이미 직원이 있어요. 새 직원을 채용해 자리를 바꿀까요? (기존 직원은 남아 있어요)'))) {
+                    e.preventDefault()
+                    void window.hive.hireToSeat(s.id, ma)
+                  }
+                }}
+              >
                 <div>
                   <b>{s.title}</b> <span className="muted small">{rankName(s.rankId)} · {jobLabel(s.job)}</span>
                 </div>
@@ -186,6 +198,7 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
         <div className="row between">
           <h2>{company.name}</h2>
           <div className="row">
+            <button className="primary" onClick={() => setAuto(true)}>추천 AI 자동 연결…</button>
             <button onClick={() => void window.hive.placeModels(true)}>빈 자리 모델 추천 채우기</button>
             <button onClick={() => void window.hive.placeModels(false)}>모든 자리 모델 다시 추천</button>
             <button className="primary" onClick={() => setEditUnit({ name: '', kind: '본부', parentId: null })}>
@@ -224,6 +237,7 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
         </div>
       </section>
 
+      {auto && <AutoConnect onClose={() => setAuto(false)} />}
       {editUnit && <UnitDialog snap={snap} draft={editUnit} onClose={() => setEditUnit(null)} />}
       {editSeat && <SeatDialog snap={snap} draft={editSeat} onClose={() => setEditSeat(null)} />}
     </>
@@ -698,5 +712,65 @@ function Perf({ snap }: { snap: Snapshot }): JSX.Element {
         </table>
       )}
     </section>
+  )
+}
+
+function AutoConnect({ onClose }: { onClose: () => void }): JSX.Element {
+  const [rows, setRows] = useState<import('@shared/connections').AutoRow[] | null>(null)
+  const [done, setDone] = useState<number | null>(null)
+  useEffect(() => {
+    void window.hive.autoConnectPreview().then(setRows)
+  }, [])
+  const ready = rows?.filter((r) => r.modelAgentId) ?? []
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="dialog wide" onClick={(e) => e.stopPropagation()}>
+        <h2>추천 AI 자동 연결</h2>
+        <p className="muted small">
+          자리마다 추천 모델과, 지금 연결된 AI로 가능한 모델을 보여 드려요. 추천 모델을 쓸 수 없으면 같은 체급의 다른 모델로 대체하고
+          표시해요. 확인하면 그 모델을 직원으로 채용해 자리에 앉혀요.
+        </p>
+        {!rows && <div className="empty">계산하는 중…</div>}
+        {rows && !rows.length && <div className="empty">연결할 빈 자리가 없어요.</div>}
+        {!!rows?.length && (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>자리</th>
+                <th>추천 모델</th>
+                <th>사용 가능</th>
+                <th>연결할 모델</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.seatId}>
+                  <td>
+                    {r.seatTitle} <span className="muted small">{r.unitName} · {jobLabel(r.job)}</span>
+                  </td>
+                  <td>{r.recommendedLabel}</td>
+                  <td>{r.usable ? '✓' : <span className="warn-text">✗</span>}</td>
+                  <td>
+                    <b>{r.chosenLabel}</b> {r.substituted && <span className="tag warn">대체</span>}
+                    {r.note && <div className="muted small">{r.note}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {done !== null && <div className="small">{done}명을 채용해 자리에 앉혔어요.</div>}
+        <div className="row end">
+          <button onClick={onClose}>닫기</button>
+          <button
+            className="primary"
+            disabled={!ready.length || done !== null}
+            onClick={async () => setDone(await window.hive.autoConnectApply(ready.map((r) => ({ seatId: r.seatId, modelAgentId: r.modelAgentId! }))))}
+          >
+            {ready.length}자리 연결
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

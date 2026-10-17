@@ -55,9 +55,21 @@ import {
 } from '../shared/company'
 import DEFAULT_MODELS from '../shared/models.default.json'
 import { autoPlace } from '../shared/placement'
+import {
+  modelAgentId,
+  substituteFor,
+  type AutoRow,
+  type ConnectionView,
+  type ModelAgent,
+  type ModelAgentStatus,
+  type ModelAgentView
+} from '../shared/connections'
 import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, writeMeta, type MigrationResult } from './workspace'
+
+/** After the account hit its usage limit, the company priority decides who may start work for this long. */
+export const SCARCE_HOURS = 6
 
 export type Emit = (e: EngineEvent) => void
 
@@ -234,6 +246,7 @@ export class Engine {
 
   private noteLimit(adapter: Agent['adapter'], info: LimitInfo): void {
     this.limits[adapter] = info
+    this.machine.noteLimitHit(adapter)
     try {
       writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
     } catch {
@@ -327,6 +340,7 @@ export class Engine {
       // only this company's employees are shown: other companies' agents are not visible here
       config: { ...this.config, agents: local },
       companies: this.companySummaries(),
+      connections: this.connectionViews(),
       tasks: this.hive.listTasks(),
       approvals: this.hive.listApprovals(),
       roster: this.hive.listRoster(),
@@ -410,6 +424,188 @@ export class Engine {
     const c = h.getCompany()
     if (c) h.saveCompany({ ...c, name: clean })
     this.changed()
+  }
+
+  // ---- connections, model agents, hiring ----
+  private catalogOf(modelId: string): ModelEntry | undefined {
+    return this.catalog().find((m) => m.id === modelId)
+  }
+
+  /** Usable = connected, and not known to be unavailable on this account. */
+  modelAgentStatus(ma: ModelAgent): { status: ModelAgentStatus; message?: string } {
+    const m = this.catalogOf(ma.modelId)
+    if (!m) return { status: 'unavailable', message: '카탈로그에 없는 모델이에요.' }
+    const av = this.machine.availability()[ma.modelId]
+    if (av) return { status: av.ok ? 'ok' : 'unavailable', message: av.message }
+    const list = this.machine.accountModels()[ma.adapter]
+    if (list && !list.models.some((x) => x.slug === m.cliArg)) return { status: 'unavailable', message: '이 계정의 모델 목록에 없어요.' }
+    return { status: 'unchecked' }
+  }
+
+  /** One default agent per model the connection can use (created when the connection works). */
+  syncModelAgents(adapter: Agent['adapter']): number {
+    const have = this.machine.modelAgents()
+    const known = new Set(have.map((x) => x.id))
+    const add: ModelAgent[] = []
+    for (const m of this.catalog().filter((x) => x.adapter === adapter)) {
+      const id = modelAgentId(adapter, m.id)
+      if (!known.has(id)) add.push({ id, adapter, modelId: m.id, createdAt: new Date().toISOString() })
+    }
+    if (add.length) this.machine.saveModelAgents([...have, ...add])
+    return add.length
+  }
+
+  private connectionOrder(adapter: string): string[] {
+    const ids = [...this.hives.keys()] // creation order
+    const pick = this.config.connectionOrder?.[adapter] ?? this.config.companyOrder ?? []
+    const known = pick.filter((id) => this.hives.has(id))
+    return [...known, ...ids.filter((id) => !known.includes(id))]
+  }
+
+  /** Priority of companies for the usage limit of one connection (`adapter`), or for all of them. */
+  setCompanyOrder(order: string[], adapter?: string): void {
+    const clean = order.filter((id) => this.hives.has(id))
+    this.config = adapter
+      ? { ...this.config, connectionOrder: { ...(this.config.connectionOrder ?? {}), [adapter]: clean } }
+      : { ...this.config, companyOrder: clean }
+    saveConfig(this.configFile, this.config)
+    this.changed()
+  }
+
+  connectionViews(): ConnectionView[] {
+    const adapters = ['claude', 'codex', 'gemini', 'agy'] as Agent['adapter'][]
+    const checks = this.machine.connectionChecks()
+    const mas = this.machine.modelAgents()
+    return adapters
+      .filter((ad) => checks[ad] || mas.some((x) => x.adapter === ad))
+      .map((ad) => ({
+        adapter: ad,
+        check: checks[ad],
+        limit: this.limitFor(ad),
+        canList: !!ADAPTERS[ad].listModels,
+        order: this.connectionOrder(ad),
+        models: mas
+          .filter((x) => x.adapter === ad)
+          .flatMap((x): ModelAgentView[] => {
+            const m = this.catalogOf(x.modelId)
+            if (!m) return []
+            const st = this.modelAgentStatus(x)
+            return [{ id: x.id, adapter: ad, modelId: m.id, label: `${m.family} ${m.version}`.trim(), tier: m.tier, weight: m.weight, status: st.status, message: st.message, verified: !!m.verified }]
+          })
+          .sort((a, b) => a.label.localeCompare(b.label))
+      }))
+  }
+
+  /** Check every model of a connection that is not confirmed yet (each check costs a little usage). */
+  async verifyAllModels(adapter: Agent['adapter']): Promise<{ checked: number; ok: number }> {
+    this.syncModelAgents(adapter)
+    let checked = 0
+    let ok = 0
+    for (const ma of this.machine.modelAgents().filter((x) => x.adapter === adapter)) {
+      if (this.modelAgentStatus(ma).status === 'ok') {
+        ok++
+        continue
+      }
+      const r = await this.verifyModel(ma.modelId)
+      checked++
+      if (r.ok) ok++
+    }
+    return { checked, ok }
+  }
+
+  private uniqueAgentName(base: string): string {
+    const taken = new Set(this.agentsOf(this.hive.id).map((a) => a.name))
+    if (!taken.has(base)) return base
+    for (let i = 2; ; i++) if (!taken.has(`${base} ${i}`)) return `${base} ${i}`
+  }
+
+  /** Hire an employee of the company on screen from a model agent (optionally straight into a seat). */
+  hire(input: { modelAgentId: string; name?: string; seatId?: string; role?: string; workDir?: string }): Agent {
+    const ma = this.machine.modelAgents().find((x) => x.id === input.modelAgentId)
+    if (!ma) throw new Error('없는 모델 에이전트예요.')
+    const m = this.catalogOf(ma.modelId)
+    if (!m) throw new Error('카탈로그에 없는 모델이에요.')
+    if (this.modelAgentStatus(ma).status === 'unavailable') throw new Error(`${m.family} ${m.version}은(는) 이 계정에서 쓸 수 없어요.`)
+    const seat = input.seatId ? this.hive.listSeats().find((x) => x.id === input.seatId) : undefined
+    const agent = this.saveAgent({
+      name: this.uniqueAgentName((input.name ?? seat?.title ?? `${m.family} ${m.version}`).trim()),
+      adapter: ma.adapter,
+      role: input.role ?? '',
+      workDir: input.workDir ?? '',
+      modelRef: { id: m.id, pin: 'pinned' }
+    })
+    if (seat) this.assignSeat(seat.id, agent.id)
+    return agent
+  }
+
+  /** The preview table for "자동 연결": per empty seat the recommended model, whether it is usable, and the stand-in. */
+  autoConnectPreview(): AutoRow[] {
+    const company = this.hive.getCompany()
+    if (!company) return []
+    const seats = this.hive.listSeats()
+    const units = this.hive.listUnits()
+    const agents = this.hive.listRoster().map((r) => ({ id: r.id, adapter: r.adapter, modelId: r.modelId, model: r.model }))
+    const full = this.catalog()
+    const mas = this.machine.modelAgents()
+    const usableMas = mas.filter((x) => this.modelAgentStatus(x).status !== 'unavailable')
+    const usableIds = new Set(usableMas.map((x) => x.modelId))
+    const usable = full.filter((m) => usableIds.has(m.id))
+    // what the design would pick from every model, and what is possible with the connections we really have
+    const wished = autoPlace({ units, seats, agents, catalog: full }, company.rules, {}, false)
+    const possible = autoPlace({ units, seats, agents, catalog: usable }, company.rules, {}, false)
+    const label = (id: string | null | undefined): string => {
+      const m = id ? full.find((x) => x.id === id) : undefined
+      return m ? `${m.family} ${m.version}`.trim() : '—'
+    }
+    return seats
+      .filter((st) => !st.agentId)
+      .map((st) => {
+        const rec = wished[st.id] ?? null
+        const recOk = !!rec && usableIds.has(rec)
+        let chosen: string | null = possible[st.id] ?? null
+        if (rec && recOk) chosen = rec
+        else if (!chosen) chosen = substituteFor(rec ? full.find((m) => m.id === rec) : undefined, usable)?.id ?? null
+        const ma = chosen ? usableMas.find((x) => x.modelId === chosen) : undefined
+        const substituted = !!chosen && chosen !== rec
+        return {
+          seatId: st.id,
+          seatTitle: st.title,
+          unitName: units.find((u) => u.id === st.unitId)?.name ?? '',
+          job: st.job,
+          recommended: rec,
+          recommendedLabel: label(rec),
+          usable: recOk,
+          chosen,
+          chosenLabel: label(chosen),
+          substituted,
+          modelAgentId: ma?.id ?? null,
+          note: !chosen
+            ? '연결된 AI가 없어요. 연결 탭에서 AI를 연결하세요.'
+            : substituted
+              ? recOk
+                ? '규칙에 맞춰 바꿨어요.'
+                : `${label(rec)}은(는) 쓸 수 없어서 같은 체급의 다른 모델로 대체했어요.`
+              : ''
+        }
+      })
+  }
+
+  /** Hire the previewed (or the person's edited) choices into their seats. */
+  autoConnectApply(rows?: { seatId: string; modelAgentId: string }[]): number {
+    const plan = rows ?? this.autoConnectPreview().flatMap((r) => (r.modelAgentId ? [{ seatId: r.seatId, modelAgentId: r.modelAgentId }] : []))
+    let n = 0
+    for (const r of plan) {
+      const seat = this.hive.listSeats().find((x) => x.id === r.seatId)
+      if (!seat || seat.agentId) continue
+      this.hire({ modelAgentId: r.modelAgentId, seatId: r.seatId })
+      n++
+    }
+    return n
+  }
+
+  /** Put a model on a seat by dragging it there: hire from the model agent and sit down (replacing nobody's data). */
+  hireToSeat(seatId: string, modelAgentId: string): Agent {
+    return this.hire({ modelAgentId, seatId })
   }
 
   // ---- settings & agents ----
@@ -1111,6 +1307,7 @@ export class Engine {
     const models = parseModelList(res.stdout)
     if (!models.length) return { ok: false, count: 0, message: '모델 목록이 비어 있거나 읽을 수 없는 형식이에요.' }
     this.machine.setAccountModels(adapter, models)
+    this.syncModelAgents(adapter)
     // models the account lists are usable by definition
     for (const m of this.catalog().filter((x) => x.adapter === adapter && models.some((y) => y.slug === x.cliArg))) {
       this.machine.setAvailability(m.id, { ok: true, at: new Date().toISOString(), message: '계정 모델 목록에 있어요.' })
@@ -1373,6 +1570,7 @@ export class Engine {
     const check: ConnectionCheck = { at: new Date().toISOString(), ok: r.ok, message: r.message.slice(0, 200) }
     // the check belongs to the connection (login), so agents created later on it show it as well
     this.machine.setConnectionCheck(adapter, check)
+    if (r.ok) this.syncModelAgents(adapter)
     for (const a of this.config.agents) if (a.adapter === adapter) this.hive.publishAgent(a, check)
     this.changed()
   }
@@ -1393,8 +1591,26 @@ export class Engine {
         const all = h.listTasks()
         for (const id of this.running.keys()) busyAgents.add(all.find((t) => t.id === id)?.assignee)
       }
-      // companies take turns in the order they were created; the limits and the work-folder lock are shared
+      // who wants to use which connection right now (running or ready), for the priority rule
+      const demand = new Map<string, Set<string>>()
       for (const h of this.hives.values()) {
+        const all = h.listTasks()
+        for (const t of all) {
+          const ag = this.localAgent(t.assignee)
+          if (!ag) continue
+          if (this.running.has(t.id) || ((this.config.autoRun || t.auto) && h.isReady(t, all))) {
+            if (!demand.has(ag.adapter)) demand.set(ag.adapter, new Set())
+            demand.get(ag.adapter)!.add(h.id)
+          }
+        }
+      }
+      const scarce = (adapter: string): boolean => {
+        const at = this.machine.limitHistory()[adapter]
+        return !!at && Date.now() - new Date(at).getTime() < SCARCE_HOURS * 3600e3
+      }
+      // companies take turns by priority; the limits and the work-folder lock are shared
+      const order = [...this.hives.values()]
+      for (const h of order) {
         const all = h.listTasks()
         for (const t of all) {
           if (this.running.size >= this.config.maxConcurrent) return
@@ -1402,6 +1618,13 @@ export class Engine {
           const agent = this.localAgent(t.assignee)
           if (!agent || busyAgents.has(agent.id) || !h.isReady(t, all)) continue
           if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
+          // after the account ran into its usage limit, a lower-priority company waits while a higher one still has work for it
+          if (scarce(agent.adapter)) {
+            const prio = this.connectionOrder(agent.adapter)
+            const mine = prio.indexOf(h.id)
+            const higher = prio.slice(0, mine).some((c) => demand.get(agent.adapter)?.has(c))
+            if (higher) continue
+          }
           busyAgents.add(agent.id)
           void this.inCompany(h, () => this.runTask(t.id))
         }

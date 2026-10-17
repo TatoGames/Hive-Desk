@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { AutoRow } from '../shared/connections'
 import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
   AdapterId,
@@ -82,6 +83,13 @@ const api = {
     ipcRenderer.invoke('reassign:apply', domain, from, to),
   refreshAccountModels: (adapter: Agent['adapter']): Promise<{ ok: boolean; count: number; message: string }> =>
     ipcRenderer.invoke('model:refresh', adapter),
+  verifyAllModels: (adapter: Agent['adapter']): Promise<{ checked: number; ok: number }> => ipcRenderer.invoke('conn:verify-all', adapter),
+  hire: (input: { modelAgentId: string; name?: string; seatId?: string; role?: string; workDir?: string }): Promise<Agent> =>
+    ipcRenderer.invoke('conn:hire', input),
+  hireToSeat: (seatId: string, modelAgentId: string): Promise<Agent> => ipcRenderer.invoke('conn:hire-seat', seatId, modelAgentId),
+  autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
+  autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
+  setCompanyOrder: (order: string[], adapter?: string): Promise<void> => ipcRenderer.invoke('conn:order', order, adapter),
   decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
     ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>

@@ -524,6 +524,10 @@ export interface CompanySummary {
 }
 
 export interface AppConfig {
+  /** Company priority for shared usage limits (highest first); companies not listed follow in creation order. */
+  companyOrder?: string[]
+  /** The same per connection (CLI), overriding `companyOrder`. */
+  connectionOrder?: Record<string, string[]>
   /** The company shown on screen. */
   activeCompanyId?: string
   /** Desktop notifications for approvals, reports and failures (default on). */
@@ -563,6 +567,7 @@ export interface SyncResult {
 export interface Snapshot {
   config: AppConfig
   companies: CompanySummary[]
+  connections: import('./connections').ConnectionView[]
   tasks: Task[]
   approvals: Approval[]
   roster: RosterEntry[]

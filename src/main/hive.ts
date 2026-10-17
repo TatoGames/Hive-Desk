@@ -12,6 +12,7 @@ import {
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { AptitudeRecord } from '../shared/aptitude'
+import type { ModelAgent } from '../shared/connections'
 import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
@@ -608,6 +609,21 @@ export class Hive {
   }
   setAccountModels(adapter: string, models: { slug: string; label: string }[]): void {
     writeJson(this.p('.local', 'account-models.json'), { ...this.accountModels(), [adapter]: { at: now(), models } })
+  }
+
+  modelAgents(): ModelAgent[] {
+    return readJson<ModelAgent[]>(this.p('connections', 'model-agents.json')) ?? []
+  }
+  saveModelAgents(list: ModelAgent[]): void {
+    mkdirSync(this.p('connections'), { recursive: true })
+    writeJson(this.p('connections', 'model-agents.json'), list)
+  }
+  /** When each CLI last ran into its usage limit (the sharing rule gets stricter for a while after that). */
+  limitHistory(): Record<string, string> {
+    return readJson<Record<string, string>>(this.p('.local', 'limit-history.json')) ?? {}
+  }
+  noteLimitHit(adapter: string): void {
+    writeJson(this.p('.local', 'limit-history.json'), { ...this.limitHistory(), [adapter]: now() })
   }
 
   setAvailability(id: string, a: ModelAvailability): void {
