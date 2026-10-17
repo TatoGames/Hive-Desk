@@ -367,6 +367,7 @@ export class Engine {
       // only this company's employees are shown: other companies' agents are not visible here
       config: { ...this.config, agents: local },
       companies: this.companySummaries(),
+      companyRoot: this.hive.root,
       collab: this.collab.view(),
       external: this.hive.listExternal(),
       connections: this.connectionViews(),

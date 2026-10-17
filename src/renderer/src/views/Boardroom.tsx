@@ -8,6 +8,18 @@ export default function Boardroom({ snap, goBoard }: { snap: Snapshot; goBoard: 
   const [name, setName] = useState('')
   const [tpl, setTpl] = useState('')
   const [err, setErr] = useState('')
+  const [ren, setRen] = useState<{ id: string; old: string; name: string; err: string } | null>(null)
+  const rename = async (): Promise<void> => {
+    if (!ren) return
+    const n = ren.name.trim()
+    if (!n || n === ren.old) return setRen(null)
+    try {
+      await window.hive.renameCompany(ren.id, n)
+      setRen(null)
+    } catch (e) {
+      setRen({ ...ren, err: (e as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, '') })
+    }
+  }
   const create = async (): Promise<void> => {
     try {
       setErr('')
@@ -72,10 +84,7 @@ export default function Boardroom({ snap, goBoard }: { snap: Snapshot; goBoard: 
               </button>
               <button
                 className="ghost"
-                onClick={() => {
-                  const n = window.prompt('새 회사 이름', c.name)
-                  if (n && n.trim() && n !== c.name) void window.hive.renameCompany(c.id, n.trim()).catch((e) => window.alert(String(e.message ?? e)))
-                }}
+                onClick={() => setRen({ id: c.id, old: c.name, name: c.name, err: '' })}
               >
                 이름 바꾸기
               </button>
@@ -83,6 +92,29 @@ export default function Boardroom({ snap, goBoard }: { snap: Snapshot; goBoard: 
           </section>
         ))}
       </div>
+      {ren && (
+        <div className="overlay" onClick={() => setRen(null)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <h2>회사 이름 바꾸기</h2>
+            <label className="full">
+              새 이름
+              <input
+                autoFocus
+                value={ren.name}
+                onChange={(e) => setRen({ ...ren, name: e.target.value, err: '' })}
+                onKeyDown={(e) => e.key === 'Enter' && void rename()}
+              />
+            </label>
+            {ren.err && <div className="warn-text small">{ren.err}</div>}
+            <div className="row end">
+              <button onClick={() => setRen(null)}>취소</button>
+              <button className="primary" disabled={!ren.name.trim()} onClick={() => void rename()}>
+                바꾸기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {open && (
         <div className="overlay" onClick={() => setOpen(false)}>
           <div className="dialog" onClick={(e) => e.stopPropagation()}>

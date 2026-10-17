@@ -294,7 +294,7 @@ export default function Collab({ snap }: { snap: Snapshot }): JSX.Element {
             {x.recalledAt && <span className="badge warn">회수됨 · AI에게 전달 안 함</span>}
           </div>
           <div className="small muted">
-            출처: {x.fromCompanyName} · 승인 {x.approvedAt.slice(0, 10)} · 받은 때 {x.receivedAt.slice(0, 16).replace('T', ' ')}
+            출처: {x.fromCompanyName} · 승인 {localTime(x.approvedAt, false)} · 받은 때 {localTime(x.receivedAt)}
           </div>
           <pre className="small" style={{ whiteSpace: 'pre-wrap', margin: '6px 0 0', maxHeight: 140, overflow: 'auto' }}>
             {x.body}
@@ -307,10 +307,19 @@ export default function Collab({ snap }: { snap: Snapshot }): JSX.Element {
       <div className="stack" style={{ gap: 2 }}>
         {snap.collab.audit.slice(0, 80).map((e) => (
           <div key={e.id} className={'small' + (e.action === 'blocked' ? ' error' : '')}>
-            <span className="muted">{e.at.slice(0, 16).replace('T', ' ')}</span> {e.text}
+            <span className="muted">{localTime(e.at)}</span> {e.text}
           </div>
         ))}
       </div>
     </div>
   )
+}
+
+/** ISO (UTC) → the viewer's local 'YYYY-MM-DD HH:mm' (or date only). */
+function localTime(iso: string, withTime = true): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const p = (n: number): string => String(n).padStart(2, '0')
+  const day = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  return withTime ? `${day} ${p(d.getHours())}:${p(d.getMinutes())}` : day
 }

@@ -50,8 +50,10 @@ function ListBoard({
   const [fText, setFText] = useState('')
   /** The folder a task's agent works in (shown on the card, so it is clear where work happens). */
   const workDirOf = (t: Task): string => {
+    const pd = t.projectId ? snap.projectPaths?.[t.projectId] : undefined
+    if (pd) return pd
     const a = snap.config.agents.find((x) => x.id === t.assignee)
-    return a?.workDir || snap.config.workspace
+    return a?.workDir || snap.companyRoot || snap.config.workspace
   }
   const localIds = new Set(snap.config.agents.map((a) => a.id))
   const nameOf = (id: string | null): string => {

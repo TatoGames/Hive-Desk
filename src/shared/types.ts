@@ -569,6 +569,8 @@ export interface SyncResult {
 export interface Snapshot {
   config: AppConfig
   companies: CompanySummary[]
+  /** Folder of the company being viewed — where runs happen when no project/agent folder is set. */
+  companyRoot: string
   collab: import('./collab').CollabView
   external: import('./collab').ExternalItem[]
   connections: import('./connections').ConnectionView[]
