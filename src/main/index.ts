@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell } from 'electron'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Task } from '../shared/types'
 import { detectAll } from './adapters'
@@ -10,8 +10,20 @@ import { checkCli, installCli, installCommand, openLogin } from './setup'
 let win: BrowserWindow | null = null
 let engine: Engine
 
+/** While tasks run the computer must not fall asleep, or the CLIs are cut off half way. */
+let blockerId: number | null = null
+function syncPowerBlocker(): void {
+  const busy = !!engine && engine.runningCount() > 0
+  if (busy && blockerId === null) blockerId = powerSaveBlocker.start('prevent-app-suspension')
+  else if (!busy && blockerId !== null) {
+    if (powerSaveBlocker.isStarted(blockerId)) powerSaveBlocker.stop(blockerId)
+    blockerId = null
+  }
+}
+
 function emit(e: EngineEvent): void {
   win?.webContents.send('engine:event', e)
+  if (e.type === 'changed') syncPowerBlocker()
 }
 
 function createWindow(): void {
@@ -62,6 +74,8 @@ function registerIpc(): void {
   ipcMain.handle('task:detach', (_e, id: string, rel: string) => engine.removeAttachment(id, rel))
   ipcMain.handle('task:reply', (_e, id: string, text: string) => engine.replyToTask(id, text))
   ipcMain.handle('task:instruct', (_e, id: string, text: string) => engine.addInstruction(id, text))
+  ipcMain.handle('task:rollback', (_e, taskId: string, runId: string) => engine.rollbackRun(taskId, runId))
+  ipcMain.handle('limit:clear', (_e, adapter: AdapterId) => engine.clearLimit(adapter))
   ipcMain.handle('dialog:files', async () => {
     if (!win) return []
     const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'] })
@@ -112,7 +126,27 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => engine?.shutdown())
+let quitConfirmed = false
+app.on('before-quit', (e) => {
+  const n = engine?.runningCount() ?? 0
+  if (n > 0 && !quitConfirmed) {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['계속 실행하기', '그래도 종료'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'HiveDesk',
+      message: `실행 중인 작업이 ${n}개 있어요.`,
+      detail: '지금 종료하면 작업이 중간에 끊기고, 일부 파일만 바뀐 채로 남을 수 있어요. (끊긴 작업은 다시 열면 보이고 [되돌리기]로 원래대로 돌릴 수 있어요.)'
+    })
+    if (choice === 0) {
+      e.preventDefault()
+      return
+    }
+    quitConfirmed = true
+  }
+  engine?.shutdown()
+})
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })

@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import type { LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
+import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
 import {
+  ConfirmButton,
   DropZone,
   NeedBox,
   PermissionSelect,
@@ -80,6 +81,9 @@ export default function Board({
                   live={output[t.id]}
                   progress={live[t.id]}
                   workDir={workDirOf(t)}
+                  waitingFor={snap.tasks.find((x) => x.id === snap.waiting[t.id])?.title}
+                  limit={snap.limits[snap.roster.find((r) => r.id === t.assignee)?.adapter ?? '']}
+                  adapter={snap.roster.find((r) => r.id === t.assignee)?.adapter}
                   onRun={() => setPre(t.id)}
                   expanded={open === t.id}
                   onToggle={() => setOpen(open === t.id ? null : t.id)}
@@ -101,6 +105,7 @@ export default function Board({
           task={snap.tasks.find((t) => t.id === detail)!}
           assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
           workDir={workDirOf(snap.tasks.find((t) => t.id === detail)!)}
+          adapter={snap.roster.find((r) => r.id === snap.tasks.find((t) => t.id === detail)!.assignee)?.adapter}
           onClose={() => setDetail(null)}
         />
       )}
@@ -115,7 +120,7 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const [risky, setRisky] = useState(false)
   const [dep, setDep] = useState('')
   const [more, setMore] = useState(false)
-  const [perm, setPerm] = useState<PermissionLevel>('edit')
+  const [perm, setPerm] = useState<PermissionLevel | undefined>(undefined)
   const [items, setItems] = useState<Dropped[]>([])
   const [problems, setProblems] = useState<string[]>([])
 
@@ -127,7 +132,7 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
       assignee: assignee || null,
       risky,
       dependsOn: dep ? [dep] : [],
-      permission: perm === 'edit' ? undefined : perm
+      permission: perm
     })
     // materials are copied into the new task's folder (folders become reference folders)
     const errs = items.length ? await sendDropped(t.id, items) : []
@@ -175,7 +180,11 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
           />
           <div className="row">
             <span className="muted small">권한</span>
-            <PermissionSelect value={perm} onChange={setPerm} />
+            <PermissionSelect
+              value={perm}
+              onChange={setPerm}
+              adapter={snap.roster.find((r) => r.id === assignee)?.adapter}
+            />
           </div>
           <DropZone compact onItems={(added) => setItems((cur) => [...cur, ...added])} />
           {!!items.length && (
@@ -227,6 +236,10 @@ function Card(props: {
   live?: string
   progress?: LiveSummary
   workDir: string
+  /** Title of the task this one waits for (same work folder). */
+  waitingFor?: string
+  limit?: { until: string; message: string; guessed: boolean }
+  adapter?: AdapterId
   onRun: () => void
   expanded: boolean
   onToggle: () => void
@@ -254,6 +267,18 @@ function Card(props: {
           <div className="meta small">⏳ 대기: {blockedBy.map((b) => b.title).join(', ')}</div>
         )}
         {props.running && props.progress && <ProgressStrip s={props.progress} />}
+        {props.running && !props.progress && props.waitingFor && (
+          <div className="meta small wait">⏳ 폴더 대기: "{props.waitingFor}" 작업이 같은 폴더에서 끝나길 기다려요</div>
+        )}
+        {t.interruptedRun && !props.running && (
+          <div className="meta small warn-text">⚠ 중단됨: 일부 변경이 폴더에 남았을 수 있어요</div>
+        )}
+        {props.limit && t.status === 'todo' && !props.running && (
+          <div className="meta small wait">
+            ⏸ 한도 대기: {new Date(props.limit.until).toLocaleString('ko-KR', { hour12: false })}
+            {props.limit.guessed ? '쯤(추정)' : ''}까지 자동 실행을 쉬어요
+          </div>
+        )}
         {t.status === 'needs_input' && t.question && <div className="meta small need-q">❓ {t.question}</div>}
       </div>
 
@@ -274,7 +299,7 @@ function Card(props: {
             </button>
           </div>
           {t.status === 'needs_input' && <NeedBox task={t} />}
-          {props.running && !props.progress && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
+          {props.running && !props.progress && !props.waitingFor && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
           {props.running && props.progress && props.live && <pre className="out live small-log">{props.live.slice(-1200)}</pre>}
           {!props.running && t.report && <ReportView report={t.report} />}
           {!props.running && t.result && <pre className="out">{t.result}</pre>}
@@ -295,6 +320,14 @@ function Card(props: {
             실행
           </button>
         )}
+        {props.limit && props.adapter && t.status === 'todo' && !props.running && (
+          <button className="sm ghost" onClick={() => void window.hive.clearLimit(props.adapter!)} title="한도가 풀렸다고 알려줘요">
+            한도 해제
+          </button>
+        )}
+        {t.interruptedRun && !props.running && (
+          <ConfirmButton label="되돌리기" onConfirm={() => window.hive.rollbackRun(t.id, t.interruptedRun!)} />
+        )}
         {props.running && (
           <button className="sm" onClick={() => void window.hive.stopTask(t.id)}>
             중지
@@ -311,30 +344,5 @@ function Card(props: {
         {!props.running && <ConfirmButton label="삭제" onConfirm={() => window.hive.deleteTask(t.id)} />}
       </div>
     </article>
-  )
-}
-
-/** Two-step delete without native dialogs: first click arms, second confirms. */
-export function ConfirmButton({
-  label,
-  onConfirm
-}: {
-  label: string
-  onConfirm: () => unknown
-}): JSX.Element {
-  const [armed, setArmed] = useState(false)
-  return (
-    <button
-      className={'sm ' + (armed ? 'danger' : 'ghost')}
-      onBlur={() => setArmed(false)}
-      onClick={() => {
-        if (armed) {
-          setArmed(false)
-          void onConfirm()
-        } else setArmed(true)
-      }}
-    >
-      {armed ? '정말 ' + label + '?' : label}
-    </button>
   )
 }

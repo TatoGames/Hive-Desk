@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { defaultPermission } from '../shared/permission'
 import type { AdapterId, AdapterInfo, Agent, PermissionLevel } from '../shared/types'
 import type { StreamKind } from './activity'
 
@@ -141,11 +142,48 @@ export function adapterAccess(id: AdapterId): AdapterAccess {
     case 'claude':
       return { permission: 'flag', refDirs: 'flag', resume: 'session', stream: true }
     case 'codex':
-      // Reference folders: `--add-dir` makes them WRITABLE for the sandbox; reading is what we ask for.
-      return { permission: 'flag', refDirs: 'flag', resume: 'replay', stream: true }
+      // Reference folders: `--add-dir` would make them WRITABLE for the sandbox, so it is not used;
+      // Codex's sandbox can read outside the work folder anyway (docs; not verified with a real CLI).
+      return { permission: 'flag', refDirs: 'prompt', resume: 'replay', stream: true }
     default:
       return { permission: 'prompt', refDirs: 'prompt', resume: 'replay', stream: false }
   }
+}
+
+/**
+ * The permission a task really runs with. Claude and Codex enforce levels themselves, so the
+ * editing default is safe there. The other CLIs only get an instruction, so they start read-only
+ * and a human has to pick editing on purpose (the pre-run check says so).
+ */
+export function effectivePermission(adapter: AdapterId, requested?: PermissionLevel): PermissionLevel {
+  return requested ?? defaultPermission(adapter)
+}
+
+/** Commands the default level must not run: deleting, moving and resetting things. */
+const DESTRUCTIVE_COMMANDS = [
+  'rm',
+  'rmdir',
+  'mv',
+  'unlink',
+  'shred',
+  'del',
+  'erase',
+  'rd',
+  'Remove-Item',
+  'git clean',
+  'git reset'
+]
+export const DESTRUCTIVE_BASH_RULES = DESTRUCTIVE_COMMANDS.map((c) => `Bash(${c} *)`)
+
+const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+
+/** A Claude Code permission rule for everything under an absolute path (`//` = absolute; Windows drives become `/c/…`). */
+export function claudePathRule(tool: string, abs: string): string {
+  let p = abs.replace(/\\/g, '/')
+  const m = p.match(/^([A-Za-z]):\/(.*)$/)
+  if (m) p = `/${m[1].toLowerCase()}/${m[2]}`
+  p = p.replace(/\/+$/, '')
+  return `${tool}(/${p}/**)`
 }
 
 /** Remove `--flag value` (and `--flag=value`) pairs from an arg list. */
@@ -181,20 +219,21 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     }
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     let extra = splitArgs(agent.extraArgs)
+    // Deny rules always win over allow rules, so they hold whatever the user's own settings say.
+    const deny: string[] = []
     if (level === 'read') {
       extra = dropFlag(extra, ['--permission-mode'])
-      extra.push(
-        '--permission-mode',
-        'default',
-        '--allowedTools',
-        'Read,Grep,Glob',
-        '--disallowedTools',
-        'Edit,Write,MultiEdit,NotebookEdit,Bash'
-      )
+      extra.push('--permission-mode', 'default', '--allowedTools', 'Read,Grep,Glob')
+      deny.push(...EDIT_TOOLS, 'Bash')
     } else if (level === 'exec') {
       extra = dropFlag(extra, ['--permission-mode'])
       extra.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
+    } else {
+      deny.push(...DESTRUCTIVE_BASH_RULES)
     }
+    // Reference folders are opened with --add-dir, which also allows writing: take that back.
+    for (const d of dirs) for (const tool of EDIT_TOOLS) deny.push(claudePathRule(tool, d))
+    if (deny.length) extra.push('--disallowedTools', ...deny)
     args.push(...extra)
     for (const d of dirs) args.push(`--add-dir=${d}`)
     if (opts.resumeSession) {
@@ -214,7 +253,7 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     if (level === 'read') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'read-only']
     else if (level === 'exec') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'danger-full-access']
     args.push(...extra)
-    for (const d of dirs) args.push('--add-dir', d)
+    // reference folders are read through the sandbox's normal read access; see adapterAccess
     args.push('-') // read prompt from stdin
     return { command, args, stream, resumed }
   }
@@ -223,6 +262,9 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     args.push(...splitArgs(agent.extraArgs))
     if (agent.adapter === 'agy') {
+      // Headless agy auto-denies anything that needs a permission prompt. Only the command level
+      // (which a human has to approve before the run) turns that off.
+      if (level === 'exec') args.push('--dangerously-skip-permissions')
       if (process.platform === 'win32') {
         // cmd.exe cannot safely carry a long multi-line argument; use stdin there
         args.push('-p', 'Follow the task given on stdin.', '--input-format', 'text')

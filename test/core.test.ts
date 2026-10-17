@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildCommand, cleanEnv, runCli, splitArgs } from '../src/main/adapters'
+import { buildCommand, cleanEnv, DESTRUCTIVE_BASH_RULES, runCli, splitArgs } from '../src/main/adapters'
 import { makeAgent } from '../src/main/config'
 import { Engine } from '../src/main/engine'
 import { Hive } from '../src/main/hive'
@@ -80,7 +80,7 @@ describe('markers & adapters', () => {
   it('builds the right command per adapter', () => {
     const c = buildCommand(makeAgent('a', { name: 'c', adapter: 'claude', model: 'sonnet' }))
     expect(c.command).toBe('claude')
-    expect(c.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits'])
+    expect(c.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits', '--disallowedTools', ...DESTRUCTIVE_BASH_RULES])
     const x = buildCommand(makeAgent('a', { name: 'x', adapter: 'codex' }))
     expect(x.args[0]).toBe('exec')
     expect(x.args[x.args.length - 1]).toBe('-')

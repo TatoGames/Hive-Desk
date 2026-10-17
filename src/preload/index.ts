@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
+  AdapterId,
   Agent,
   AppConfig,
   AdapterInfo,
@@ -48,6 +49,9 @@ const api = {
   removeAttachment: (id: string, rel: string): Promise<void> => ipcRenderer.invoke('task:detach', id, rel),
   replyToTask: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:reply', id, text),
   addInstruction: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:instruct', id, text),
+  rollbackRun: (taskId: string, runId: string): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('task:rollback', taskId, runId),
+  clearLimit: (adapter: AdapterId): Promise<void> => ipcRenderer.invoke('limit:clear', adapter),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:files'),
   /** Absolute path of a dropped File ('' if the browser gave no real file). */
   pathForFile: (f: File): string => {

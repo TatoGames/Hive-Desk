@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { Snapshot } from '@shared/types'
 import { fmtTime } from '../store'
-import { ConfirmButton } from './Board'
+import { ConfirmButton } from './Materials'
 
 export default function Inbox({ snap }: { snap: Snapshot }): JSX.Element {
   const [to, setTo] = useState('')

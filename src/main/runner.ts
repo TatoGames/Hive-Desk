@@ -1,5 +1,4 @@
 import { existsSync } from 'node:fs'
-import { dirname } from 'node:path'
 import type {
   ActivityEvent,
   Agent,
@@ -11,9 +10,12 @@ import type {
   Task
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
-import { adapterAccess, buildCommand, cleanEnv, type Runner } from './adapters'
-import { diffStat, trackChanges } from './gitdiff'
+import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type Runner } from './adapters'
+import { createCheckpoint } from './checkpoint'
+import { detectLimit, type LimitInfo } from './limits'
+import { diffStat, trackChanges, unavailable } from './gitdiff'
 import { Hive, newId } from './hive'
+import { stageAttachments } from './staging'
 
 export interface ParsedMarkers {
   clean: string
@@ -80,28 +82,14 @@ const PERMISSION_TEXT: Record<PermissionLevel, string | null> = {
     'Permission level for this task: COMMANDS ALLOWED. You may run the shell commands the task needs (build, test, install). Avoid anything destructive outside the task.'
 }
 
-/**
- * Folders the CLI must be allowed to open: the reference folders plus the folders holding the
- * attachments (they live in the hive, outside the work folder, so without this the agent cannot
- * read or copy them).
- */
-function accessDirs(task: Task, hive: Hive): string[] {
-  const out = new Set((task.refDirs ?? []).filter((d) => existsSync(d)))
-  for (const a of task.attachments ?? []) {
-    const abs = hive.attachmentPath(a)
-    if (existsSync(abs)) out.add(dirname(abs))
-  }
-  return [...out]
-}
-
 /** Attachments and reference folders, as the agent should see them. */
-function materialLines(task: Task, hive: Hive): string[] {
+function materialLines(task: Task, hive: Hive, staged?: Map<string, string>): string[] {
   const lines: string[] = []
   const atts = task.attachments ?? []
   if (atts.length) {
     lines.push('', '## Materials the human attached (read these first)')
     for (const a of atts) {
-      const abs = hive.attachmentPath(a)
+      const abs = staged?.get(a.rel) ?? hive.attachmentPath(a)
       lines.push(
         existsSync(abs)
           ? `- ${abs} (${fmtSize(a.size)})`
@@ -123,6 +111,8 @@ export function buildPrompt(opts: {
   task: Task
   hive: Hive
   maxMemory?: number
+  /** Where the attachments were copied for this run (see staging.ts). */
+  staged?: Map<string, string>
 }): string {
   const { agent, task, hive } = opts
   const mem = hive.listMemory(opts.maxMemory ?? 20)
@@ -140,9 +130,9 @@ export function buildPrompt(opts: {
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
-  const perm = PERMISSION_TEXT[task.permission ?? 'edit']
+  const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission)]
   if (perm) lines.push('', perm)
-  lines.push(...materialLines(task, hive))
+  lines.push(...materialLines(task, hive, opts.staged))
 
   // The human answered an earlier question: tell this fresh run what happened so far.
   if (task.reply !== undefined) {
@@ -191,9 +181,9 @@ export function buildPrompt(opts: {
 }
 
 /** The human's answer, sent into an existing CLI session (the CLI already remembers the rest). */
-export function buildFollowUp(task: Task, hive: Hive): string {
+export function buildFollowUp(task: Task, hive: Hive, staged?: Map<string, string>): string {
   const lines: string[] = ['The human replied:', task.reply ?? '']
-  lines.push(...materialLines(task, hive))
+  lines.push(...materialLines(task, hive, staged))
   lines.push('', 'Continue the task. Keep using the same [[PLAN]]/[[STEP]], report and NEED/APPROVAL markers.')
   return lines.join('\n')
 }
@@ -212,6 +202,8 @@ export interface RunnerDeps {
   onActivity?: (taskId: string, events: ActivityEvent[], live: LiveRun) => void
   /** How often to look at the work folder while a run is in progress (ms). */
   watchMs?: number
+  /** The CLI reported that its usage limit is used up. */
+  onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
   now?: () => Date
@@ -224,6 +216,13 @@ export type RunOutcome =
   | 'needs_input'
   | 'not_ready'
   | 'cancelled'
+  /** Stopped by the usage limit; the task is ready again once it resets. */
+  | 'limited'
+
+/** The folder an agent's runs happen in. */
+export function resolveCwd(agent: Agent, defaultCwd: string): string {
+  return agent.workDir && existsSync(agent.workDir) ? agent.workDir : defaultCwd
+}
 
 export function budgetProblem(hive: Hive, agent: Agent, d: Date): string | null {
   const u = hive.usageToday(d)[agent.id] ?? { runs: 0, ms: 0 }
@@ -244,7 +243,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const task = hive.getTask(taskId)
   if (!task || task.assignee !== agent.id) return 'not_ready'
   if (task.status !== 'todo') return 'not_ready'
-  const level: PermissionLevel = task.permission ?? 'edit'
+  const level: PermissionLevel = effectivePermission(agent.adapter, task.permission)
 
   // Gate 1: human approval for risky tasks / cautious agents / command-running tasks.
   if ((task.risky || agent.requireApproval || level === 'exec') && !task.cleared.includes('risky-task')) {
@@ -274,7 +273,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'awaiting_approval'
   }
 
-  const cwd = agent.workDir && existsSync(agent.workDir) ? agent.workDir : deps.defaultCwd
+  const cwd = resolveCwd(agent, deps.defaultCwd)
   const started = nowFn()
   const runId = newId()
   const answering = task.reply !== undefined
@@ -300,7 +299,10 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     runId
   )
 
-  const prompt = resumeSession ? buildFollowUp(task, hive) : buildPrompt({ agent, task, hive })
+  const staged = stageAttachments(task, hive, cwd)
+  const prompt = resumeSession
+    ? buildFollowUp(task, hive, staged.paths)
+    : buildPrompt({ agent, task, hive, staged: staged.paths })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
   let built
@@ -308,10 +310,11 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     built = buildCommand(agent, {
       stream: true,
       permission: level,
-      refDirs: accessDirs(task, hive),
+      refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
       resumeSession
     })
   } catch (e) {
+    staged.cleanup()
     const finishedAt = nowFn().toISOString()
     hive.addEvent(task.id, 'run_finished', agent.id, '실패 · ' + (e as Error).message, runId)
     hive.updateTask(task.id, { status: 'failed', error: (e as Error).message, finishedAt })
@@ -320,6 +323,31 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
 
   // Remember how the work folder looked, so we can show exactly what this run changed — also live.
   const tracker = await trackChanges(cwd, { hiveRoot: hive.root })
+  // ...and keep that state so the whole run can be undone later.
+  const cp = await createCheckpoint(hive, runId, tracker.source)
+  // Written now and replaced when the run ends: if the app dies in between, this is what is left.
+  hive.addRun({
+    id: runId,
+    taskId: task.id,
+    agentId: agent.id,
+    adapter: agent.adapter,
+    model: agent.model,
+    startedAt: started.toISOString(),
+    finishedAt: '',
+    durationMs: 0,
+    outcome: 'running',
+    exitCode: null,
+    prompt: cap(prompt, 100_000),
+    response: '',
+    stderr: '',
+    diff: unavailable('실행 중이에요.'),
+    cwd,
+    permission: level,
+    activity: [],
+    checkpoint: cp.checkpoint,
+    checkpointNote: cp.note
+  })
+  if (task.interruptedRun) hive.updateTask(task.id, { interruptedRun: undefined })
   const live = new LiveRun(task.id, runId, cwd, started.toISOString())
   live.setTracking(tracker.mode)
   deps.onLive?.(live)
@@ -362,6 +390,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   } finally {
     watching = false
     if (watchTimer) clearTimeout(watchTimer)
+    staged.cleanup()
   }
   push(parser.end())
 
@@ -415,7 +444,9 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       cwd,
       permission: level,
       sessionId,
-      activity: live.all().slice(-1000)
+      activity: live.all().slice(-1000),
+      checkpoint: cp.checkpoint,
+      checkpointNote: cp.note
     }
     hive.addRun(rec)
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
@@ -450,6 +481,23 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       lastRunId: saveRun('failed', { error })
     })
     return 'failed'
+  }
+  // The usage limit looks like a plain failure; recognise it so auto-run can wait instead of failing on.
+  if (res.code !== 0 || stdout.trim().length < 400) {
+    const lim = detectLimit([res.stderr, stdout.slice(-2000), lastError ?? ''].join('\n'), nowFn())
+    if (lim) {
+      deps.onLimit?.(agent.adapter, lim)
+      const when = new Date(lim.until).toLocaleString('ko-KR', { hour12: false })
+      const error = `사용량 한도에 도달했어요 (${lim.message}). ${when}${lim.guessed ? '쯤(추정)' : ''}까지 자동 실행을 쉬어요.`
+      hive.updateTask(task.id, {
+        status: 'todo',
+        error,
+        finishedAt,
+        sessionId,
+        lastRunId: saveRun('limit', { error })
+      })
+      return 'limited'
+    }
   }
   if (res.code !== 0) {
     const detail = (res.stderr.trim() || stdout.trim() || lastError || '').slice(-1500)
@@ -524,7 +572,10 @@ const OUTCOME_LABEL: Record<RunResultKind, string> = {
   failed: '실패',
   cancelled: '중지됨',
   awaiting_approval: '승인 대기',
-  needs_input: '자료 요청'
+  needs_input: '자료 요청',
+  running: '실행 중',
+  interrupted: '중단됨',
+  limit: '한도 도달'
 }
 
 export function runLine(outcome: RunResultKind, ms: number, diff: RunDiff): string {

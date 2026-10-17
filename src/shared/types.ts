@@ -90,6 +90,8 @@ export interface Task {
   followups?: string[]
   /** Id of the latest run record (kept on the machine that ran it). */
   lastRunId?: string
+  /** The app closed during this run; some changes may be left in the work folder. */
+  interruptedRun?: string
   error?: string
   startedAt?: string
   finishedAt?: string
@@ -118,6 +120,8 @@ export type TaskEventKind =
   | 'need'
   | 'reply'
   | 'instruction'
+  /** A human undid a run. */
+  | 'rollback'
 
 /** One line of a task's timeline. Append-only: events are never rewritten. */
 export interface TaskEvent {
@@ -131,7 +135,33 @@ export interface TaskEvent {
   runId?: string
 }
 
-export type RunResultKind = 'done' | 'failed' | 'cancelled' | 'awaiting_approval' | 'needs_input'
+export type RunResultKind =
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'awaiting_approval'
+  | 'needs_input'
+  /** Written when a run starts; replaced by the real outcome when it ends. */
+  | 'running'
+  /** The app closed (or crashed) in the middle of the run: some changes may be left behind. */
+  | 'interrupted'
+  /** The CLI said the usage limit is used up. */
+  | 'limit'
+
+/** How the work folder can be put back the way it was before a run. */
+export interface Checkpoint {
+  /** `git` = a hidden ref in the repo; `copy` = files backed up under the hive's `.local/checkpoints`. */
+  kind: 'git' | 'copy'
+  /** git: the commit that holds the pre-run state (kept as `refs/hivedesk/<run>`). */
+  ref?: string
+  tree?: string
+  /** git: repository root. copy: the work folder that was backed up. */
+  root: string
+  /** copy: backup folder, relative to the hive. */
+  dir?: string
+  files?: number
+  bytes?: number
+}
 
 /** One human-readable line of what the agent is doing right now. */
 export type ActivityKind =
@@ -241,6 +271,11 @@ export interface RunRecord {
   sessionId?: string
   /** Step-by-step feed (read / edit / command ...), as the agent reported it. */
   activity: ActivityEvent[]
+  /** How to undo this run; absent when the folder could not be saved (see `checkpointNote`). */
+  checkpoint?: Checkpoint
+  checkpointNote?: string
+  /** Set when a human undid this run. */
+  rolledBackAt?: string
 }
 
 /** A run without the heavy fields, for lists. */
@@ -332,6 +367,10 @@ export interface Snapshot {
   gitEnabled: boolean
   /** Progress of tasks that are running right now (this machine). */
   live: Record<string, LiveSummary>
+  /** Tasks waiting for another task that works in the same folder: taskId → the task they wait for. */
+  waiting: Record<string, string>
+  /** CLIs whose usage limit is used up on this machine, until when (key = adapter id). */
+  limits: Record<string, { until: string; message: string; guessed: boolean }>
 }
 
 export interface EngineEvent {
@@ -356,6 +395,8 @@ export interface PreflightItem {
   text: string
   /** A one-click fix the UI can offer. */
   fix?: 'git-init'
+  /** The human must tick a box before the run can start (the risk cannot be enforced away). */
+  confirm?: boolean
 }
 
 /** The "before you run" screen: what the agent will touch and what could go wrong. */

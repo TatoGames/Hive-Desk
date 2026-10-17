@@ -92,7 +92,7 @@ function listJson<T>(dir: string): T[] {
  */
 export class Hive {
   constructor(public readonly root: string) {
-    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments']) {
+    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
@@ -245,6 +245,17 @@ export class Hive {
     const dir = this.p('.local', 'runs', r.taskId)
     mkdirSync(dir, { recursive: true })
     writeJson(join(dir, r.id + '.json'), r)
+  }
+
+  /** The newest run of a task that has not finished (the app was closed during it). */
+  unfinishedRun(taskId: string): RunRecord | null {
+    const all = listJson<RunRecord>(this.p('.local', 'runs', taskId)).filter((r) => r.outcome === 'running')
+    all.sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    return all[0] ?? null
+  }
+
+  checkpointDir(runId: string): string {
+    return this.p('.local', 'checkpoints', runId)
   }
 
   getRun(taskId: string, runId: string): RunRecord | null {

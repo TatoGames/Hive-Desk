@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import { defaultPermission } from '@shared/permission'
 import type {
   ActivityEvent,
+  AdapterId,
   ActivityKind,
   DiffFile,
   LiveSummary,
@@ -248,30 +250,40 @@ export function DropZone({
 
 const PERM_LABEL: Record<PermissionLevel, string> = {
   read: '읽기만 (파일을 바꾸지 못해요)',
-  edit: '파일 수정 (기본, 에이전트 설정대로)',
+  edit: '파일 수정 (작업 폴더 안, 삭제·이동 제외)',
   exec: '명령 실행 허용 (위험 · 실행 전 승인)'
 }
 
+/** `undefined` = the default for the assignee's CLI (editing for Claude/Codex, read-only for the rest). */
 export function PermissionSelect({
   value,
-  onChange
+  onChange,
+  adapter
 }: {
-  value: PermissionLevel
-  onChange: (v: PermissionLevel) => void
+  value: PermissionLevel | undefined
+  onChange: (v: PermissionLevel | undefined) => void
+  adapter?: AdapterId
 }): JSX.Element {
+  const def = defaultPermission(adapter)
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value as PermissionLevel)}>
-      {(Object.keys(PERM_LABEL) as PermissionLevel[]).map((k) => (
-        <option key={k} value={k}>
-          {PERM_LABEL[k]}
-        </option>
-      ))}
+    <select
+      value={value ?? ''}
+      onChange={(e) => onChange(e.target.value ? (e.target.value as PermissionLevel) : undefined)}
+    >
+      <option value="">기본 — {PERM_LABEL[def]}</option>
+      {(Object.keys(PERM_LABEL) as PermissionLevel[])
+        .filter((k) => k !== def)
+        .map((k) => (
+          <option key={k} value={k}>
+            {PERM_LABEL[k]}
+          </option>
+        ))}
     </select>
   )
 }
 
 /** Attachments, reference folders and permission level of an existing task. */
-export function MaterialsPanel({ task }: { task: Task }): JSX.Element {
+export function MaterialsPanel({ task, adapter }: { task: Task; adapter?: AdapterId }): JSX.Element {
   const [errors, setErrors] = useState<string[]>([])
   const atts = task.attachments ?? []
   const dirs = task.refDirs ?? []
@@ -281,7 +293,8 @@ export function MaterialsPanel({ task }: { task: Task }): JSX.Element {
       <div className="row">
         <span className="muted small">권한</span>
         <PermissionSelect
-          value={task.permission ?? 'edit'}
+          value={task.permission}
+          adapter={adapter}
           onChange={(v) => void window.hive.updateTask(task.id, { permission: v })}
         />
         {running && <span className="muted small">바꾼 내용은 다음 실행부터 적용돼요.</span>}
@@ -380,6 +393,7 @@ export function PreflightDialog({
 }): JSX.Element {
   const [pf, setPf] = useState<Preflight | null>(null)
   const [msg, setMsg] = useState('')
+  const [ack, setAck] = useState<Record<number, boolean>>({})
   const load = (): void => {
     void window.hive.preflight(task.id).then(setPf)
   }
@@ -398,7 +412,19 @@ export function PreflightDialog({
             {pf.items.map((it, i) => (
               <li key={i} className={'pre-' + it.level}>
                 <span className="pre-icon">{ICON[it.level]}</span>
-                <span>{it.text}</span>
+                <span>
+                  {it.text}
+                  {it.confirm && (
+                    <label className="ack">
+                      <input
+                        type="checkbox"
+                        checked={!!ack[i]}
+                        onChange={(e) => setAck({ ...ack, [i]: e.target.checked })}
+                      />
+                      위험을 알고 있어요
+                    </label>
+                  )}
+                </span>
                 {it.fix === 'git-init' && (
                   <button
                     className="sm"
@@ -421,7 +447,7 @@ export function PreflightDialog({
           <button onClick={onClose}>취소</button>
           <button
             className="primary"
-            disabled={!pf?.canRun}
+            disabled={!pf?.canRun || pf.items.some((it, i) => it.confirm && !ack[i])}
             onClick={() => {
               onClose()
               void window.hive.runTask(task.id)
@@ -432,5 +458,30 @@ export function PreflightDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+/** Two-step delete without native dialogs: first click arms, second confirms. */
+export function ConfirmButton({
+  label,
+  onConfirm
+}: {
+  label: string
+  onConfirm: () => unknown
+}): JSX.Element {
+  const [armed, setArmed] = useState(false)
+  return (
+    <button
+      className={'sm ' + (armed ? 'danger' : 'ghost')}
+      onBlur={() => setArmed(false)}
+      onClick={() => {
+        if (armed) {
+          setArmed(false)
+          void onConfirm()
+        } else setArmed(true)
+      }}
+    >
+      {armed ? '정말 ' + label + '?' : label}
+    </button>
   )
 }

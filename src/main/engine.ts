@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   Agent,
@@ -17,11 +18,15 @@ import type {
   TaskStatus
 } from '../shared/types'
 import type { LiveRun } from './activity'
-import { adapterAccess, runCli, type Runner } from './adapters'
+import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
+import { STAGE_DIR } from './staging'
+import { SHARED_DIRS } from './hive'
 import { loadConfig, makeAgent, saveConfig } from './config'
-import { enableTracking, isInsideGit } from './gitdiff'
+import { diffSinceCheckpoint, rollback } from './checkpoint'
+import { enableTracking, isInsideGit, normPath } from './gitdiff'
+import type { LimitInfo } from './limits'
 import { Hive } from './hive'
-import { budgetProblem, runTask } from './runner'
+import { budgetProblem, resolveCwd, runTask } from './runner'
 import { initSync, isGitRepo, syncNow } from './sync'
 
 export type Emit = (e: EngineEvent) => void
@@ -43,6 +48,13 @@ export class Engine {
   private liveRuns = new Map<string, LiveRun>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
+  /** One run per work folder at a time: folder → who has it and who waits. */
+  private folders = new Map<string, { holder: string; queue: { taskId: string; grant: () => void; drop: () => void }[] }>()
+  private waiting = new Map<string, string>()
+  /** CLIs (by adapter id) that are out of usage until a given time; kept across restarts. */
+  private limits: Record<string, LimitInfo> = {}
+  /** Finishing off runs that were cut short by the last shutdown (tests wait for it). */
+  recovering: Promise<void> = Promise.resolve()
   private timer: NodeJS.Timeout | null = null
   private syncTimer: NodeJS.Timeout | null = null
   private ticking = false
@@ -56,22 +68,92 @@ export class Engine {
     this.config = loadConfig(configFile, home)
     mkdirSync(this.config.workspace, { recursive: true })
     this.hive = new Hive(this.config.workspace)
+    this.loadLimits()
     this.recoverInterrupted()
     this.publishRoster()
     this.applyTimers()
   }
 
-  /** Tasks left "running" by a crash go back to todo. */
+  /**
+   * Tasks left "running" by a crash or by closing the app go back to todo. The run that was cut
+   * short is kept as "interrupted" so the half-done changes can be seen and undone.
+   */
   private recoverInterrupted(): void {
+    const jobs: Promise<void>[] = []
     for (const t of this.hive.listTasks()) {
-      if (t.status === 'running' && this.localAgent(t.assignee)) {
-        this.hive.updateTask(t.id, {
-          status: 'todo',
-          notes: [...t.notes, '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.']
-        })
-        this.hive.addEvent(t.id, 'status', 'system', '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.')
+      if (t.status !== 'running' || !this.localAgent(t.assignee)) continue
+      const run = this.hive.unfinishedRun(t.id)
+      const note = run
+        ? '앱이 닫혀 실행이 중단됐어요. 일부 변경이 폴더에 남았을 수 있어요 — 바뀐 파일을 확인하고 [되돌리기] 또는 다시 실행하세요.'
+        : '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.'
+      this.hive.updateTask(t.id, { status: 'todo', notes: [...t.notes, note], interruptedRun: run?.id })
+      this.hive.addEvent(t.id, 'status', 'system', note, run?.id)
+      if (run) {
+        this.hive.addRun({ ...run, outcome: 'interrupted', finishedAt: new Date().toISOString(), error: '앱이 닫혀 중단됐어요.' })
+        const cp = run.checkpoint
+        if (cp) {
+          jobs.push(
+            diffSinceCheckpoint(this.hive, cp, this.excludesFor(cp.root)).then((diff) => {
+              const cur = this.hive.getRun(t.id, run.id)
+              if (cur) this.hive.addRun({ ...cur, diff })
+            })
+          )
+        }
       }
     }
+    this.recovering = Promise.all(jobs).then(() => this.changed())
+  }
+
+  /** Paths the change tracker ignores (its own staging folder, and the hive's data when it is the folder). */
+  private excludesFor(root: string): string[] {
+    return [STAGE_DIR, ...(normPath(root) === normPath(this.hive.root) ? SHARED_DIRS : [])]
+  }
+
+  // ---- usage limits (per CLI on this machine) ----
+  private limitFile(): string {
+    return join(this.hive.root, '.local', 'limits.json')
+  }
+
+  private loadLimits(): void {
+    try {
+      const raw = JSON.parse(readFileSync(this.limitFile(), 'utf8')) as Record<string, LimitInfo>
+      const now = Date.now()
+      this.limits = Object.fromEntries(Object.entries(raw).filter(([, v]) => new Date(v.until).getTime() > now))
+    } catch {
+      this.limits = {}
+    }
+  }
+
+  private noteLimit(adapter: Agent['adapter'], info: LimitInfo): void {
+    this.limits[adapter] = info
+    try {
+      writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
+    } catch {
+      /* in-memory is enough for this session */
+    }
+    this.changed()
+  }
+
+  /** The active limit for a CLI, if any (expired ones are dropped). */
+  limitFor(adapter: Agent['adapter']): LimitInfo | undefined {
+    const l = this.limits[adapter]
+    if (!l) return undefined
+    if (new Date(l.until).getTime() <= Date.now()) {
+      delete this.limits[adapter]
+      return undefined
+    }
+    return l
+  }
+
+  /** Forget a limit (the human knows better, e.g. upgraded the plan). */
+  clearLimit(adapter: Agent['adapter']): void {
+    delete this.limits[adapter]
+    try {
+      writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
+    } catch {
+      /* ignore */
+    }
+    this.changed()
   }
 
   private localAgent(id: string | null): Agent | undefined {
@@ -103,7 +185,9 @@ export class Engine {
       usage: this.hive.usageToday(),
       running: [...this.running.keys()],
       gitEnabled: isGitRepo(this.config.workspace),
-      live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()]))
+      live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()])),
+      waiting: Object.fromEntries(this.waiting),
+      limits: Object.fromEntries(Object.keys(this.limits).flatMap((k) => (this.limitFor(k as Agent['adapter']) ? [[k, this.limits[k]]] : [])))
     }
   }
 
@@ -122,6 +206,7 @@ export class Engine {
     if (this.config.workspace !== prevWorkspace) {
       mkdirSync(this.config.workspace, { recursive: true })
       this.hive = new Hive(this.config.workspace)
+      this.loadLimits()
     }
     this.publishRoster()
     this.applyTimers()
@@ -193,6 +278,53 @@ export class Engine {
     this.changed()
   }
 
+  /** Wait until no other task is working in this folder. `false` = stopped while waiting. */
+  private lockFolder(key: string, taskId: string, signal: AbortSignal): Promise<boolean> {
+    const entry = this.folders.get(key)
+    if (!entry) {
+      this.folders.set(key, { holder: taskId, queue: [] })
+      return Promise.resolve(true)
+    }
+    return new Promise<boolean>((resolve) => {
+      const waiter = {
+        taskId,
+        grant: (): void => {
+          signal.removeEventListener('abort', waiter.drop)
+          this.waiting.delete(taskId)
+          resolve(true)
+        },
+        drop: (): void => {
+          entry.queue = entry.queue.filter((w) => w !== waiter)
+          this.waiting.delete(taskId)
+          this.changed()
+          resolve(false)
+        }
+      }
+      signal.addEventListener('abort', waiter.drop, { once: true })
+      entry.queue.push(waiter)
+      this.waiting.set(taskId, entry.holder)
+      this.changed()
+    })
+  }
+
+  private unlockFolder(key: string): void {
+    const entry = this.folders.get(key)
+    if (!entry) return
+    const next = entry.queue.shift()
+    if (!next) {
+      this.folders.delete(key)
+      return
+    }
+    entry.holder = next.taskId
+    for (const w of entry.queue) this.waiting.set(w.taskId, entry.holder)
+    next.grant()
+  }
+
+  /** Is another task working in (or waiting for) this agent's folder right now? */
+  private folderBusy(agent: Agent): boolean {
+    return this.folders.has(normPath(resolveCwd(agent, this.config.workspace)))
+  }
+
   /** Run a task; if the human added instructions while it ran, apply them right after (same session if possible). */
   async runTask(id: string): Promise<string> {
     const task = this.hive.getTask(id)
@@ -203,7 +335,12 @@ export class Engine {
     const ac = new AbortController()
     this.running.set(id, ac)
     this.changed()
+    // Two agents editing the same folder would overwrite each other and mix up their diffs.
+    const key = normPath(resolveCwd(agent, this.config.workspace))
+    let locked = false
     try {
+      locked = await this.lockFolder(key, id, ac.signal)
+      if (!locked) return 'cancelled'
       let outcome = await this.runOnce(agent, id, ac)
       for (let i = 0; i < 3 && outcome === 'done' && !ac.signal.aborted; i++) {
         const t = this.hive.getTask(id)
@@ -218,6 +355,7 @@ export class Engine {
       }
       return outcome
     } finally {
+      if (locked) this.unlockFolder(key)
       this.running.delete(id)
       this.liveRuns.delete(id)
       this.changed()
@@ -232,6 +370,7 @@ export class Engine {
       defaultCwd: this.config.workspace,
       signal: ac.signal,
       watchMs: this.watchMs,
+      onLimit: (adapter, info) => this.noteLimit(adapter, info),
       onOutput: (taskId, chunk) => this.emit({ type: 'output', taskId, chunk }),
       onLive: (live) => this.liveRuns.set(live.taskId, live),
       onActivity: (taskId, events, live) =>
@@ -278,26 +417,46 @@ export class Engine {
       add('warn', `에이전트에 작업 폴더가 없어서 작업공간 폴더(${cwd})에서 실행해요. 프로젝트 폴더를 지정하면 그 안에서 일해요.`)
     }
 
-    // can we see what changed?
+    // can we see what changed, and can it be undone?
     if (canRun) {
-      if (await isInsideGit(cwd)) add('ok', '변경한 파일을 줄 단위로 추적해요 (git).')
-      else add('warn', '이 폴더는 git 저장소가 아니라서 바뀐 파일 목록만 볼 수 있어요. 변경 추적을 켜면 줄 단위 diff도 볼 수 있어요.', 'git-init')
+      if (await isInsideGit(cwd)) {
+        add('ok', '변경한 파일을 줄 단위로 추적해요 (git). 실행 전 상태를 저장해 두니 [이 실행 되돌리기]로 되돌릴 수 있어요.')
+      } else {
+        add('warn', '이 폴더는 git 저장소가 아니라서 바뀐 파일 목록만 볼 수 있어요. 변경 추적을 켜면 줄 단위 diff도 볼 수 있어요.', 'git-init')
+        add('warn', '되돌리기용으로 실행 전에 파일을 백업해 둬요. 폴더가 아주 크면(파일 5000개 또는 100MB 초과) 백업하지 않아요.')
+      }
+      if (this.folderBusy(agent)) add('warn', '다른 작업이 이 폴더에서 실행 중이에요. 그 작업이 끝나면 이어서 시작해요.')
+    }
+    const lim = this.limitFor(agent.adapter)
+    if (lim) {
+      add('warn', `이 CLI는 사용량 한도에 걸려 있어요 (${new Date(lim.until).toLocaleString('ko-KR', { hour12: false })}${lim.guessed ? '쯤 추정' : ''}까지). 지금 실행하면 다시 실패할 수 있어요.`)
     }
 
     // permission level
-    const level = task.permission ?? 'edit'
+    const level = effectivePermission(agent.adapter, task.permission)
+    const enforced = acc.permission === 'flag'
     if (level === 'read') {
-      add(acc.permission === 'flag' ? 'ok' : 'warn', acc.permission === 'flag'
-        ? '권한: 읽기만 — CLI가 파일 수정과 명령 실행을 막아요.'
-        : '권한: 읽기만 — 이 CLI는 권한을 직접 강제하지 못해서 "수정하지 말라"고 지시로만 안내해요.')
+      if (enforced) add('ok', '권한: 읽기만 — CLI가 파일 수정과 명령 실행을 막아요.')
+      else if (task.permission === undefined) {
+        add('ok', '권한: 읽기만 (이 CLI의 기본값) — 이 CLI는 수정을 직접 막지 못해서 기본을 읽기만으로 둬요. 파일을 고치게 하려면 권한을 "작업 폴더 수정"으로 바꾸세요.')
+      } else add('warn', '권한: 읽기만 — 이 CLI는 권한을 직접 강제하지 못해서 "수정하지 말라"고 지시로만 안내해요.')
     } else if (level === 'exec') {
       add('warn', agent.adapter === 'codex'
         ? '권한: 명령 실행 — 샌드박스 없이 실행해요(danger-full-access). 실행 전 승인이 필요해요.'
-        : acc.permission === 'flag'
-          ? '권한: 명령 실행 허용 — 실행 전 승인이 필요해요.'
-          : '권한: 명령 실행 — 이 CLI의 명령 허용 설정은 에이전트의 추가 인자를 따라요. 실행 전 승인이 필요해요.')
+        : agent.adapter === 'agy'
+          ? '권한: 명령 실행 — agy의 모든 도구 확인을 자동 승인해요(--dangerously-skip-permissions). 실행 전 승인이 필요해요.'
+          : enforced
+            ? '권한: 명령 실행 허용 — 실행 전 승인이 필요해요.'
+            : '권한: 명령 실행 — 이 CLI의 명령 허용 설정은 에이전트의 추가 인자를 따라요. 실행 전 승인이 필요해요.')
+    } else if (enforced) {
+      add('ok', '권한: 작업 폴더 안 파일 수정. 삭제·이동 같은 파괴적 명령(rm, mv …)은 막혀 있어요 (명령 실행 권한에서만 허용).')
     } else {
-      add('ok', '권한: 작업 폴더 안 파일 수정 (에이전트 설정 그대로).')
+      const it: PreflightItem = {
+        level: 'warn',
+        confirm: true,
+        text: '권한: 파일 수정 — 이 CLI는 수정 범위를 직접 막지 못해요. 작업 폴더 밖 파일을 바꾸거나 파일을 지울 수도 있어요. 중요한 폴더는 git 저장소로 만들고(변경 추적), 실행 후 변경 목록을 꼭 확인하세요.'
+      }
+      items.push(it)
     }
 
     // materials
@@ -306,12 +465,13 @@ export class Engine {
         add('warn', `첨부 파일이 이 컴퓨터에 없어요: ${a.name}${a.local ? ' (용량이 커서 만든 사람 컴퓨터에만 있어요)' : ''}`)
       }
     }
-    if (task.attachments?.length) add('ok', `첨부 ${task.attachments.length}개를 에이전트에게 알려줘요.`)
+    if (task.attachments?.length) {
+      add('ok', `첨부 ${task.attachments.length}개를 실행하는 동안 작업 폴더의 ${STAGE_DIR}/ 에 복사해 에이전트에게 알려줘요 (끝나면 지워요).`)
+    }
     for (const d of task.refDirs ?? []) {
       if (!existsSync(d)) add('warn', `참고 폴더를 찾을 수 없어요 (이 컴퓨터에 없어요): ${d}`)
-      else if (acc.refDirs === 'flag') {
-        add('ok', `참고 폴더 열람 허용: ${d}${agent.adapter === 'codex' ? ' (Codex는 이 폴더에 쓰기도 가능해져요)' : ''}`)
-      } else add('warn', `참고 폴더: ${d} — 이 CLI는 폴더 접근을 직접 허용하지 못해서 경로만 알려줘요. 못 읽으면 에이전트 작업 폴더 안으로 옮기세요.`)
+      else if (agent.adapter === 'claude') add('ok', `참고 폴더 열람 허용 (읽기만, 수정은 막아요): ${d}`)
+      else add('warn', `참고 폴더: ${d} — 이 CLI는 폴더 접근을 직접 허용하지 못해서 경로만 알려줘요. 못 읽으면 에이전트 작업 폴더 안으로 옮기세요.`)
     }
 
     if (task.reply !== undefined) {
@@ -406,6 +566,36 @@ export class Engine {
     this.changed()
   }
 
+  /** How many tasks are running right now (the app keeps the computer awake while this is > 0). */
+  runningCount(): number {
+    return this.running.size
+  }
+
+  /** Undo everything a run changed in its work folder (back to how it was just before the run). */
+  async rollbackRun(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
+    const task = this.hive.getTask(taskId)
+    const rec = this.hive.getRun(taskId, runId)
+    if (!task || !rec) return { ok: false, message: '실행 기록을 찾을 수 없어요.' }
+    if (!rec.checkpoint) return { ok: false, message: rec.checkpointNote ?? '이 실행은 되돌릴 수 없어요.' }
+    if (rec.rolledBackAt) return { ok: false, message: '이미 되돌린 실행이에요.' }
+    if (this.running.has(taskId) || this.folders.has(normPath(rec.checkpoint.root))) {
+      return { ok: false, message: '이 폴더에서 다른 작업이 실행 중이에요. 끝난 뒤에 되돌려 주세요.' }
+    }
+    const by = this.config.memberName || 'me'
+    const r = await rollback(this.hive, rec.checkpoint, this.excludesFor(rec.checkpoint.root))
+    if (!r.ok) return { ok: false, message: r.message }
+    this.hive.addRun({ ...rec, rolledBackAt: new Date().toISOString() })
+    this.hive.addEvent(taskId, 'rollback', by, `이 실행을 되돌렸어요. ${r.message}`, runId)
+    const patch: Partial<Task> = { interruptedRun: undefined }
+    if (task.status === 'done' || task.status === 'failed') {
+      patch.status = 'todo'
+      patch.notes = [...task.notes, '실행을 되돌려서 다시 할 일로 돌려놨어요.']
+    }
+    this.hive.updateTask(taskId, patch)
+    this.changed()
+    return r
+  }
+
   decideApproval(id: string, decision: 'approved' | 'rejected'): void {
     this.hive.decideApproval(id, decision, this.config.memberName || 'me')
     this.changed()
@@ -440,6 +630,7 @@ export class Engine {
         if (this.running.size >= this.config.maxConcurrent) break
         const agent = this.localAgent(t.assignee)
         if (!agent || busyAgents.has(agent.id) || !this.hive.isReady(t, all)) continue
+        if (this.limitFor(agent.adapter) || this.folderBusy(agent)) continue
         busyAgents.add(agent.id)
         void this.runTask(t.id)
       }

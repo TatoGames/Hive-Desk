@@ -221,3 +221,9 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
   .two-col { grid-template-columns: 1fr; }
   .agent { grid-template-columns: 1fr; }
 }
+
+.ack { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--text); }
+
+.wait { color: var(--warn, #c98a1b); }
+.warn-text { color: var(--warn, #c98a1b); }
+.undo { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0; }

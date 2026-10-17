@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AdapterId, AdapterInfo, Agent, Snapshot } from '@shared/types'
-import { ConfirmButton } from './Board'
+import { ConfirmButton } from './Materials'
 
 const ADAPTER_LABEL: Record<AdapterId, string> = {
   claude: 'Claude Code',
