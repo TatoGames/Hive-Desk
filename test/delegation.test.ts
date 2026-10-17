@@ -97,11 +97,14 @@ function company(s: Script) {
 /** Drive the auto-run loop until nothing is runnable or running any more. */
 async function settle(eng: Engine, max = 400): Promise<void> {
   let idle = 0
-  for (let i = 0; i < max && idle < 4; i++) {
+  // Generous waits: under a loaded CI machine a run (git checkpoint + diff) can take well over a
+  // second, and a run started by tick() registers as running only after its async setup.
+  for (let i = 0; i < max && idle < 6; i++) {
     const before = JSON.stringify(eng.hive.listTasks().map((t) => [t.id, t.status, t.kind, t.assignee]))
     await eng.tick()
-    for (let k = 0; k < 200 && eng.snapshot().running.length; k++) await new Promise((r) => setTimeout(r, 5))
-    await new Promise((r) => setTimeout(r, 5))
+    await new Promise((r) => setTimeout(r, 20))
+    for (let k = 0; k < 1500 && eng.snapshot().running.length; k++) await new Promise((r) => setTimeout(r, 10))
+    await new Promise((r) => setTimeout(r, 10))
     const after = JSON.stringify(eng.hive.listTasks().map((t) => [t.id, t.status, t.kind, t.assignee]))
     idle = before === after && !eng.snapshot().running.length ? idle + 1 : 0
   }
