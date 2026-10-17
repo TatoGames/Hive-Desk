@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { AdapterId, AdapterInfo, Agent, Snapshot } from '@shared/types'
-import { ConfirmButton } from './Board'
+import { JOBS, TIER_LABEL, modelLabel } from '@shared/company'
+import { fmtTime } from '../store'
+import { ConfirmButton } from './Materials'
 
 const ADAPTER_LABEL: Record<AdapterId, string> = {
   claude: 'Claude Code',
@@ -93,6 +95,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
                   </div>
                   <div className="muted small">{a.role || '역할 미지정'}</div>
                   <div className="muted small">작업 폴더: {a.workDir || '(hive 폴더)'}</div>
+                  <CheckLine check={snap.roster.find((r) => r.id === a.id)?.check} />
                 </div>
                 <div className="usage">
                   <Meter label="오늘 실행" value={u.runs} max={a.dailyRunLimit} unit="회" />
@@ -126,13 +129,24 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
                 <div className="muted small">
                   {r.owner} · {r.role || '역할 미지정'}
                 </div>
+                <CheckLine check={r.check} />
               </div>
             ))}
           </div>
         </section>
       )}
 
-      {draft && <AgentDialog draft={draft} onClose={() => setDraft(null)} />}
+      {draft && <AgentDialog draft={draft} snap={snap} onClose={() => setDraft(null)} />}
+    </div>
+  )
+}
+
+/** Last connection check of an agent's CLI: when, and whether it worked. */
+export function CheckLine({ check }: { check?: { at: string; ok: boolean; message: string } }): JSX.Element {
+  if (!check) return <div className="muted small">연결 확인 기록 없음</div>
+  return (
+    <div className={'small ' + (check.ok ? 'muted' : 'warn-text')}>
+      연결 확인 {fmtTime(check.at)} · {check.ok ? '정상' : '문제 있음 — ' + check.message}
     </div>
   )
 }
@@ -155,7 +169,7 @@ function Meter({ label, value, max, unit }: { label: string; value: number; max:
   )
 }
 
-function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }): JSX.Element {
+function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; onClose: () => void }): JSX.Element {
   const [d, setD] = useState<Draft>(draft)
   const [err, setErr] = useState('')
   const set = <K extends keyof Draft>(k: K, v: Draft[K]): void => setD((x) => ({ ...x, [k]: v }))
@@ -164,7 +178,7 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
   const save = async (): Promise<void> => {
     if (!d.name.trim()) return setErr('이름을 입력하세요.')
     if (d.adapter === 'custom' && !d.command?.trim()) return setErr('실행할 명령을 입력하세요.')
-    await window.hive.saveAgent({ ...d, model: d.model?.trim() || undefined })
+    await window.hive.saveAgent({ ...d, model: d.modelRef ? undefined : d.model?.trim() || undefined })
     onClose()
   }
 
@@ -183,7 +197,7 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
               value={d.adapter}
               onChange={(e) => {
                 const a = e.target.value as AdapterId
-                setD((x) => ({ ...x, adapter: a, extraArgs: DEFAULT_ARGS[a] }))
+                setD((x) => ({ ...x, adapter: a, extraArgs: DEFAULT_ARGS[a], modelRef: undefined, model: '' }))
               }}
             >
               {(Object.keys(ADAPTER_LABEL) as AdapterId[]).map((k) => (
@@ -225,10 +239,70 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
           )}
           {d.adapter !== 'custom' && d.adapter !== 'agy' && (
             <label>
-              모델 (비우면 CLI 기본값)
+              모델 (카탈로그에서 고르면 버전을 정확히 지정할 수 있어요)
+              <select
+                value={d.modelRef?.id ?? (d.model ? '__custom' : '')}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (!v) setD((x) => ({ ...x, modelRef: undefined, model: '' }))
+                  else if (v === '__custom') setD((x) => ({ ...x, modelRef: undefined }))
+                  else setD((x) => ({ ...x, modelRef: { id: v, pin: x.modelRef?.pin ?? 'pinned' }, model: '' }))
+                }}
+              >
+                <option value="">CLI 기본값</option>
+                {snap.company.catalog
+                  .filter((m) => m.adapter === d.adapter)
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {modelLabel(m)} · {TIER_LABEL[m.tier]}
+                      {snap.company.availability[m.id]?.ok === false ? ' (이 계정에서 안 됨)' : ''}
+                    </option>
+                  ))}
+                <option value="__custom">직접 입력…</option>
+              </select>
+            </label>
+          )}
+          {d.modelRef && (
+            <label>
+              버전
+              <select
+                value={d.modelRef.pin}
+                onChange={(e) => set('modelRef', { id: d.modelRef!.id, pin: e.target.value as 'alias' | 'pinned' })}
+              >
+                <option value="pinned">이 버전으로 고정</option>
+                <option value="alias">최신 버전을 따라가기 (별칭)</option>
+              </select>
+            </label>
+          )}
+          {!d.modelRef && d.adapter !== 'custom' && d.adapter !== 'agy' && !!d.model && (
+            <label>
+              모델 이름 직접 입력
               <input value={d.model} onChange={(e) => set('model', e.target.value)} />
             </label>
           )}
+          <label>
+            직무
+            <select value={d.job ?? ''} onChange={(e) => set('job', e.target.value || undefined)}>
+              <option value="">미지정</option>
+              {JOBS.map((j) => (
+                <option key={j.id} value={j.id}>
+                  {j.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            기본 권한 (태스크가 따로 정하지 않을 때)
+            <select
+              value={d.permission ?? ''}
+              onChange={(e) => set('permission', (e.target.value || undefined) as Draft['permission'])}
+            >
+              <option value="">기본 (CLI에 따라)</option>
+              <option value="read">읽기만</option>
+              <option value="edit">파일 수정</option>
+              <option value="exec">명령 실행</option>
+            </select>
+          </label>
           <label className={d.adapter === 'custom' || d.adapter === 'agy' ? 'full' : ''}>
             {d.adapter === 'custom' ? '명령 인자' : '추가 인자'}
             <input value={d.extraArgs} onChange={(e) => set('extraArgs', e.target.value)} />
@@ -246,7 +320,7 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
             />
           </label>
           <label>
-            1회 제한 시간(분)
+            무응답 제한(분) — 이 시간 동안 아무 반응이 없으면 중지
             <input
               type="number"
               value={d.timeoutMinutes}

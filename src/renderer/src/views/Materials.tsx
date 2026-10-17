@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import { defaultPermission } from '@shared/permission'
 import type {
   ActivityEvent,
+  AdapterId,
   ActivityKind,
   DiffFile,
   LiveSummary,
@@ -193,14 +195,37 @@ export async function collectDropped(dt: DataTransfer): Promise<Dropped[]> {
 }
 
 /** Hand dropped/picked items to a task. Returns problems to show. */
+/** Attach what was dropped. Returns problems and hints about formats the AI may not read ("note: " prefix). */
 export async function sendDropped(taskId: string, items: Dropped[]): Promise<string[]> {
-  const errors: string[] = []
-  const paths = items.filter((i) => i.path).map((i) => i.path as string)
-  if (paths.length) errors.push(...(await window.hive.attachPaths(taskId, paths)).errors)
-  for (const i of items) {
-    if (!i.path && i.data) errors.push(...(await window.hive.attachData(taskId, i.name, i.data)).errors)
+  const out: string[] = []
+  const take = (r: { errors: string[]; notes: string[] }): void => {
+    out.push(...r.errors, ...r.notes.map((n) => 'note: ' + n))
   }
-  return errors
+  const paths = items.filter((i) => i.path).map((i) => i.path as string)
+  if (paths.length) take(await window.hive.attachPaths(taskId, paths))
+  for (const i of items) {
+    if (!i.path && i.data) take(await window.hive.attachData(taskId, i.name, i.data))
+  }
+  return out
+}
+
+/** Problems in red, format hints in grey. */
+export function DropMessages({ items }: { items: string[] }): JSX.Element {
+  return (
+    <>
+      {items.map((e, i) =>
+        e.startsWith('note: ') ? (
+          <div key={i} className="muted small">
+            💡 {e.slice(6)}
+          </div>
+        ) : (
+          <div key={i} className="err-text small">
+            {e}
+          </div>
+        )
+      )}
+    </>
+  )
 }
 
 export function DropZone({
@@ -248,30 +273,40 @@ export function DropZone({
 
 const PERM_LABEL: Record<PermissionLevel, string> = {
   read: '읽기만 (파일을 바꾸지 못해요)',
-  edit: '파일 수정 (기본, 에이전트 설정대로)',
+  edit: '파일 수정 (작업 폴더 안, 삭제·이동 제외)',
   exec: '명령 실행 허용 (위험 · 실행 전 승인)'
 }
 
+/** `undefined` = the default for the assignee's CLI (editing for Claude/Codex, read-only for the rest). */
 export function PermissionSelect({
   value,
-  onChange
+  onChange,
+  adapter
 }: {
-  value: PermissionLevel
-  onChange: (v: PermissionLevel) => void
+  value: PermissionLevel | undefined
+  onChange: (v: PermissionLevel | undefined) => void
+  adapter?: AdapterId
 }): JSX.Element {
+  const def = defaultPermission(adapter)
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value as PermissionLevel)}>
-      {(Object.keys(PERM_LABEL) as PermissionLevel[]).map((k) => (
-        <option key={k} value={k}>
-          {PERM_LABEL[k]}
-        </option>
-      ))}
+    <select
+      value={value ?? ''}
+      onChange={(e) => onChange(e.target.value ? (e.target.value as PermissionLevel) : undefined)}
+    >
+      <option value="">기본 — {PERM_LABEL[def]}</option>
+      {(Object.keys(PERM_LABEL) as PermissionLevel[])
+        .filter((k) => k !== def)
+        .map((k) => (
+          <option key={k} value={k}>
+            {PERM_LABEL[k]}
+          </option>
+        ))}
     </select>
   )
 }
 
 /** Attachments, reference folders and permission level of an existing task. */
-export function MaterialsPanel({ task }: { task: Task }): JSX.Element {
+export function MaterialsPanel({ task, adapter }: { task: Task; adapter?: AdapterId }): JSX.Element {
   const [errors, setErrors] = useState<string[]>([])
   const atts = task.attachments ?? []
   const dirs = task.refDirs ?? []
@@ -281,10 +316,32 @@ export function MaterialsPanel({ task }: { task: Task }): JSX.Element {
       <div className="row">
         <span className="muted small">권한</span>
         <PermissionSelect
-          value={task.permission ?? 'edit'}
+          value={task.permission}
+          adapter={adapter}
           onChange={(v) => void window.hive.updateTask(task.id, { permission: v })}
         />
         {running && <span className="muted small">바꾼 내용은 다음 실행부터 적용돼요.</span>}
+      </div>
+      <div className="row">
+        <label className="toggle" title="기본으로는 .env, 키 파일 같은 비밀 파일을 읽지 못하게 막아요 (Claude)">
+          <input
+            type="checkbox"
+            checked={!!task.allowSecrets}
+            onChange={(e) => void window.hive.updateTask(task.id, { allowSecrets: e.target.checked })}
+          />
+          비밀 파일(.env, 키)도 읽게 허용
+        </label>
+        <label className="toggle">
+          총 시간 상한
+          <input
+            type="number"
+            min={1}
+            style={{ width: 70 }}
+            value={task.maxMinutes ?? 240}
+            onChange={(e) => void window.hive.updateTask(task.id, { maxMinutes: Math.max(1, Number(e.target.value) || 240) })}
+          />
+          분
+        </label>
       </div>
       {!!atts.length && (
         <ul className="mat-list">
@@ -319,11 +376,7 @@ export function MaterialsPanel({ task }: { task: Task }): JSX.Element {
         </ul>
       )}
       <DropZone onItems={async (items) => setErrors(await sendDropped(task.id, items))} compact />
-      {errors.map((e, i) => (
-        <div key={i} className="err-text small">
-          {e}
-        </div>
-      ))}
+      <DropMessages items={errors} />
     </div>
   )
 }
@@ -348,11 +401,7 @@ export function NeedBox({ task }: { task: Task }): JSX.Element {
       {!!(task.attachments ?? []).length && (
         <div className="muted small">첨부된 자료: {(task.attachments ?? []).map((a) => a.name).join(', ')}</div>
       )}
-      {errors.map((e, i) => (
-        <div key={i} className="err-text small">
-          {e}
-        </div>
-      ))}
+      <DropMessages items={errors} />
       <div className="row end">
         <button
           className="primary"
@@ -369,6 +418,73 @@ export function NeedBox({ task }: { task: Task }): JSX.Element {
   )
 }
 
+/** A finished run that changed things: accept it, ask for changes, or undo it. */
+export function ReviewBox({ task }: { task: Task }): JSX.Element {
+  const [text, setText] = useState('')
+  const [msg, setMsg] = useState('')
+  return (
+    <div className="need review">
+      <div>
+        <span className="tag warn">사람 확인</span> <b>결과를 확인해 주세요</b>
+      </div>
+      <div className="muted small">
+        바뀐 파일과 내용은 &lsquo;기록·변경&rsquo;에서 볼 수 있어요. 확인하기 전에는 이 태스크를 기다리는 다음 태스크가 시작되지 않아요.
+      </div>
+      {task.report?.did && <div className="small">한 일: {task.report.did}</div>}
+      <textarea
+        rows={2}
+        placeholder="고칠 점이 있으면 적고 [수정 요청]을 누르세요."
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div className="row end">
+        {task.lastRunId && (
+          <ConfirmButton
+            label="되돌리기"
+            onConfirm={async () => setMsg((await window.hive.rollbackRun(task.id, task.lastRunId!)).message)}
+          />
+        )}
+        <button
+          disabled={!text.trim()}
+          onClick={() => {
+            void window.hive.reviewTask(task.id, 'changes', text.trim())
+            setText('')
+          }}
+        >
+          수정 요청
+        </button>
+        <button className="primary" onClick={() => void window.hive.reviewTask(task.id, 'approve')}>
+          확인했어요
+        </button>
+      </div>
+      {msg && <div className="muted small">{msg}</div>}
+    </div>
+  )
+}
+
+/** Why a task failed, in plain words, with a button for the likely fix. */
+export function FailureHint({ task, onGoAgents }: { task: Task; onGoAgents?: () => void }): JSX.Element | null {
+  if (!task.error) return null
+  const [head, ...rest] = task.error.split('\n\n— 원문 —\n')
+  const raw = rest.join('\n')
+  return (
+    <div className="fail">
+      <div className="err-text">{head}</div>
+      {(task.errorKind === 'login' || task.errorKind === 'not_found') && onGoAgents && (
+        <button className="sm" onClick={onGoAgents}>
+          에이전트 화면 열기
+        </button>
+      )}
+      {raw && (
+        <details className="fold">
+          <summary>CLI 원문 보기</summary>
+          <pre className="out err">{raw}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- before running
 
 export function PreflightDialog({
@@ -380,6 +496,7 @@ export function PreflightDialog({
 }): JSX.Element {
   const [pf, setPf] = useState<Preflight | null>(null)
   const [msg, setMsg] = useState('')
+  const [ack, setAck] = useState<Record<number, boolean>>({})
   const load = (): void => {
     void window.hive.preflight(task.id).then(setPf)
   }
@@ -398,7 +515,19 @@ export function PreflightDialog({
             {pf.items.map((it, i) => (
               <li key={i} className={'pre-' + it.level}>
                 <span className="pre-icon">{ICON[it.level]}</span>
-                <span>{it.text}</span>
+                <span>
+                  {it.text}
+                  {it.confirm && (
+                    <label className="ack">
+                      <input
+                        type="checkbox"
+                        checked={!!ack[i]}
+                        onChange={(e) => setAck({ ...ack, [i]: e.target.checked })}
+                      />
+                      위험을 알고 있어요
+                    </label>
+                  )}
+                </span>
                 {it.fix === 'git-init' && (
                   <button
                     className="sm"
@@ -421,7 +550,7 @@ export function PreflightDialog({
           <button onClick={onClose}>취소</button>
           <button
             className="primary"
-            disabled={!pf?.canRun}
+            disabled={!pf?.canRun || pf.items.some((it, i) => it.confirm && !ack[i])}
             onClick={() => {
               onClose()
               void window.hive.runTask(task.id)
@@ -432,5 +561,30 @@ export function PreflightDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+/** Two-step delete without native dialogs: first click arms, second confirms. */
+export function ConfirmButton({
+  label,
+  onConfirm
+}: {
+  label: string
+  onConfirm: () => unknown
+}): JSX.Element {
+  const [armed, setArmed] = useState(false)
+  return (
+    <button
+      className={'sm ' + (armed ? 'danger' : 'ghost')}
+      onBlur={() => setArmed(false)}
+      onClick={() => {
+        if (armed) {
+          setArmed(false)
+          void onConfirm()
+        } else setArmed(true)
+      }}
+    >
+      {armed ? '정말 ' + label + '?' : label}
+    </button>
   )
 }

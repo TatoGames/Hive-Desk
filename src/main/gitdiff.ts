@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { DiffFile, RunDiff, TrackMode } from '../shared/types'
 import { SHARED_DIRS } from './hive'
+import { STAGE_DIR } from './staging'
 
 export const PATCH_LIMIT = 200_000
 const MAX_FILES = 1000
@@ -16,7 +17,7 @@ interface GitOut {
   overflow: boolean
 }
 
-function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}, timeout = 60_000): Promise<GitOut> {
+export function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}, timeout = 60_000): Promise<GitOut> {
   return new Promise((done) => {
     execFile(
       'git',
@@ -41,6 +42,16 @@ function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}, timeout =
   })
 }
 
+export function normPath(p: string): string {
+  let r: string
+  try {
+    r = realpathSync(p)
+  } catch {
+    r = resolve(p)
+  }
+  return process.platform === 'win32' ? r.toLowerCase() : r
+}
+
 function samePath(a: string, b: string): boolean {
   const norm = (p: string): string => {
     let r: string
@@ -62,7 +73,7 @@ export function unavailable(reason: string): RunDiff {
  * Writes the whole working tree (tracked + untracked, respecting .gitignore) into a git tree
  * object using a throw-away index, so the user's real index and working files are never touched.
  */
-async function snapshotTree(toplevel: string, exclude: string[]): Promise<string | { error: string }> {
+export async function snapshotTree(toplevel: string, exclude: string[]): Promise<string | { error: string }> {
   const gd = await git(toplevel, ['rev-parse', '--absolute-git-dir'])
   if (!gd.ok) return { error: gd.err || 'git 폴더를 찾지 못했어요.' }
   const gitDir = gd.out.trim()
@@ -82,8 +93,14 @@ async function snapshotTree(toplevel: string, exclude: string[]): Promise<string
   }
 }
 
+/** What a tracker saw when it started: enough to build a checkpoint or to compare later. */
+export type TrackSource =
+  | { kind: 'git'; toplevel: string; tree: string; exclude: string[] }
+  | { kind: 'scan'; root: string; files: Map<string, FileStamp>; skip: string[] }
+
 export interface ChangeTracker {
   mode: TrackMode
+  source?: TrackSource
   /** Compare the folder now with how it was when tracking started. Never throws; safe to call repeatedly. */
   finish(): Promise<RunDiff>
 }
@@ -103,7 +120,7 @@ const SKIP_DIRS = new Set([
 ])
 const SCAN_LIMIT = 20_000
 
-interface FileStamp {
+export interface FileStamp {
   size: number
   mtimeMs: number
 }
@@ -180,11 +197,12 @@ export async function trackChanges(cwd: string, opts: { hiveRoot?: string } = {}
     const top = await git(cwd, ['rev-parse', '--show-toplevel'])
     if (!top.ok) {
       const hiveHere = !!opts.hiveRoot && samePath(cwd, opts.hiveRoot)
-      const skip = hiveHere ? [...SHARED_DIRS, '.local'] : []
+      const skip = hiveHere ? [STAGE_DIR, ...SHARED_DIRS, '.local'] : [STAGE_DIR]
       const before = scanFolder(cwd, skip)
       if (!before) return fail('작업 폴더에 파일이 너무 많아서 변경 내용을 비교하지 않아요 (git 저장소로 만들면 가능해요).')
       return {
         mode: 'scan',
+        source: { kind: 'scan', root: cwd, files: before, skip },
         finish: async () => {
           const after = scanFolder(cwd, skip)
           return after ? diffScans(before, after, cwd) : unavailable('변경 내용을 비교하지 못했어요: 파일이 너무 많아요.')
@@ -193,11 +211,12 @@ export async function trackChanges(cwd: string, opts: { hiveRoot?: string } = {}
     }
     const toplevel = top.out.trim()
     // `.local/` is already in the hive's own .gitignore; naming an ignored path makes `git add` fail.
-    const exclude = opts.hiveRoot && samePath(toplevel, opts.hiveRoot) ? [...SHARED_DIRS] : []
+    const exclude = [STAGE_DIR, ...(opts.hiveRoot && samePath(toplevel, opts.hiveRoot) ? SHARED_DIRS : [])]
     const before = await snapshotTree(toplevel, exclude)
     if (typeof before !== 'string') return fail('실행 전 상태를 저장하지 못했어요: ' + before.error)
     return {
       mode: 'git',
+      source: { kind: 'git', toplevel, tree: before, exclude },
       finish: async () => {
         try {
           const after = await snapshotTree(toplevel, exclude)

@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildCommand, cleanEnv, runCli, splitArgs } from '../src/main/adapters'
+import { buildCommand, cleanEnv, DESTRUCTIVE_BASH_RULES, runCli, splitArgs } from '../src/main/adapters'
+import { SECRET_READ_RULES } from '../src/main/secrets'
 import { makeAgent } from '../src/main/config'
 import { Engine } from '../src/main/engine'
 import { Hive } from '../src/main/hive'
@@ -80,7 +81,7 @@ describe('markers & adapters', () => {
   it('builds the right command per adapter', () => {
     const c = buildCommand(makeAgent('a', { name: 'c', adapter: 'claude', model: 'sonnet' }))
     expect(c.command).toBe('claude')
-    expect(c.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits'])
+    expect(c.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits', '--disallowedTools', ...DESTRUCTIVE_BASH_RULES, ...SECRET_READ_RULES])
     const x = buildCommand(makeAgent('a', { name: 'x', adapter: 'codex' }))
     expect(x.args[0]).toBe('exec')
     expect(x.args[x.args.length - 1]).toBe('-')
@@ -412,9 +413,9 @@ describe('engine', () => {
     const t = eng.createTask({ title: 'x' })
     eng.updateTask(t.id, { status: 'failed' })
     eng.updateTask(t.id, { status: 'todo' })
-    eng.updateTask(t.id, { title: 'renamed' }) // no status change → no event
+    eng.updateTask(t.id, { title: 'renamed' }) // rename → a 'changed' event (E3)
     const h = eng.taskHistory(t.id)
-    expect(h.events.map((e) => e.kind)).toEqual(['created', 'status', 'status'])
+    expect(h.events.map((e) => e.kind)).toEqual(['created', 'status', 'status', 'changed'])
     expect(h.events[2].text).toBe('상태를 직접 바꿨어요: 실패 → 할 일')
     expect(h.runs).toEqual([])
     expect(eng.runDetail(t.id, 'nope')).toBeNull()

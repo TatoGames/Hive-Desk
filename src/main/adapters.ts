@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { defaultPermission } from '../shared/permission'
+import { SECRET_READ_RULES } from './secrets'
 import type { AdapterId, AdapterInfo, Agent, PermissionLevel } from '../shared/types'
 import type { StreamKind } from './activity'
 
@@ -124,6 +126,8 @@ export interface BuildOptions {
   refDirs?: string[]
   /** Continue this CLI session instead of starting a new one. */
   resumeSession?: string
+  /** Let the file-reading tool open .env / key files (blocked by default). */
+  allowSecrets?: boolean
 }
 
 /** What HiveDesk can really enforce per CLI (the pre-run check shows this honestly). */
@@ -141,11 +145,48 @@ export function adapterAccess(id: AdapterId): AdapterAccess {
     case 'claude':
       return { permission: 'flag', refDirs: 'flag', resume: 'session', stream: true }
     case 'codex':
-      // Reference folders: `--add-dir` makes them WRITABLE for the sandbox; reading is what we ask for.
-      return { permission: 'flag', refDirs: 'flag', resume: 'replay', stream: true }
+      // Reference folders: `--add-dir` would make them WRITABLE for the sandbox, so it is not used;
+      // Codex's sandbox can read outside the work folder anyway (docs; not verified with a real CLI).
+      return { permission: 'flag', refDirs: 'prompt', resume: 'replay', stream: true }
     default:
       return { permission: 'prompt', refDirs: 'prompt', resume: 'replay', stream: false }
   }
+}
+
+/**
+ * The permission a task really runs with. Claude and Codex enforce levels themselves, so the
+ * editing default is safe there. The other CLIs only get an instruction, so they start read-only
+ * and a human has to pick editing on purpose (the pre-run check says so).
+ */
+export function effectivePermission(adapter: AdapterId, requested?: PermissionLevel): PermissionLevel {
+  return requested ?? defaultPermission(adapter)
+}
+
+/** Commands the default level must not run: deleting, moving and resetting things. */
+const DESTRUCTIVE_COMMANDS = [
+  'rm',
+  'rmdir',
+  'mv',
+  'unlink',
+  'shred',
+  'del',
+  'erase',
+  'rd',
+  'Remove-Item',
+  'git clean',
+  'git reset'
+]
+export const DESTRUCTIVE_BASH_RULES = DESTRUCTIVE_COMMANDS.map((c) => `Bash(${c} *)`)
+
+const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+
+/** A Claude Code permission rule for everything under an absolute path (`//` = absolute; Windows drives become `/c/…`). */
+export function claudePathRule(tool: string, abs: string): string {
+  let p = abs.replace(/\\/g, '/')
+  const m = p.match(/^([A-Za-z]):\/(.*)$/)
+  if (m) p = `/${m[1].toLowerCase()}/${m[2]}`
+  p = p.replace(/\/+$/, '')
+  return `${tool}(/${p}/**)`
 }
 
 /** Remove `--flag value` (and `--flag=value`) pairs from an arg list. */
@@ -181,20 +222,22 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     }
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     let extra = splitArgs(agent.extraArgs)
+    // Deny rules always win over allow rules, so they hold whatever the user's own settings say.
+    const deny: string[] = []
     if (level === 'read') {
       extra = dropFlag(extra, ['--permission-mode'])
-      extra.push(
-        '--permission-mode',
-        'default',
-        '--allowedTools',
-        'Read,Grep,Glob',
-        '--disallowedTools',
-        'Edit,Write,MultiEdit,NotebookEdit,Bash'
-      )
+      extra.push('--permission-mode', 'default', '--allowedTools', 'Read,Grep,Glob')
+      deny.push(...EDIT_TOOLS, 'Bash')
     } else if (level === 'exec') {
       extra = dropFlag(extra, ['--permission-mode'])
       extra.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
+    } else {
+      deny.push(...DESTRUCTIVE_BASH_RULES)
     }
+    if (!opts.allowSecrets) deny.push(...SECRET_READ_RULES)
+    // Reference folders are opened with --add-dir, which also allows writing: take that back.
+    for (const d of dirs) for (const tool of EDIT_TOOLS) deny.push(claudePathRule(tool, d))
+    if (deny.length) extra.push('--disallowedTools', ...deny)
     args.push(...extra)
     for (const d of dirs) args.push(`--add-dir=${d}`)
     if (opts.resumeSession) {
@@ -214,7 +257,7 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     if (level === 'read') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'read-only']
     else if (level === 'exec') extra = [...dropFlag(extra, ['--sandbox', '-s']), '--sandbox', 'danger-full-access']
     args.push(...extra)
-    for (const d of dirs) args.push('--add-dir', d)
+    // reference folders are read through the sandbox's normal read access; see adapterAccess
     args.push('-') // read prompt from stdin
     return { command, args, stream, resumed }
   }
@@ -223,6 +266,9 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     args.push(...splitArgs(agent.extraArgs))
     if (agent.adapter === 'agy') {
+      // Headless agy auto-denies anything that needs a permission prompt. Only the command level
+      // (which a human has to approve before the run) turns that off.
+      if (level === 'exec') args.push('--dangerously-skip-permissions')
       if (process.platform === 'win32') {
         // cmd.exe cannot safely carry a long multi-line argument; use stdin there
         args.push('-p', 'Follow the task given on stdin.', '--input-format', 'text')
@@ -263,7 +309,12 @@ function winQuote(a: string): string {
 export interface RunOptions {
   cwd: string
   prompt: string
+  /** Hard cap on the total run time. */
   timeoutMs: number
+  /** Stop when nothing has happened (no output, no file change) for this long. 0/undefined = off. */
+  idleTimeoutMs?: number
+  /** Gives the caller a function to call whenever something happened outside the CLI's output (e.g. a file changed). */
+  onTouchReady?: (touch: () => void) => void
   env: NodeJS.ProcessEnv
   onOutput?: (chunk: string) => void
   signal?: AbortSignal
@@ -274,6 +325,8 @@ export interface RunResult {
   stdout: string
   stderr: string
   timedOut: boolean
+  /** Why it timed out: no activity for a while, or the total time cap. */
+  timeoutKind?: 'idle' | 'total'
   aborted: boolean
   spawnError?: string
 }
@@ -289,15 +342,18 @@ export const runCli: Runner = (built, opts) =>
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let timeoutKind: 'idle' | 'total' | undefined
     let aborted = false
     let settled = false
+    let idleTimer: NodeJS.Timeout | undefined
 
     const done = (r: Partial<RunResult>): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (idleTimer) clearTimeout(idleTimer)
       opts.signal?.removeEventListener('abort', onAbort)
-      resolve({ code: null, stdout, stderr, timedOut, aborted, ...r })
+      resolve({ code: null, stdout, stderr, timedOut, timeoutKind, aborted, ...r })
     }
 
     let child
@@ -349,8 +405,21 @@ export const runCli: Runner = (built, opts) =>
     }
     const timer = setTimeout(() => {
       timedOut = true
+      timeoutKind = 'total'
       kill()
     }, opts.timeoutMs)
+    // "Still alive" = it printed something or the caller saw files change; silence for too long ends the run.
+    const touch = (): void => {
+      if (!opts.idleTimeoutMs || settled) return
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        timedOut = true
+        timeoutKind = 'idle'
+        kill()
+      }, opts.idleTimeoutMs)
+    }
+    touch()
+    opts.onTouchReady?.(touch)
     const onAbort = (): void => {
       aborted = true
       kill()
@@ -360,10 +429,12 @@ export const runCli: Runner = (built, opts) =>
     child.stdout?.on('data', (d: Buffer) => {
       const s = d.toString('utf8')
       stdout += s
+      touch()
       opts.onOutput?.(s)
     })
     child.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8')
+      touch()
     })
     child.on('error', (e: NodeJS.ErrnoException) => {
       done({

@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
+  AdapterId,
   Agent,
   AppConfig,
   AdapterInfo,
@@ -7,6 +9,8 @@ import type {
   EngineEvent,
   LiveState,
   PermissionLevel,
+  Project,
+  RunShared,
   Preflight,
   RunRecord,
   Snapshot,
@@ -30,6 +34,9 @@ const api = {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
+    delegate?: boolean
+    unitId?: string
   }): Promise<Task> => ipcRenderer.invoke('task:create', t),
   updateTask: (id: string, patch: Partial<Task>): Promise<Task> =>
     ipcRenderer.invoke('task:update', id, patch),
@@ -48,6 +55,14 @@ const api = {
   removeAttachment: (id: string, rel: string): Promise<void> => ipcRenderer.invoke('task:detach', id, rel),
   replyToTask: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:reply', id, text),
   addInstruction: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:instruct', id, text),
+  rollbackRun: (taskId: string, runId: string): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('task:rollback', taskId, runId),
+  reviewTask: (id: string, decision: 'approve' | 'changes', text?: string): Promise<void> =>
+    ipcRenderer.invoke('task:review', id, decision, text),
+  checkUpdate: (): Promise<{ available: boolean; current: string; version?: string; url?: string; name?: string }> =>
+    ipcRenderer.invoke('update:check'),
+  openUrl: (url: string): Promise<void> => ipcRenderer.invoke('open:url', url),
+  clearLimit: (adapter: AdapterId): Promise<void> => ipcRenderer.invoke('limit:clear', adapter),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:files'),
   /** Absolute path of a dropped File ('' if the browser gave no real file). */
   pathForFile: (f: File): string => {
@@ -59,11 +74,34 @@ const api = {
   },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
-  decideApproval: (id: string, d: 'approved' | 'rejected'): Promise<void> =>
-    ipcRenderer.invoke('approval:decide', id, d),
+  openAgenda: (title: string, body: string): Promise<void> => ipcRenderer.invoke('agenda:open', title, body),
+  decideAgenda: (id: string, choice: number, note?: string): Promise<void> =>
+    ipcRenderer.invoke('agenda:decide', id, choice, note),
+  applyReassignment: (domain: string, from: string, to: string): Promise<number> =>
+    ipcRenderer.invoke('reassign:apply', domain, from, to),
+  decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
+    ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>
     ipcRenderer.invoke('message:send', from, to, body),
-  addMemory: (text: string): Promise<void> => ipcRenderer.invoke('memory:add', text),
+  addMemory: (text: string, kind?: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:add', text, kind),
+  setMemoryKind: (id: string, kind: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:kind', id, kind),
+  applyTemplate: (id: string, name: string, place?: boolean): Promise<Company> =>
+    ipcRenderer.invoke('company:template', id, name, place),
+  saveCompany: (patch: Partial<Company>): Promise<Company> => ipcRenderer.invoke('company:save', patch),
+  saveUnit: (u: Partial<OrgUnit> & { name: string }): Promise<OrgUnit> => ipcRenderer.invoke('company:unit-save', u),
+  deleteUnit: (id: string): Promise<void> => ipcRenderer.invoke('company:unit-delete', id),
+  saveSeat: (s: Partial<Seat> & { unitId: string; title: string }): Promise<Seat> =>
+    ipcRenderer.invoke('company:seat-save', s),
+  deleteSeat: (id: string): Promise<void> => ipcRenderer.invoke('company:seat-delete', id),
+  assignSeat: (seatId: string, agentId: string | null): Promise<void> => ipcRenderer.invoke('company:assign', seatId, agentId),
+  placeModels: (onlyEmpty?: boolean): Promise<number> => ipcRenderer.invoke('company:place', onlyEmpty),
+  saveModel: (m: ModelEntry): Promise<ModelEntry> => ipcRenderer.invoke('model:save', m),
+  deleteModel: (id: string): Promise<void> => ipcRenderer.invoke('model:delete', id),
+  verifyModel: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('model:verify', id),
+  saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
+  deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
+  setProjectPath: (id: string, path: string): Promise<void> => ipcRenderer.invoke('project:path', id, path),
+  sharedRuns: (id: string): Promise<RunShared[]> => ipcRenderer.invoke('task:shared-runs', id),
   deleteMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
   detectAdapters: (): Promise<AdapterInfo[]> => ipcRenderer.invoke('adapters:detect'),
   installCli: (id: Agent['adapter']): Promise<{ ok: boolean; message: string }> =>

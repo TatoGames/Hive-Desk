@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import type {
   ActivityEvent,
   Agent,
+  HumanReview,
   PermissionLevel,
   Report,
   RunDiff,
@@ -10,9 +11,13 @@ import type {
   Task
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
-import { adapterAccess, buildCommand, cleanEnv, type Runner } from './adapters'
-import { diffStat, trackChanges } from './gitdiff'
+import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type Runner } from './adapters'
+import { createCheckpoint } from './checkpoint'
+import { classifyFailure, failureMessage } from './failure'
+import { detectLimit, type LimitInfo } from './limits'
+import { diffStat, trackChanges, unavailable } from './gitdiff'
 import { Hive, newId } from './hive'
+import { stageAttachments } from './staging'
 
 export interface ParsedMarkers {
   clean: string
@@ -80,13 +85,13 @@ const PERMISSION_TEXT: Record<PermissionLevel, string | null> = {
 }
 
 /** Attachments and reference folders, as the agent should see them. */
-function materialLines(task: Task, hive: Hive): string[] {
+function materialLines(task: Task, hive: Hive, staged?: Map<string, string>): string[] {
   const lines: string[] = []
   const atts = task.attachments ?? []
   if (atts.length) {
     lines.push('', '## Materials the human attached (read these first)')
     for (const a of atts) {
-      const abs = hive.attachmentPath(a)
+      const abs = staged?.get(a.rel) ?? hive.attachmentPath(a)
       lines.push(
         existsSync(abs)
           ? `- ${abs} (${fmtSize(a.size)})`
@@ -108,26 +113,40 @@ export function buildPrompt(opts: {
   task: Task
   hive: Hive
   maxMemory?: number
+  /** Where the attachments were copied for this run (see staging.ts). */
+  staged?: Map<string, string>
+  /** Extra instructions of a delegation step (planner / reviewer / integrator). */
+  extras?: string[]
 }): string {
   const { agent, task, hive } = opts
-  const mem = hive.listMemory(opts.maxMemory ?? 20)
+  const mem = hive.memoryForPrompt(opts.maxMemory ?? 20)
+  const project = hive.getProject(task.projectId)
   const inbox = hive.listInbox(agent.id).filter((m) => !m.read)
   const roster = hive.listRoster().filter((r) => r.id !== agent.id)
   const deps = task.dependsOn
     .map((d) => hive.getTask(d))
-    .filter((t): t is Task => !!t && t.status === 'done' && !!t.result)
+    .filter((t): t is Task => !!t && t.status === 'done' && !!(t.result || t.report))
 
   const lines: string[] = []
   lines.push(`You are "${agent.name}", an AI teammate. Role: ${agent.role || 'general helper'}.`)
   lines.push(
     'You work in a small team coordinated through shared files by the HiveDesk app. A human reviews your result.'
   )
+  if (project) {
+    lines.push('', `## Project: ${project.name}`)
+    if (project.description) lines.push(project.description)
+    if (project.briefing) lines.push('', 'Briefing (always applies):', project.briefing)
+  }
+  if (mem.fixed.length) {
+    lines.push('', '## Team rules (fixed memory — always apply)')
+    for (const m of mem.fixed) lines.push(`- ${m.text}`)
+  }
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
-  const perm = PERMISSION_TEXT[task.permission ?? 'edit']
+  const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission ?? agent.permission)]
   if (perm) lines.push('', perm)
-  lines.push(...materialLines(task, hive))
+  lines.push(...materialLines(task, hive, opts.staged))
 
   // The human answered an earlier question: tell this fresh run what happened so far.
   if (task.reply !== undefined) {
@@ -138,11 +157,11 @@ export function buildPrompt(opts: {
   }
   if (deps.length) {
     lines.push('', '## Results from tasks this depends on')
-    for (const d of deps) lines.push(`### ${d.title}`, (d.result ?? '').slice(0, 4000))
+    for (const d of deps) lines.push(`### ${d.title}`, dependencyText(d))
   }
-  if (mem.length) {
+  if (mem.recent.length) {
     lines.push('', '## Shared team memory (most recent last)')
-    for (const m of mem) lines.push(`- (${m.author}) ${m.text}`)
+    for (const m of mem.recent) lines.push(`- (${m.author}) ${m.text}`)
   }
   if (inbox.length) {
     lines.push('', '## Unread messages for you')
@@ -152,6 +171,7 @@ export function buildPrompt(opts: {
     lines.push('', '## Teammates you can message')
     for (const r of roster) lines.push(`- ${r.id} (${r.role || r.adapter})`)
   }
+  if (opts.extras?.length) lines.push(...opts.extras)
   lines.push(
     '',
     '## Reply protocol',
@@ -176,9 +196,9 @@ export function buildPrompt(opts: {
 }
 
 /** The human's answer, sent into an existing CLI session (the CLI already remembers the rest). */
-export function buildFollowUp(task: Task, hive: Hive): string {
+export function buildFollowUp(task: Task, hive: Hive, staged?: Map<string, string>): string {
   const lines: string[] = ['The human replied:', task.reply ?? '']
-  lines.push(...materialLines(task, hive))
+  lines.push(...materialLines(task, hive, staged))
   lines.push('', 'Continue the task. Keep using the same [[PLAN]]/[[STEP]], report and NEED/APPROVAL markers.')
   return lines.join('\n')
 }
@@ -197,6 +217,16 @@ export interface RunnerDeps {
   onActivity?: (taskId: string, events: ActivityEvent[], live: LiveRun) => void
   /** How often to look at the work folder while a run is in progress (ms). */
   watchMs?: number
+  /** When a finished run waits for a human check. Default: never (the engine passes the setting). */
+  humanReview?: HumanReview
+  /** The CLI reported that its usage limit is used up. */
+  onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
+  /** Extra prompt lines for delegation steps (see delegation.ts). */
+  promptExtras?: (task: Task, agent: Agent) => string[]
+  /** A run ended: feeds the aptitude record. `pending` = waits for a human check. */
+  onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'other' }) => void
+  /** Name of this computer's member, shown on shared run summaries. */
+  machine?: string
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
   now?: () => Date
@@ -209,6 +239,65 @@ export type RunOutcome =
   | 'needs_input'
   | 'not_ready'
   | 'cancelled'
+  /** Stopped by the usage limit; the task is ready again once it resets. */
+  | 'limited'
+
+/** Total time cap per run when the task does not set one. */
+export const DEFAULT_MAX_MINUTES = 240
+
+/** Patches / answers bigger than this stay on this computer only (the shared summary keeps the numbers). */
+export const SHARED_PATCH_MAX = 200_000
+
+export function shareRun(hive: Hive, rec: RunRecord, machine: string): void {
+  if (rec.outcome === 'running') return
+  const files = rec.diff.files
+  const small = rec.diff.patch.length <= SHARED_PATCH_MAX
+  hive.addSharedRun({
+    id: rec.id,
+    taskId: rec.taskId,
+    agentId: rec.agentId,
+    machine,
+    adapter: rec.adapter,
+    model: rec.model,
+    startedAt: rec.startedAt,
+    finishedAt: rec.finishedAt,
+    durationMs: rec.durationMs,
+    outcome: rec.outcome,
+    report: rec.report,
+    diffStat: {
+      available: rec.diff.available,
+      files: files.length,
+      additions: files.reduce((n, f) => n + f.additions, 0),
+      deletions: files.reduce((n, f) => n + f.deletions, 0)
+    },
+    files: files.slice(0, 500),
+    ...(small && rec.diff.patch ? { patch: rec.diff.patch } : {}),
+    ...(rec.response.length <= SHARED_PATCH_MAX ? { response: rec.response } : {}),
+    error: rec.error
+  })
+}
+
+/** The folder an agent's runs happen in. */
+export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string | null): string {
+  if (projectDir && existsSync(projectDir)) return projectDir
+  return agent.workDir && existsSync(agent.workDir) ? agent.workDir : defaultCwd
+}
+
+/** Most of a dependency's report that goes into the prompt, and the fallback cap on a raw result. */
+const DEP_RESULT_MAX = 1500
+
+/** What a finished task hands to the tasks that depend on it: its structured report first. */
+export function dependencyText(t: Task): string {
+  const r = t.report
+  if (r && (r.did || r.files || r.verify)) {
+    const out = [`Did: ${r.did}`, `Files: ${r.files}`, `How to verify: ${r.verify}`]
+    if (r.risks && r.risks.toLowerCase() !== 'none') out.push(`Risks: ${r.risks}`)
+    if (r.next && r.next.toLowerCase() !== 'none') out.push(`Next: ${r.next}`)
+    return out.join('\n').slice(0, 4000)
+  }
+  const raw = t.result ?? ''
+  return raw.length > DEP_RESULT_MAX ? raw.slice(0, DEP_RESULT_MAX) + '\n[...cut: the task gave no structured report]' : raw
+}
 
 export function budgetProblem(hive: Hive, agent: Agent, d: Date): string | null {
   const u = hive.usageToday(d)[agent.id] ?? { runs: 0, ms: 0 }
@@ -229,7 +318,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const task = hive.getTask(taskId)
   if (!task || task.assignee !== agent.id) return 'not_ready'
   if (task.status !== 'todo') return 'not_ready'
-  const level: PermissionLevel = task.permission ?? 'edit'
+  const level: PermissionLevel = effectivePermission(agent.adapter, task.permission ?? agent.permission)
 
   // Gate 1: human approval for risky tasks / cautious agents / command-running tasks.
   if ((task.risky || agent.requireApproval || level === 'exec') && !task.cleared.includes('risky-task')) {
@@ -259,7 +348,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'awaiting_approval'
   }
 
-  const cwd = agent.workDir && existsSync(agent.workDir) ? agent.workDir : deps.defaultCwd
+  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId))
   const started = nowFn()
   const runId = newId()
   const answering = task.reply !== undefined
@@ -285,7 +374,10 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     runId
   )
 
-  const prompt = resumeSession ? buildFollowUp(task, hive) : buildPrompt({ agent, task, hive })
+  const staged = stageAttachments(task, hive, cwd)
+  const prompt = resumeSession
+    ? buildFollowUp(task, hive, staged.paths)
+    : buildPrompt({ agent, task, hive, staged: staged.paths, extras: deps.promptExtras?.(task, agent) })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
   let built
@@ -294,9 +386,11 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       stream: true,
       permission: level,
       refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
-      resumeSession
+      resumeSession,
+      allowSecrets: task.allowSecrets
     })
   } catch (e) {
+    staged.cleanup()
     const finishedAt = nowFn().toISOString()
     hive.addEvent(task.id, 'run_finished', agent.id, '실패 · ' + (e as Error).message, runId)
     hive.updateTask(task.id, { status: 'failed', error: (e as Error).message, finishedAt })
@@ -305,6 +399,31 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
 
   // Remember how the work folder looked, so we can show exactly what this run changed — also live.
   const tracker = await trackChanges(cwd, { hiveRoot: hive.root })
+  // ...and keep that state so the whole run can be undone later.
+  const cp = await createCheckpoint(hive, runId, tracker.source)
+  // Written now and replaced when the run ends: if the app dies in between, this is what is left.
+  hive.addRun({
+    id: runId,
+    taskId: task.id,
+    agentId: agent.id,
+    adapter: agent.adapter,
+    model: agent.model,
+    startedAt: started.toISOString(),
+    finishedAt: '',
+    durationMs: 0,
+    outcome: 'running',
+    exitCode: null,
+    prompt: cap(prompt, 100_000),
+    response: '',
+    stderr: '',
+    diff: unavailable('실행 중이에요.'),
+    cwd,
+    permission: level,
+    activity: [],
+    checkpoint: cp.checkpoint,
+    checkpointNote: cp.note
+  })
+  if (task.interruptedRun) hive.updateTask(task.id, { interruptedRun: undefined })
   const live = new LiveRun(task.id, runId, cwd, started.toISOString())
   live.setTracking(tracker.mode)
   deps.onLive?.(live)
@@ -316,6 +435,8 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
 
   const watchMs = deps.watchMs ?? 3000
+  let touch: (() => void) | undefined
+  let lastSig = ''
   let watching = true
   let watchTimer: NodeJS.Timeout | undefined
   const poll = async (): Promise<void> => {
@@ -325,6 +446,12 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     if (!watching) return
     live.setDiff(d)
     live.setPlan(parser.plan())
+    // files changing means the agent is alive even if the CLI prints nothing
+    const sig = d.files.map((f) => `${f.path}:${f.status}:${f.additions}:${f.deletions}`).join('|')
+    if (sig !== lastSig) {
+      lastSig = sig
+      touch?.()
+    }
     deps.onActivity?.(task.id, [], live)
     // big folders: look less often so watching never slows the agent down
     watchTimer = setTimeout(() => void poll(), Math.max(watchMs, (Date.now() - t0) * 3))
@@ -336,7 +463,10 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     res = await deps.runner(built, {
       cwd,
       prompt,
-      timeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
+      // the agent's setting = how long it may stay silent; the task's setting = how long it may take in all
+      idleTimeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
+      timeoutMs: Math.max(1, task.maxMinutes ?? DEFAULT_MAX_MINUTES) * 60_000,
+      onTouchReady: (t) => (touch = t),
       env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
       onOutput: (c) => {
         push(parser.push(c))
@@ -347,6 +477,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   } finally {
     watching = false
     if (watchTimer) clearTimeout(watchTimer)
+    staged.cleanup()
   }
   push(parser.end())
 
@@ -400,10 +531,16 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       cwd,
       permission: level,
       sessionId,
-      activity: live.all().slice(-1000)
+      activity: live.all().slice(-1000),
+      checkpoint: cp.checkpoint,
+      checkpointNote: cp.note
     }
     hive.addRun(rec)
+    shareRun(hive, rec, deps.machine ?? '')
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
+    if (outcome !== 'done') {
+      deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: outcome === 'failed' ? 'failed' : 'other' })
+    }
     return runId
   }
   const lastError = [...live.all()].reverse().find((e) => e.kind === 'error')?.text
@@ -420,15 +557,20 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'cancelled'
   }
   if (res.spawnError) {
-    const error = res.spawnError
-    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
+    const f = classifyFailure(res.spawnError)
+    const kind = f.kind
+    const error = failureMessage(f, res.spawnError)
+    hive.updateTask(task.id, { status: 'failed', error, errorKind: kind, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
   if (res.timedOut) {
-    const error = `제한 시간 ${agent.timeoutMinutes}분을 넘겨 중지했어요.`
+    const kindOfTimeout = res.timeoutKind ?? 'total'
+    const minutes = kindOfTimeout === 'idle' ? agent.timeoutMinutes : (task.maxMinutes ?? DEFAULT_MAX_MINUTES)
+    const error = failureMessage(classifyFailure('', { timeout: kindOfTimeout, minutes }), '')
     hive.updateTask(task.id, {
       status: 'failed',
       error,
+      errorKind: 'timeout',
       result: stdout.trim() || undefined,
       finishedAt,
       sessionId,
@@ -436,10 +578,28 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     })
     return 'failed'
   }
+  // The usage limit looks like a plain failure; recognise it so auto-run can wait instead of failing on.
+  if (res.code !== 0 || stdout.trim().length < 400) {
+    const lim = detectLimit([res.stderr, stdout.slice(-2000), lastError ?? ''].join('\n'), nowFn())
+    if (lim) {
+      deps.onLimit?.(agent.adapter, lim)
+      const when = new Date(lim.until).toLocaleString('ko-KR', { hour12: false })
+      const error = `사용량 한도에 도달했어요 (${lim.message}). ${when}${lim.guessed ? '쯤(추정)' : ''}까지 자동 실행을 쉬어요.`
+      hive.updateTask(task.id, {
+        status: 'todo',
+        error,
+        finishedAt,
+        sessionId,
+        lastRunId: saveRun('limit', { error })
+      })
+      return 'limited'
+    }
+  }
   if (res.code !== 0) {
     const detail = (res.stderr.trim() || stdout.trim() || lastError || '').slice(-1500)
-    const error = `CLI가 오류 코드 ${res.code}로 끝났어요.${detail ? '\n' + detail : ''}`
-    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
+    const f = classifyFailure([res.stderr, stdout.slice(-3000), lastError ?? ''].join('\n'))
+    const error = failureMessage(f, `(오류 코드 ${res.code})${detail ? '\n' + detail : ''}`)
+    hive.updateTask(task.id, { status: 'failed', error, errorKind: f.kind, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
 
@@ -487,17 +647,38 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'needs_input'
   }
 
+  // delegated tasks are checked by another model instead of waiting for a human
+  const review = task.kind ? false : needsReview(deps.humanReview ?? 'off', level, diff)
+  const lastRunId = saveRun('done', { report: parsed.report })
+  deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: review || task.kind ? 'pending' : 'approved' })
+  if (review) {
+    hive.addEvent(task.id, 'review', 'system', `사람 확인을 기다려요: ${reviewReason(diff)}`, runId)
+  }
   hive.updateTask(task.id, {
-    status: 'done',
+    status: review ? 'needs_review' : 'done',
     result: parsed.clean,
     report: parsed.report,
     error: undefined,
+    errorKind: undefined,
     question: undefined,
     finishedAt,
     sessionId,
-    lastRunId: saveRun('done', { report: parsed.report })
+    lastRunId
   })
   return 'done'
+}
+
+/** Should a finished run wait for a human to look at it before it counts as done? */
+export function needsReview(mode: HumanReview, level: PermissionLevel, diff: RunDiff): boolean {
+  if (mode === 'off' || level === 'read') return false
+  if (mode === 'always') return true
+  // "changes": anything that touched files — and anything we could not check
+  return !diff.available || diff.files.length > 0
+}
+
+function reviewReason(diff: RunDiff): string {
+  if (!diff.available) return '바뀐 내용을 비교하지 못해서 직접 확인이 필요해요.'
+  return diff.files.length ? `파일 ${diff.files.length}개가 바뀌었어요.` : '설정에 따라 확인이 필요해요.'
 }
 
 function cap(s: string, n: number): string {
@@ -509,7 +690,10 @@ const OUTCOME_LABEL: Record<RunResultKind, string> = {
   failed: '실패',
   cancelled: '중지됨',
   awaiting_approval: '승인 대기',
-  needs_input: '자료 요청'
+  needs_input: '자료 요청',
+  running: '실행 중',
+  interrupted: '중단됨',
+  limit: '한도 도달'
 }
 
 export function runLine(outcome: RunResultKind, ms: number, diff: RunDiff): string {

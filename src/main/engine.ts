@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   Agent,
@@ -13,15 +14,44 @@ import type {
   Snapshot,
   SyncResult,
   Task,
+  Project,
+  RunShared,
+  ConnectionCheck,
   TaskHistory,
   TaskStatus
 } from '../shared/types'
 import type { LiveRun } from './activity'
-import { adapterAccess, runCli, type Runner } from './adapters'
+import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
+import { checkCli } from './setup'
+import { Committee } from './committee'
+import { Delegation } from './delegation'
+import { newId } from './hive'
+import { STAGE_DIR } from './staging'
+import { attachmentAdvice } from './attachAdvice'
+import { personalClaudeRules } from './claudeSettings'
+import { findSecrets } from './secrets'
+import { SHARED_DIRS } from './hive'
 import { loadConfig, makeAgent, saveConfig } from './config'
-import { enableTracking, isInsideGit } from './gitdiff'
+import { diffSinceCheckpoint, rollback } from './checkpoint'
+import { enableTracking, isInsideGit, normPath } from './gitdiff'
+import type { LimitInfo } from './limits'
 import { Hive } from './hive'
-import { budgetProblem, runTask } from './runner'
+import { budgetProblem, resolveCwd, runTask } from './runner'
+import type { AptitudeRecord } from '../shared/aptitude'
+import {
+  DEFAULT_RULES,
+  isModelEntry,
+  mergeCatalog,
+  modelLabel,
+  resolveModelArg,
+  type Company,
+  type ModelEntry,
+  type OrgUnit,
+  type Seat
+} from '../shared/company'
+import DEFAULT_MODELS from '../shared/models.default.json'
+import { autoPlace } from '../shared/placement'
+import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 
 export type Emit = (e: EngineEvent) => void
@@ -31,6 +61,9 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   awaiting_approval: '승인 대기',
   needs_input: '자료 요청',
   running: '실행 중',
+  needs_review: '사람 확인',
+  in_review: '교차 검토',
+  delegated: '위임 진행',
   done: '완료',
   failed: '실패'
 }
@@ -43,7 +76,16 @@ export class Engine {
   private liveRuns = new Map<string, LiveRun>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
+  /** One run per work folder at a time: folder → who has it and who waits. */
+  private folders = new Map<string, { holder: string; queue: { taskId: string; grant: () => void; drop: () => void }[] }>()
+  private waiting = new Map<string, string>()
+  /** CLIs (by adapter id) that are out of usage until a given time; kept across restarts. */
+  private limits: Record<string, LimitInfo> = {}
+  /** Finishing off runs that were cut short by the last shutdown (tests wait for it). */
+  recovering: Promise<void> = Promise.resolve()
   private timer: NodeJS.Timeout | null = null
+  readonly delegation: Delegation
+  readonly committee: Committee
   private syncTimer: NodeJS.Timeout | null = null
   private ticking = false
 
@@ -51,27 +93,119 @@ export class Engine {
     private configFile: string,
     private emit: Emit,
     private runner: Runner = runCli,
-    home: string = homedir()
+    private home: string = homedir()
   ) {
-    this.config = loadConfig(configFile, home)
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this
+    this.delegation = new Delegation({
+      // the hive is replaced when the workspace folder changes, so always read the current one
+      get hive(): Hive {
+        return self.hive
+      },
+      me: () => self.config.memberName || 'me',
+      catalog: () => self.catalog(),
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body),
+      escalate: (t, q) => self.escalateToCommittee(t, q),
+      aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d)
+    })
+    this.committee = new Committee({
+      get hive(): Hive {
+        return self.hive
+      },
+      me: () => self.config.memberName || 'me',
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body)
+    })
+    this.config = loadConfig(configFile, this.home)
     mkdirSync(this.config.workspace, { recursive: true })
     this.hive = new Hive(this.config.workspace)
+    this.loadLimits()
     this.recoverInterrupted()
     this.publishRoster()
     this.applyTimers()
   }
 
-  /** Tasks left "running" by a crash go back to todo. */
+  /**
+   * Tasks left "running" by a crash or by closing the app go back to todo. The run that was cut
+   * short is kept as "interrupted" so the half-done changes can be seen and undone.
+   */
   private recoverInterrupted(): void {
+    const jobs: Promise<void>[] = []
     for (const t of this.hive.listTasks()) {
-      if (t.status === 'running' && this.localAgent(t.assignee)) {
-        this.hive.updateTask(t.id, {
-          status: 'todo',
-          notes: [...t.notes, '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.']
-        })
-        this.hive.addEvent(t.id, 'status', 'system', '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.')
+      if (t.status !== 'running' || !this.localAgent(t.assignee)) continue
+      const run = this.hive.unfinishedRun(t.id)
+      const note = run
+        ? '앱이 닫혀 실행이 중단됐어요. 일부 변경이 폴더에 남았을 수 있어요 — 바뀐 파일을 확인하고 [되돌리기] 또는 다시 실행하세요.'
+        : '앱이 닫혀 실행이 중단되어 다시 할 일로 돌려놨어요.'
+      this.hive.updateTask(t.id, { status: 'todo', notes: [...t.notes, note], interruptedRun: run?.id })
+      this.hive.addEvent(t.id, 'status', 'system', note, run?.id)
+      if (run) {
+        this.hive.addRun({ ...run, outcome: 'interrupted', finishedAt: new Date().toISOString(), error: '앱이 닫혀 중단됐어요.' })
+        const cp = run.checkpoint
+        if (cp) {
+          jobs.push(
+            diffSinceCheckpoint(this.hive, cp, this.excludesFor(cp.root)).then((diff) => {
+              const cur = this.hive.getRun(t.id, run.id)
+              if (cur) this.hive.addRun({ ...cur, diff })
+            })
+          )
+        }
       }
     }
+    this.recovering = Promise.all(jobs).then(() => this.changed())
+  }
+
+  /** Paths the change tracker ignores (its own staging folder, and the hive's data when it is the folder). */
+  private excludesFor(root: string): string[] {
+    return [STAGE_DIR, ...(normPath(root) === normPath(this.hive.root) ? SHARED_DIRS : [])]
+  }
+
+  // ---- usage limits (per CLI on this machine) ----
+  private limitFile(): string {
+    return join(this.hive.root, '.local', 'limits.json')
+  }
+
+  private loadLimits(): void {
+    try {
+      const raw = JSON.parse(readFileSync(this.limitFile(), 'utf8')) as Record<string, LimitInfo>
+      const now = Date.now()
+      this.limits = Object.fromEntries(Object.entries(raw).filter(([, v]) => new Date(v.until).getTime() > now))
+    } catch {
+      this.limits = {}
+    }
+  }
+
+  private noteLimit(adapter: Agent['adapter'], info: LimitInfo): void {
+    this.limits[adapter] = info
+    try {
+      writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
+    } catch {
+      /* in-memory is enough for this session */
+    }
+    this.changed()
+  }
+
+  /** The active limit for a CLI, if any (expired ones are dropped). */
+  limitFor(adapter: Agent['adapter']): LimitInfo | undefined {
+    const l = this.limits[adapter]
+    if (!l) return undefined
+    if (new Date(l.until).getTime() <= Date.now()) {
+      delete this.limits[adapter]
+      return undefined
+    }
+    return l
+  }
+
+  /** Forget a limit (the human knows better, e.g. upgraded the plan). */
+  clearLimit(adapter: Agent['adapter']): void {
+    delete this.limits[adapter]
+    try {
+      writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
+    } catch {
+      /* ignore */
+    }
+    this.changed()
   }
 
   private localAgent(id: string | null): Agent | undefined {
@@ -86,7 +220,36 @@ export class Engine {
     }
   }
 
+  /** A desktop notification (the main process shows it when the app allows). */
+  notify(title: string, body: string): void {
+    this.emit({ type: 'notify', title, body })
+  }
+
+  private seenAttention: Set<string> | null = null
+
+  /** Tell the person about things that now wait for them (new approvals, questions, results, failures). */
+  private notifyAttention(): void {
+    let now: Map<string, [string, string]>
+    try {
+      now = new Map()
+      for (const a of this.hive.listApprovals()) if (a.status === 'pending') now.set('a' + a.id, ['승인이 필요해요', a.reason.slice(0, 80)])
+      for (const t of this.hive.listTasks()) {
+        if (t.hidden) continue
+        if (t.status === 'needs_input') now.set('i' + t.id, ['에이전트가 자료를 기다려요', t.title])
+        else if (t.status === 'needs_review' && !t.parentId) now.set('r' + t.id, ['결과를 확인해 주세요', t.title])
+        else if (t.status === 'failed') now.set('f' + t.id, ['작업이 실패했어요', t.title])
+      }
+    } catch {
+      return
+    }
+    const seen = this.seenAttention
+    this.seenAttention = new Set(now.keys())
+    if (!seen) return
+    for (const [k, [title, body]] of now) if (!seen.has(k)) this.notify(title, body)
+  }
+
   private changed(): void {
+    this.notifyAttention()
     this.emit({ type: 'changed' })
   }
 
@@ -103,7 +266,21 @@ export class Engine {
       usage: this.hive.usageToday(),
       running: [...this.running.keys()],
       gitEnabled: isGitRepo(this.config.workspace),
-      live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()]))
+      live: Object.fromEntries([...this.liveRuns].map(([id, l]) => [id, l.summary()])),
+      waiting: Object.fromEntries(this.waiting),
+      company: {
+        company: this.hive.getCompany(),
+        units: this.hive.listUnits(),
+        seats: this.hive.listSeats(),
+        catalog: this.catalog(),
+        availability: this.hive.availability(),
+        aptitude: this.hive.listAptitude(),
+        finals: this.hive.listFinals(),
+        agendas: this.hive.listAgendas()
+      },
+      projects: this.hive.listProjects(),
+      projectPaths: this.hive.projectPaths(),
+      limits: Object.fromEntries(Object.keys(this.limits).flatMap((k) => (this.limitFor(k as Agent['adapter']) ? [[k, this.limits[k]]] : [])))
     }
   }
 
@@ -122,6 +299,7 @@ export class Engine {
     if (this.config.workspace !== prevWorkspace) {
       mkdirSync(this.config.workspace, { recursive: true })
       this.hive = new Hive(this.config.workspace)
+      this.loadLimits()
     }
     this.publishRoster()
     this.applyTimers()
@@ -130,6 +308,14 @@ export class Engine {
 
   saveAgent(input: Partial<Agent> & { name: string; adapter: Agent['adapter'] }): Agent {
     const existingId = input.id
+    if (input.modelRef) {
+      const m = this.catalog().find((x) => x.id === input.modelRef!.id)
+      if (!m) throw new Error('카탈로그에 없는 모델이에요: ' + input.modelRef.id)
+      if (m.adapter !== input.adapter) {
+        throw new Error(`${m.family} ${m.version}은(는) ${m.adapter}용 모델이라 ${input.adapter} 에이전트에는 쓸 수 없어요.`)
+      }
+      input = { ...input, model: resolveModelArg(m, input.modelRef.pin) }
+    }
     const next = makeAgent(this.config.memberName, input)
     const agents = this.config.agents.filter((a) => a.id !== (existingId ?? next.id))
     agents.push(next)
@@ -157,8 +343,21 @@ export class Engine {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
+    /** Hand the job to the company: a manager plans it, workers do it, another model reviews it. */
+    delegate?: boolean
+    /** Hand it to the lead of this unit (implies delegate). */
+    unitId?: string
   }): Task {
-    const t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
+    let t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
+    if (input.delegate || input.unitId) {
+      try {
+        t = this.delegation.begin(t, { unitId: input.unitId, delegate: true })
+      } catch (e) {
+        this.hive.deleteTask(t.id)
+        throw e
+      }
+    }
     this.changed()
     return t
   }
@@ -174,8 +373,34 @@ export class Engine {
         `상태를 직접 바꿨어요: ${STATUS_LABEL[before.status]} → ${STATUS_LABEL[patch.status]}`
       )
     }
+    if (before) this.logTaskChanges(before, patch)
     this.changed()
     return t
+  }
+
+  /** Hand edits of a task are written to its timeline as events (append-only), so teammates see who changed what. */
+  private logTaskChanges(before: Task, patch: Partial<Task>): void {
+    const who = this.config.memberName || 'me'
+    const show = (v: unknown): string => (v === undefined || v === null || v === '' ? '없음' : String(v))
+    const fields: [keyof Task, string][] = [
+      ['title', '제목'],
+      ['assignee', '담당'],
+      ['permission', '권한'],
+      ['risky', '위험 표시'],
+      ['projectId', '프로젝트'],
+      ['maxMinutes', '최대 시간(분)']
+    ]
+    for (const [k, label] of fields) {
+      if (!(k in patch) || patch[k] === before[k]) continue
+      this.hive.addEvent(before.id, 'changed', who, `${label}을(를) 바꿨어요: ${show(before[k])} → ${show(patch[k])}`)
+    }
+    if (patch.description !== undefined && patch.description !== before.description) {
+      this.hive.addEvent(before.id, 'changed', who, '설명을 고쳤어요')
+    }
+  }
+
+  sharedRuns(id: string): RunShared[] {
+    return this.hive.listSharedRuns(id)
   }
 
   /** Timeline (shared) + run list (this machine) for one task. */
@@ -193,6 +418,58 @@ export class Engine {
     this.changed()
   }
 
+  /** Wait until no other task is working in this folder. `false` = stopped while waiting. */
+  private lockFolder(key: string, taskId: string, signal: AbortSignal): Promise<boolean> {
+    const entry = this.folders.get(key)
+    if (!entry) {
+      this.folders.set(key, { holder: taskId, queue: [] })
+      return Promise.resolve(true)
+    }
+    return new Promise<boolean>((resolve) => {
+      const waiter = {
+        taskId,
+        grant: (): void => {
+          signal.removeEventListener('abort', waiter.drop)
+          this.waiting.delete(taskId)
+          resolve(true)
+        },
+        drop: (): void => {
+          entry.queue = entry.queue.filter((w) => w !== waiter)
+          this.waiting.delete(taskId)
+          this.changed()
+          resolve(false)
+        }
+      }
+      signal.addEventListener('abort', waiter.drop, { once: true })
+      entry.queue.push(waiter)
+      this.waiting.set(taskId, entry.holder)
+      this.changed()
+    })
+  }
+
+  private unlockFolder(key: string): void {
+    const entry = this.folders.get(key)
+    if (!entry) return
+    const next = entry.queue.shift()
+    if (!next) {
+      this.folders.delete(key)
+      return
+    }
+    entry.holder = next.taskId
+    for (const w of entry.queue) this.waiting.set(w.taskId, entry.holder)
+    next.grant()
+  }
+
+  /** Is another task working in (or waiting for) this agent's folder right now? */
+  private cwdFor(agent: Agent, taskId: string): string {
+    const t = this.hive.getTask(taskId)
+    return resolveCwd(agent, this.config.workspace, this.hive.projectDir(t?.projectId))
+  }
+
+  private folderBusy(agent: Agent, taskId: string): boolean {
+    return this.folders.has(normPath(this.cwdFor(agent, taskId)))
+  }
+
   /** Run a task; if the human added instructions while it ran, apply them right after (same session if possible). */
   async runTask(id: string): Promise<string> {
     const task = this.hive.getTask(id)
@@ -203,7 +480,12 @@ export class Engine {
     const ac = new AbortController()
     this.running.set(id, ac)
     this.changed()
+    // Two agents editing the same folder would overwrite each other and mix up their diffs.
+    const key = normPath(this.cwdFor(agent, id))
+    let locked = false
     try {
+      locked = await this.lockFolder(key, id, ac.signal)
+      if (!locked) return 'cancelled'
       let outcome = await this.runOnce(agent, id, ac)
       for (let i = 0; i < 3 && outcome === 'done' && !ac.signal.aborted; i++) {
         const t = this.hive.getTask(id)
@@ -216,8 +498,14 @@ export class Engine {
         })
         outcome = await this.runOnce(agent, id, ac)
       }
+      // delegation: what a plan / review / work run produced decides what happens next
+      if (!ac.signal.aborted) {
+        this.delegation.onRunFinished(id)
+        this.committee.onRunFinished(id)
+      }
       return outcome
     } finally {
+      if (locked) this.unlockFolder(key)
       this.running.delete(id)
       this.liveRuns.delete(id)
       this.changed()
@@ -230,8 +518,19 @@ export class Engine {
       stripApiKeys: this.config.stripApiKeys,
       runner: this.runner,
       defaultCwd: this.config.workspace,
+      machine: this.config.memberName,
       signal: ac.signal,
       watchMs: this.watchMs,
+      humanReview: this.config.humanReview,
+      onLimit: (adapter, info) => this.noteLimit(adapter, info),
+      promptExtras: (task, a) => [...this.delegation.promptExtras(task, a), ...this.committee.promptExtras(task, a)],
+      onRunEnd: ({ agent: a, taskId, ms, result }) =>
+        this.noteAptitude(a, taskId, {
+          runs: 1,
+          ms,
+          approved: result === 'approved' ? 1 : 0,
+          failed: result === 'failed' ? 1 : 0
+        }),
       onOutput: (taskId, chunk) => this.emit({ type: 'output', taskId, chunk }),
       onLive: (live) => this.liveRuns.set(live.taskId, live),
       onActivity: (taskId, events, live) =>
@@ -266,7 +565,15 @@ export class Engine {
 
     // where it works
     let cwd = this.config.workspace
-    if (agent.workDir) {
+    const projDir = this.hive.projectDir(task.projectId)
+    const proj = this.hive.getProject(task.projectId)
+    if (proj && !projDir) {
+      add('warn', `프로젝트 "${proj.name}"의 작업 폴더가 이 컴퓨터에 설정돼 있지 않아요(또는 폴더가 없어요). 프로젝트 화면에서 이 컴퓨터의 폴더를 지정하세요. 지금은 에이전트의 작업 폴더를 써요.`)
+    }
+    if (projDir) {
+      cwd = projDir
+      add('ok', `작업 폴더(프로젝트 "${proj?.name}"): ${cwd}`)
+    } else if (agent.workDir) {
       if (existsSync(agent.workDir) && statSync(agent.workDir).isDirectory()) {
         cwd = agent.workDir
         add('ok', `작업 폴더: ${cwd}`)
@@ -278,26 +585,66 @@ export class Engine {
       add('warn', `에이전트에 작업 폴더가 없어서 작업공간 폴더(${cwd})에서 실행해요. 프로젝트 폴더를 지정하면 그 안에서 일해요.`)
     }
 
-    // can we see what changed?
+    // can we see what changed, and can it be undone?
     if (canRun) {
-      if (await isInsideGit(cwd)) add('ok', '변경한 파일을 줄 단위로 추적해요 (git).')
-      else add('warn', '이 폴더는 git 저장소가 아니라서 바뀐 파일 목록만 볼 수 있어요. 변경 추적을 켜면 줄 단위 diff도 볼 수 있어요.', 'git-init')
+      if (await isInsideGit(cwd)) {
+        add('ok', '변경한 파일을 줄 단위로 추적해요 (git). 실행 전 상태를 저장해 두니 [이 실행 되돌리기]로 되돌릴 수 있어요.')
+      } else {
+        add('warn', '이 폴더는 git 저장소가 아니라서 바뀐 파일 목록만 볼 수 있어요. 변경 추적을 켜면 줄 단위 diff도 볼 수 있어요.', 'git-init')
+        add('warn', '되돌리기용으로 실행 전에 파일을 백업해 둬요. 폴더가 아주 크면(파일 5000개 또는 100MB 초과) 백업하지 않아요.')
+      }
+      if (this.folderBusy(agent, id)) add('warn', '다른 작업이 이 폴더에서 실행 중이에요. 그 작업이 끝나면 이어서 시작해요.')
+    }
+    const lim = this.limitFor(agent.adapter)
+    if (lim) {
+      add('warn', `이 CLI는 사용량 한도에 걸려 있어요 (${new Date(lim.until).toLocaleString('ko-KR', { hour12: false })}${lim.guessed ? '쯤 추정' : ''}까지). 지금 실행하면 다시 실패할 수 있어요.`)
+    }
+
+    // secrets and personal settings
+    if (canRun) {
+      const secrets = findSecrets(cwd)
+      if (secrets.length) {
+        const shown = secrets.slice(0, 3).join(', ') + (secrets.length > 3 ? ` 외 ${secrets.length - 3}개` : '')
+        add(
+          'warn',
+          agent.adapter === 'claude' && !task.allowSecrets
+            ? `작업 폴더에 비밀번호·키로 보이는 파일이 있어요 (${shown}). 파일 읽기 도구로는 열지 못하게 막아 뒀어요 (셸 명령까지는 막지 못해요).`
+            : `작업 폴더에 비밀번호·키로 보이는 파일이 있어요 (${shown}). 에이전트가 읽어서 응답이나 기록에 남길 수 있어요.`
+        )
+      }
+      if (agent.adapter === 'claude') {
+        const mine = personalClaudeRules(cwd, this.home)
+        if (mine.length) {
+          add('warn', `Claude 개인 설정에 허용 규칙이 있어요: ${mine.join(' · ')}. 앱이 보내는 차단 규칙(삭제·참고 폴더 수정·비밀 파일)은 항상 우선하지만, 허용 규칙 때문에 권한 단계보다 더 많은 일을 할 수 있어요.`)
+        }
+      }
     }
 
     // permission level
-    const level = task.permission ?? 'edit'
+    const level = effectivePermission(agent.adapter, task.permission ?? agent.permission)
+    const enforced = acc.permission === 'flag'
     if (level === 'read') {
-      add(acc.permission === 'flag' ? 'ok' : 'warn', acc.permission === 'flag'
-        ? '권한: 읽기만 — CLI가 파일 수정과 명령 실행을 막아요.'
-        : '권한: 읽기만 — 이 CLI는 권한을 직접 강제하지 못해서 "수정하지 말라"고 지시로만 안내해요.')
+      if (enforced) add('ok', '권한: 읽기만 — CLI가 파일 수정과 명령 실행을 막아요.')
+      else if (task.permission === undefined) {
+        add('ok', '권한: 읽기만 (이 CLI의 기본값) — 이 CLI는 수정을 직접 막지 못해서 기본을 읽기만으로 둬요. 파일을 고치게 하려면 권한을 "작업 폴더 수정"으로 바꾸세요.')
+      } else add('warn', '권한: 읽기만 — 이 CLI는 권한을 직접 강제하지 못해서 "수정하지 말라"고 지시로만 안내해요.')
     } else if (level === 'exec') {
       add('warn', agent.adapter === 'codex'
         ? '권한: 명령 실행 — 샌드박스 없이 실행해요(danger-full-access). 실행 전 승인이 필요해요.'
-        : acc.permission === 'flag'
-          ? '권한: 명령 실행 허용 — 실행 전 승인이 필요해요.'
-          : '권한: 명령 실행 — 이 CLI의 명령 허용 설정은 에이전트의 추가 인자를 따라요. 실행 전 승인이 필요해요.')
+        : agent.adapter === 'agy'
+          ? '권한: 명령 실행 — agy의 모든 도구 확인을 자동 승인해요(--dangerously-skip-permissions). 실행 전 승인이 필요해요.'
+          : enforced
+            ? '권한: 명령 실행 허용 — 실행 전 승인이 필요해요.'
+            : '권한: 명령 실행 — 이 CLI의 명령 허용 설정은 에이전트의 추가 인자를 따라요. 실행 전 승인이 필요해요.')
+    } else if (enforced) {
+      add('ok', '권한: 작업 폴더 안 파일 수정. 삭제·이동 같은 파괴적 명령(rm, mv …)은 막혀 있어요 (명령 실행 권한에서만 허용).')
     } else {
-      add('ok', '권한: 작업 폴더 안 파일 수정 (에이전트 설정 그대로).')
+      const it: PreflightItem = {
+        level: 'warn',
+        confirm: true,
+        text: '권한: 파일 수정 — 이 CLI는 수정 범위를 직접 막지 못해요. 작업 폴더 밖 파일을 바꾸거나 파일을 지울 수도 있어요. 중요한 폴더는 git 저장소로 만들고(변경 추적), 실행 후 변경 목록을 꼭 확인하세요.'
+      }
+      items.push(it)
     }
 
     // materials
@@ -306,12 +653,13 @@ export class Engine {
         add('warn', `첨부 파일이 이 컴퓨터에 없어요: ${a.name}${a.local ? ' (용량이 커서 만든 사람 컴퓨터에만 있어요)' : ''}`)
       }
     }
-    if (task.attachments?.length) add('ok', `첨부 ${task.attachments.length}개를 에이전트에게 알려줘요.`)
+    if (task.attachments?.length) {
+      add('ok', `첨부 ${task.attachments.length}개를 실행하는 동안 작업 폴더의 ${STAGE_DIR}/ 에 복사해 에이전트에게 알려줘요 (끝나면 지워요).`)
+    }
     for (const d of task.refDirs ?? []) {
       if (!existsSync(d)) add('warn', `참고 폴더를 찾을 수 없어요 (이 컴퓨터에 없어요): ${d}`)
-      else if (acc.refDirs === 'flag') {
-        add('ok', `참고 폴더 열람 허용: ${d}${agent.adapter === 'codex' ? ' (Codex는 이 폴더에 쓰기도 가능해져요)' : ''}`)
-      } else add('warn', `참고 폴더: ${d} — 이 CLI는 폴더 접근을 직접 허용하지 못해서 경로만 알려줘요. 못 읽으면 에이전트 작업 폴더 안으로 옮기세요.`)
+      else if (agent.adapter === 'claude') add('ok', `참고 폴더 열람 허용 (읽기만, 수정은 막아요): ${d}`)
+      else add('warn', `참고 폴더: ${d} — 이 CLI는 폴더 접근을 직접 허용하지 못해서 경로만 알려줘요. 못 읽으면 에이전트 작업 폴더 안으로 옮기세요.`)
     }
 
     if (task.reply !== undefined) {
@@ -341,7 +689,7 @@ export class Engine {
   // ---- materials ----
   /** Files become attachments; dropped folders become reference folders. */
   attachPaths(id: string, paths: string[]): AttachResult {
-    const out: AttachResult = { attached: [], folders: [], errors: [] }
+    const out: AttachResult = { notes: [], attached: [], folders: [], errors: [] }
     const by = this.config.memberName || 'me'
     for (const p of paths) {
       try {
@@ -351,7 +699,10 @@ export class Engine {
           if (t && !(t.refDirs ?? []).includes(p)) this.hive.updateTask(id, { refDirs: [...(t.refDirs ?? []), p] })
           out.folders.push(p)
         } else if (st.isFile()) {
-          out.attached.push(this.hive.addAttachment(id, { path: p }, by, this.config.attachShareMaxMB))
+          const att = this.hive.addAttachment(id, { path: p }, by, this.config.attachShareMaxMB)
+          out.attached.push(att)
+          const tip = attachmentAdvice(att.name)
+          if (tip) out.notes.push(tip)
         } else out.errors.push(`${p}: 파일이 아니에요`)
       } catch (e) {
         out.errors.push(`${p}: ${(e as Error).message}`)
@@ -362,11 +713,13 @@ export class Engine {
   }
 
   attachData(id: string, name: string, data: Uint8Array): AttachResult {
-    const out: AttachResult = { attached: [], folders: [], errors: [] }
+    const out: AttachResult = { notes: [], attached: [], folders: [], errors: [] }
     try {
       out.attached.push(
         this.hive.addAttachment(id, { name, data: Buffer.from(data) }, this.config.memberName || 'me', this.config.attachShareMaxMB)
       )
+      const tip = attachmentAdvice(name)
+      if (tip) out.notes.push(tip)
     } catch (e) {
       out.errors.push(`${name}: ${(e as Error).message}`)
     }
@@ -406,8 +759,107 @@ export class Engine {
     this.changed()
   }
 
-  decideApproval(id: string, decision: 'approved' | 'rejected'): void {
-    this.hive.decideApproval(id, decision, this.config.memberName || 'me')
+  /** How many tasks are running right now (the app keeps the computer awake while this is > 0). */
+  runningCount(): number {
+    return this.running.size
+  }
+
+  // ---- CEO committee ----
+  openAgenda(title: string, body: string): void {
+    if (!title.trim()) return
+    this.committee.open(title, body, this.config.memberName || 'me')
+    this.changed()
+  }
+
+  decideAgenda(id: string, choice: number, note = ''): void {
+    this.committee.decide(id, choice, note, this.config.memberName || 'me')
+    this.changed()
+  }
+
+  private escalateToCommittee(t: Task, question: string): void {
+    try {
+      this.committee.open(`방향 확인: ${t.title}`, `${question}\n\n(업무: ${t.title}\n${t.description})`, 'manager', t.id)
+      this.hive.updateTask(t.id, { status: 'needs_input', question: `방향이 불분명해서 CEO 위원회에 올렸어요: ${question}` })
+      this.hive.addEvent(t.id, 'delegation', 'delegation', '방향이 불분명해서 CEO 위원회에 올렸어요.')
+    } catch (e) {
+      // no committee: the board answers directly
+      this.hive.updateTask(t.id, { status: 'needs_input', question })
+      this.hive.addEvent(t.id, 'delegation', 'delegation', `방향이 불분명해요: ${(e as Error).message}`)
+      this.notify('방향을 정해 주세요', t.title)
+    }
+  }
+
+  /** Move local agents of a job from one model to a better one (a recommendation from the aptitude board). */
+  applyReassignment(domain: string, fromKey: string, toKey: string): number {
+    if (!this.catalog().some((m) => m.id === toKey)) return 0
+    const seats = this.hive.listSeats().filter((s) => (s.job || 'general') === domain && s.agentId)
+    let n = 0
+    for (const s of seats) {
+      const a = this.config.agents.find((x) => x.id === s.agentId)
+      if (!a || a.modelRef?.id !== fromKey) continue
+      this.saveAgent({ ...a, modelRef: { id: toKey, pin: a.modelRef.pin } })
+      n++
+    }
+    return n
+  }
+
+  /** The human looked at a finished run: accept it, or send it back with what to change. */
+  reviewTask(id: string, decision: 'approve' | 'changes', text = ''): void {
+    const t = this.hive.getTask(id)
+    if (!t || t.status !== 'needs_review') return
+    const by = this.config.memberName || 'me'
+    if (decision === 'approve') {
+      this.hive.updateTask(id, { status: 'done' })
+      this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
+      this.noteTaskAptitude(t, { approved: 1 })
+      this.delegation.recordDecision(id, true, by)
+    } else {
+      const body = text.trim()
+      if (!body) return
+      this.hive.updateTask(id, { status: 'todo', reply: body })
+      this.hive.addEvent(id, 'review', by, `수정을 요청했어요: ${body}`)
+      this.noteTaskAptitude(t, { changes: 1 })
+      this.delegation.recordDecision(id, false, by, body)
+      if (t.kind === 'integrate') this.delegation.reopenIntegration(id)
+      if (this.localAgent(t.assignee)) void this.runTask(id)
+    }
+    this.changed()
+  }
+
+  /** Undo everything a run changed in its work folder (back to how it was just before the run). */
+  async rollbackRun(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
+    const task = this.hive.getTask(taskId)
+    const rec = this.hive.getRun(taskId, runId)
+    if (!task || !rec) return { ok: false, message: '실행 기록을 찾을 수 없어요.' }
+    if (!rec.checkpoint) return { ok: false, message: rec.checkpointNote ?? '이 실행은 되돌릴 수 없어요.' }
+    if (rec.rolledBackAt) return { ok: false, message: '이미 되돌린 실행이에요.' }
+    if (this.running.has(taskId) || this.folders.has(normPath(rec.checkpoint.root))) {
+      return { ok: false, message: '이 폴더에서 다른 작업이 실행 중이에요. 끝난 뒤에 되돌려 주세요.' }
+    }
+    const by = this.config.memberName || 'me'
+    const r = await rollback(this.hive, rec.checkpoint, this.excludesFor(rec.checkpoint.root))
+    if (!r.ok) return { ok: false, message: r.message }
+    this.hive.addRun({ ...rec, rolledBackAt: new Date().toISOString() })
+    this.hive.addEvent(taskId, 'rollback', by, `이 실행을 되돌렸어요. ${r.message}`, runId)
+    if (task.status === 'needs_review') this.noteTaskAptitude(task, { changes: 1 })
+    const patch: Partial<Task> = { interruptedRun: undefined }
+    if (task.status === 'done' || task.status === 'failed' || task.status === 'needs_review') {
+      patch.status = 'todo'
+      patch.notes = [...task.notes, '실행을 되돌려서 다시 할 일로 돌려놨어요.']
+    }
+    this.hive.updateTask(taskId, patch)
+    this.changed()
+    return r
+  }
+
+  decideApproval(id: string, decision: 'approved' | 'rejected', note?: string): void {
+    const by = this.config.memberName || 'me'
+    const a = this.hive.listApprovals().find((x) => x.id === id)
+    this.hive.decideApproval(id, decision, by, note)
+    if (a?.kind === 'plan' && a.status === 'pending') {
+      if (decision === 'approved') this.delegation.approvePlan(a.taskId, by)
+      else this.delegation.rejectPlan(a.taskId, note?.trim() || '이사회가 계획을 반려했어요.', by, true)
+    }
     this.changed()
   }
 
@@ -416,8 +868,311 @@ export class Engine {
     this.changed()
   }
 
-  addMemory(text: string): void {
-    this.hive.addMemory(this.config.memberName || 'me', text)
+  addMemory(text: string, kind: 'fixed' | 'recent' = 'recent'): void {
+    this.hive.addMemory(this.config.memberName || 'me', text, kind)
+    this.changed()
+  }
+
+  setMemoryKind(id: string, kind: 'fixed' | 'recent'): void {
+    this.hive.setMemoryKind(id, kind)
+    this.changed()
+  }
+
+  // ---- model catalog: bundled defaults + the user's own file (<home>/models.json) ----
+  private get catalogFile(): string {
+    return join(this.home, 'models.json')
+  }
+
+  private userModels(): ModelEntry[] {
+    try {
+      if (!existsSync(this.catalogFile)) return []
+      const raw = JSON.parse(readFileSync(this.catalogFile, 'utf8')) as unknown
+      return Array.isArray(raw) ? raw.filter(isModelEntry) : []
+    } catch {
+      return []
+    }
+  }
+
+  catalog(): ModelEntry[] {
+    return mergeCatalog(DEFAULT_MODELS as ModelEntry[], this.userModels())
+  }
+
+  /** Add or change a model in the user's own catalog file (a default with the same id is replaced). */
+  saveModel(entry: ModelEntry): ModelEntry {
+    if (!isModelEntry(entry)) throw new Error('모델 정보가 부족해요 (id, CLI 모델 인자, 사용할 CLI, 체급이 필요해요).')
+    const weight = Number(entry.weight)
+    const clean: ModelEntry = {
+      ...entry,
+      id: entry.id.trim(),
+      cliArg: entry.cliArg.trim(),
+      weight: Number.isFinite(weight) && weight > 0 ? weight : 1,
+      domains: (entry.domains ?? []).filter(Boolean),
+      custom: true
+    }
+    const mine = this.userModels().filter((m) => m.id !== clean.id)
+    mkdirSync(dirname(this.catalogFile), { recursive: true })
+    writeFileSync(this.catalogFile, JSON.stringify([...mine, clean], null, 2) + '\n', 'utf8')
+    this.refreshModelArgs()
+    this.changed()
+    return clean
+  }
+
+  /** Remove one of the user's own entries (the bundled defaults cannot be removed, only replaced). */
+  deleteModel(id: string): void {
+    const mine = this.userModels().filter((m) => m.id !== id)
+    writeFileSync(this.catalogFile, JSON.stringify(mine, null, 2) + '\n', 'utf8')
+    this.changed()
+  }
+
+  /** Re-derive each agent's CLI model argument from the catalog (alias vs pinned). */
+  private refreshModelArgs(): void {
+    const cat = this.catalog()
+    let changed = false
+    const agents = this.config.agents.map((a) => {
+      const m = a.modelRef ? cat.find((x) => x.id === a.modelRef!.id) : undefined
+      if (!a.modelRef || !m) return a
+      const arg = resolveModelArg(m, a.modelRef.pin)
+      if (arg === a.model) return a
+      changed = true
+      return { ...a, model: arg }
+    })
+    if (changed) {
+      this.config = { ...this.config, agents }
+      saveConfig(this.configFile, this.config)
+      this.publishRoster()
+    }
+  }
+
+  /** Does this model really work with this account? Runs the CLI once with that model. */
+  async verifyModel(id: string): Promise<{ ok: boolean; message: string }> {
+    const m = this.catalog().find((x) => x.id === id)
+    if (!m) return { ok: false, message: '카탈로그에 없는 모델이에요.' }
+    const r = await checkCli(m.adapter, this.runner, undefined, m.cliArg)
+    const ok = r.ok
+    this.hive.setAvailability(id, {
+      ok,
+      at: new Date().toISOString(),
+      message: ok ? '이 계정에서 쓸 수 있어요.' : r.message.slice(0, 300)
+    })
+    this.changed()
+    return { ok, message: ok ? '이 계정에서 쓸 수 있어요.' : r.message }
+  }
+
+  // ---- company: organization, ranks, seats ----
+  applyTemplate(templateId: string, name: string, place = true): Company {
+    const tpl = TEMPLATES.find((t) => t.id === templateId)
+    if (!tpl) throw new Error('없는 템플릿이에요: ' + templateId)
+    const built = buildFromTemplate(tpl, name.trim() || tpl.name, newId, new Date().toISOString())
+    this.hive.clearOrg()
+    this.hive.saveCompany(built.company)
+    for (const u of built.units) this.hive.saveUnit(u)
+    for (const st of built.seats) this.hive.saveSeat(st)
+    if (place) this.placeModels(false)
+    // agents that pointed at the old org lose the link
+    this.config = { ...this.config, agents: this.config.agents.map((a) => ({ ...a, unitId: undefined, rankId: undefined })) }
+    saveConfig(this.configFile, this.config)
+    this.publishRoster()
+    this.changed()
+    return built.company
+  }
+
+  saveCompany(patch: Partial<Company>): Company {
+    const cur = this.hive.getCompany()
+    if (!cur) throw new Error('먼저 템플릿으로 회사를 만드세요.')
+    const next: Company = {
+      ...cur,
+      ...patch,
+      rules: { ...DEFAULT_RULES, ...cur.rules, ...(patch.rules ?? {}) },
+      ranks: patch.ranks ? patch.ranks.map((r, i) => ({ ...r, level: i + 1 })) : cur.ranks
+    }
+    this.hive.saveCompany(next)
+    this.changed()
+    return next
+  }
+
+  saveUnit(input: Partial<OrgUnit> & { name: string }): OrgUnit {
+    const units = this.hive.listUnits()
+    const cur = input.id ? units.find((u) => u.id === input.id) : undefined
+    if (input.parentId && input.id) {
+      // no loops: a unit cannot move below itself
+      let p: string | null = input.parentId
+      while (p) {
+        if (p === input.id) throw new Error('자기 아래 조직으로는 옮길 수 없어요.')
+        p = units.find((u) => u.id === p)?.parentId ?? null
+      }
+    }
+    const u: OrgUnit = {
+      id: cur?.id ?? newId(),
+      name: input.name.trim(),
+      kind: input.kind ?? cur?.kind ?? '팀',
+      parentId: input.parentId === undefined ? (cur?.parentId ?? null) : input.parentId,
+      mission: input.mission ?? cur?.mission ?? '',
+      folderName: input.folderName ?? cur?.folderName ?? '',
+      order: input.order ?? cur?.order ?? units.length
+    }
+    this.hive.saveUnit(u)
+    this.changed()
+    return u
+  }
+
+  /** Delete a unit with everything below it (sub-units and seats); their agents stay, unassigned. */
+  deleteUnit(id: string): void {
+    const units = this.hive.listUnits()
+    const gone = new Set<string>()
+    const walk = (x: string): void => {
+      gone.add(x)
+      for (const u of units) if (u.parentId === x) walk(u.id)
+    }
+    walk(id)
+    for (const x of gone) this.hive.deleteUnit(x)
+    for (const st of this.hive.listSeats()) if (gone.has(st.unitId)) this.hive.deleteSeat(st.id)
+    this.config = {
+      ...this.config,
+      agents: this.config.agents.map((a) => (a.unitId && gone.has(a.unitId) ? { ...a, unitId: undefined } : a))
+    }
+    saveConfig(this.configFile, this.config)
+    this.publishRoster()
+    this.changed()
+  }
+
+  saveSeat(input: Partial<Seat> & { unitId: string; title: string }): Seat {
+    const cur = input.id ? this.hive.listSeats().find((x) => x.id === input.id) : undefined
+    const company = this.hive.getCompany()
+    const st: Seat = {
+      id: cur?.id ?? newId(),
+      unitId: input.unitId,
+      title: input.title.trim(),
+      rankId: input.rankId ?? cur?.rankId ?? company?.ranks[company.ranks.length - 1]?.id ?? '',
+      job: input.job ?? cur?.job ?? 'build',
+      difficulty: input.difficulty ?? cur?.difficulty ?? 'hard',
+      order: cur?.order ?? input.order ?? this.hive.listSeats().length,
+      ...(input.modelId !== undefined ? (input.modelId ? { modelId: input.modelId } : {}) : cur?.modelId ? { modelId: cur.modelId } : {}),
+      ...(input.agentId !== undefined ? (input.agentId ? { agentId: input.agentId } : {}) : cur?.agentId ? { agentId: cur.agentId } : {})
+    }
+    this.hive.saveSeat(st)
+    this.changed()
+    return st
+  }
+
+  deleteSeat(id: string): void {
+    this.hive.deleteSeat(id)
+    this.changed()
+  }
+
+  /** Put an agent on a seat (or empty it). The agent takes over the seat's rank, unit and job. */
+  assignSeat(seatId: string, agentId: string | null): void {
+    const seats = this.hive.listSeats()
+    const seat = seats.find((x) => x.id === seatId)
+    if (!seat) return
+    // one seat per agent
+    for (const o of seats) if (agentId && o.agentId === agentId && o.id !== seatId) this.hive.saveSeat({ ...o, agentId: undefined })
+    this.hive.saveSeat({ ...seat, agentId: agentId ?? undefined })
+    const mine = this.config.agents.find((a) => a.id === agentId)
+    if (mine) {
+      this.saveAgent({ ...mine, unitId: seat.unitId, rankId: seat.rankId, job: seat.job })
+    }
+    this.changed()
+  }
+
+  /** Fill the recommended model of seats (only empty ones unless `onlyEmpty` is false). */
+  placeModels(onlyEmpty = true): number {
+    const company = this.hive.getCompany()
+    if (!company) return 0
+    const seats = this.hive.listSeats()
+    const picks = autoPlace(
+      {
+        units: this.hive.listUnits(),
+        seats,
+        agents: this.hive.listRoster().map((r) => ({ id: r.id, adapter: r.adapter, modelId: r.modelId, model: r.model })),
+        catalog: this.catalog()
+      },
+      company.rules,
+      this.hive.availability(),
+      onlyEmpty
+    )
+    for (const st of seats) if (picks[st.id]) this.hive.saveSeat({ ...st, modelId: picks[st.id] })
+    this.changed()
+    return Object.keys(picks).length
+  }
+
+  /** Same as noteAptitude, for an agent that may live on another computer (only the roster is known). */
+  noteAptitudeFor(agentId: string | null, taskId: string, d: { approved?: number; changes?: number }): void {
+    if (!agentId) return
+    const local = this.localAgent(agentId)
+    if (local) return this.noteAptitude(local, taskId, d)
+    const r = this.hive.listRoster().find((x) => x.id === agentId)
+    if (!r) return
+    this.noteAptitude(
+      { id: r.id, name: r.name, owner: r.owner, adapter: r.adapter, role: r.role, workDir: '', extraArgs: '', dailyRunLimit: 0, dailyMinuteLimit: 0, timeoutMinutes: 15, requireApproval: false, model: r.model, job: r.job, ...(r.modelId ? { modelRef: { id: r.modelId, pin: 'pinned' as const } } : {}) },
+      taskId,
+      d
+    )
+  }
+
+  /** Review results count for the model that did the work (the task's assignee, if it is one of ours). */
+  private noteTaskAptitude(t: Task, d: { approved?: number; changes?: number }): void {
+    const a = this.localAgent(t.assignee)
+    if (a) this.noteAptitude(a, t.id, d)
+  }
+
+  // ---- aptitude: how each model version does in each work area ----
+  private aptitudeKey(agent: Agent): { key: string; label: string } {
+    const cat = this.catalog()
+    const m = agent.modelRef ? cat.find((x) => x.id === agent.modelRef!.id) : undefined
+    if (m) return { key: m.id, label: modelLabel(m) }
+    const arg = agent.model ?? 'default'
+    return { key: `${agent.adapter}:${arg}`, label: `${agent.adapter} ${arg}` }
+  }
+
+  /** Add one event to the (task × model) record. */
+  noteAptitude(
+    agent: Agent,
+    taskId: string,
+    d: { runs?: number; ms?: number; approved?: number; changes?: number; failed?: number }
+  ): void {
+    const { key, label } = this.aptitudeKey(agent)
+    const cur = this.hive.getAptitude(taskId)
+    // a task can change hands: a different model starts its own record under the same task
+    const base: AptitudeRecord =
+      cur && cur.modelKey === key
+        ? cur
+        : { taskId, modelKey: key, modelLabel: label, domain: agent.job || 'general', runs: 0, ms: 0, approved: 0, changes: 0, failed: 0, updatedAt: '' }
+    if (cur && cur.modelKey !== key) {
+      this.hive.saveAptitude({ ...cur, taskId: `${taskId}~${cur.modelKey}` })
+    }
+    this.hive.saveAptitude({
+      ...base,
+      runs: base.runs + (d.runs ?? 0),
+      ms: base.ms + (d.ms ?? 0),
+      approved: base.approved + (d.approved ?? 0),
+      changes: base.changes + (d.changes ?? 0),
+      failed: base.failed + (d.failed ?? 0),
+      updatedAt: new Date().toISOString()
+    })
+  }
+
+  // ---- projects ----
+  saveProject(input: Partial<Project> & { name: string }): Project {
+    const p = this.hive.saveProject({ ...input, createdBy: this.config.memberName || 'me' })
+    this.changed()
+    return p
+  }
+
+  deleteProject(id: string): void {
+    this.hive.deleteProject(id)
+    this.hive.setProjectPath(id, '')
+    this.changed()
+  }
+
+  setProjectPath(id: string, path: string): void {
+    this.hive.setProjectPath(id, path)
+    this.changed()
+  }
+
+  /** Remember the result of a connection check, so teammates see whether this computer's agents work. */
+  recordCheck(adapter: Agent['adapter'], r: { ok: boolean; message: string }): void {
+    const check: ConnectionCheck = { at: new Date().toISOString(), ok: r.ok, message: r.message.slice(0, 200) }
+    for (const a of this.config.agents) if (a.adapter === adapter) this.hive.publishAgent(a, check)
     this.changed()
   }
 
@@ -429,7 +1184,7 @@ export class Engine {
   // ---- auto-run ----
   /** Start ready tasks assigned to local agents, up to maxConcurrent. */
   async tick(): Promise<void> {
-    if (this.ticking || !this.config.autoRun) return
+    if (this.ticking) return
     this.ticking = true
     try {
       const all = this.hive.listTasks()
@@ -438,8 +1193,10 @@ export class Engine {
       )
       for (const t of all) {
         if (this.running.size >= this.config.maxConcurrent) break
+        if (!this.config.autoRun && !t.auto) continue
         const agent = this.localAgent(t.assignee)
         if (!agent || busyAgents.has(agent.id) || !this.hive.isReady(t, all)) continue
+        if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
         busyAgents.add(agent.id)
         void this.runTask(t.id)
       }

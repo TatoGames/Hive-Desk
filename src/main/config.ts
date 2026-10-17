@@ -6,6 +6,7 @@ import { defaultExtraArgs } from './adapters'
 
 export function defaultConfig(home: string): AppConfig {
   return {
+    humanReview: 'changes',
     attachShareMaxMB: 5,
     memberName: '',
     workspace: join(home, 'HiveDesk'),
@@ -53,6 +54,11 @@ export function makeAgent(
     dailyRunLimit: input.dailyRunLimit ?? 20,
     dailyMinuteLimit: input.dailyMinuteLimit ?? 120,
     timeoutMinutes: input.timeoutMinutes ?? 15,
-    requireApproval: input.requireApproval ?? false
+    requireApproval: input.requireApproval ?? false,
+    ...(input.rankId ? { rankId: input.rankId } : {}),
+    ...(input.unitId ? { unitId: input.unitId } : {}),
+    ...(input.job ? { job: input.job } : {}),
+    ...(input.modelRef ? { modelRef: input.modelRef } : {}),
+    ...(input.permission ? { permission: input.permission } : {})
   }
 }

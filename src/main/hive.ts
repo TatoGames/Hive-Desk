@@ -11,6 +11,8 @@ import {
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import type { AptitudeRecord } from '../shared/aptitude'
+import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
   Approval,
@@ -19,6 +21,11 @@ import type {
   MemoryEntry,
   Message,
   PermissionLevel,
+  Project,
+  RunShared,
+  ConnectionCheck,
+  Agenda,
+  FinalReport,
   RosterEntry,
   RunRecord,
   RunSummary,
@@ -29,7 +36,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -53,7 +60,8 @@ export function slug(s: string): string {
 const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   'risky-task': '위험 작업',
   budget: '예산',
-  'agent-request': '에이전트 요청'
+  'agent-request': '에이전트 요청',
+  plan: '분배 계획'
 }
 
 function now(): string {
@@ -92,7 +100,7 @@ function listJson<T>(dir: string): T[] {
  */
 export class Hive {
   constructor(public readonly root: string) {
-    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments']) {
+    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
@@ -120,6 +128,7 @@ export class Hive {
     dependsOn?: string[]
     permission?: PermissionLevel
     refDirs?: string[]
+    projectId?: string
     createdBy: string
   }): Task {
     const t: Task = {
@@ -135,8 +144,9 @@ export class Hive {
       updatedAt: now(),
       cleared: [],
       notes: [],
-      ...(input.permission && input.permission !== 'edit' ? { permission: input.permission } : {}),
-      ...(input.refDirs?.length ? { refDirs: input.refDirs } : {})
+      ...(input.permission ? { permission: input.permission } : {}),
+      ...(input.refDirs?.length ? { refDirs: input.refDirs } : {}),
+      ...(input.projectId ? { projectId: input.projectId } : {})
     }
     writeJson(this.p('tasks', t.id + '.json'), t)
     const perm = t.permission === 'read' ? ' · 읽기만' : t.permission === 'exec' ? ' · 명령 실행 허용' : ''
@@ -162,6 +172,7 @@ export class Hive {
     rmSync(this.p('events', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'runs', id), { recursive: true, force: true })
     rmSync(this.p('attachments', id), { recursive: true, force: true })
+    rmSync(this.p('reports', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'attachments', id), { recursive: true, force: true })
   }
 
@@ -247,6 +258,17 @@ export class Hive {
     writeJson(join(dir, r.id + '.json'), r)
   }
 
+  /** The newest run of a task that has not finished (the app was closed during it). */
+  unfinishedRun(taskId: string): RunRecord | null {
+    const all = listJson<RunRecord>(this.p('.local', 'runs', taskId)).filter((r) => r.outcome === 'running')
+    all.sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    return all[0] ?? null
+  }
+
+  checkpointDir(runId: string): string {
+    return this.p('.local', 'checkpoints', runId)
+  }
+
   getRun(taskId: string, runId: string): RunRecord | null {
     return readJson<RunRecord>(this.p('.local', 'runs', taskId, runId + '.json'))
   }
@@ -300,11 +322,11 @@ export class Hive {
   }
 
   /** Approve → task goes back to `todo` with the kind cleared. Reject → task fails. */
-  decideApproval(id: string, decision: 'approved' | 'rejected', by: string): Approval {
+  decideApproval(id: string, decision: 'approved' | 'rejected', by: string, note?: string): Approval {
     const a = readJson<Approval>(this.p('approvals', id + '.json'))
     if (!a) throw new Error('approval not found: ' + id)
     if (a.status !== 'pending') return a
-    const next: Approval = { ...a, status: decision, decidedAt: now(), decidedBy: by }
+    const next: Approval = { ...a, status: decision, decidedAt: now(), decidedBy: by, ...(note ? { note } : {}) }
     writeJson(this.p('approvals', id + '.json'), next)
     this.addEvent(
       a.taskId,
@@ -314,7 +336,8 @@ export class Hive {
     )
 
     const task = this.getTask(a.taskId)
-    if (task) {
+    // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
+    if (task && a.kind !== 'plan') {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'
@@ -358,8 +381,8 @@ export class Hive {
   }
 
   // ---- shared memory (append-only entries: never conflicts in git) ----
-  addMemory(author: string, text: string): MemoryEntry {
-    const e: MemoryEntry = { id: newId(), author, text: text.trim(), createdAt: now() }
+  addMemory(author: string, text: string, kind: 'fixed' | 'recent' = 'recent'): MemoryEntry {
+    const e: MemoryEntry = { id: newId(), author, text: text.trim(), createdAt: now(), ...(kind === 'fixed' ? { kind } : {}) }
     writeJson(this.p('memory', e.id + '.json'), e)
     return e
   }
@@ -371,18 +394,43 @@ export class Hive {
     return all.slice(-limit)
   }
 
+  /** Memory for a prompt: every fixed entry, plus the most recent others. */
+  memoryForPrompt(recentLimit = 20): { fixed: MemoryEntry[]; recent: MemoryEntry[] } {
+    const all = this.listMemory(1000)
+    return {
+      fixed: all.filter((m) => m.kind === 'fixed'),
+      recent: all.filter((m) => m.kind !== 'fixed').slice(-recentLimit)
+    }
+  }
+
+  setMemoryKind(id: string, kind: 'fixed' | 'recent'): void {
+    const f = this.p('memory', id + '.json')
+    const m = readJson<MemoryEntry>(f)
+    if (!m) return
+    const { kind: _old, ...rest } = m
+    writeJson(f, kind === 'fixed' ? { ...rest, kind } : rest)
+  }
+
   deleteMemory(id: string): void {
     rmSync(this.p('memory', id + '.json'), { force: true })
   }
 
   // ---- roster (public view of agents so teammates can assign tasks) ----
-  publishAgent(a: Agent): void {
+  publishAgent(a: Agent, check?: ConnectionCheck): void {
+    const prev = readJson<RosterEntry>(this.p('agents', a.id + '.json'))
+    const keep = check ?? prev?.check
     const r: RosterEntry = {
       id: a.id,
       name: a.name,
       owner: a.owner,
       adapter: a.adapter,
-      role: a.role
+      role: a.role,
+      ...(a.rankId ? { rankId: a.rankId } : {}),
+      ...(a.unitId ? { unitId: a.unitId } : {}),
+      ...(a.job ? { job: a.job } : {}),
+      ...(a.modelRef ? { modelId: a.modelRef.id } : {}),
+      ...(a.model ? { model: a.model } : {}),
+      ...(keep ? { check: keep } : {})
     }
     writeJson(this.p('agents', a.id + '.json'), r)
   }
@@ -393,6 +441,153 @@ export class Hive {
 
   listRoster(): RosterEntry[] {
     return listJson<RosterEntry>(this.p('agents')).sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  // ---- projects (shared) + this computer's folder for each ----
+  listProjects(): Project[] {
+    return listJson<Project>(this.p('projects')).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  getProject(id: string | undefined): Project | null {
+    return id ? readJson<Project>(this.p('projects', id + '.json')) : null
+  }
+
+  saveProject(input: Partial<Project> & { name: string; createdBy: string }): Project {
+    const cur = input.id ? this.getProject(input.id) : null
+    const p: Project = {
+      id: cur?.id ?? newId(),
+      name: input.name.trim(),
+      description: (input.description ?? cur?.description ?? '').trim(),
+      briefing: (input.briefing ?? cur?.briefing ?? '').trim(),
+      folderName: (input.folderName ?? cur?.folderName ?? '').trim(),
+      ...((input.runBudget ?? cur?.runBudget) ? { runBudget: input.runBudget ?? cur?.runBudget } : {}),
+      createdBy: cur?.createdBy ?? input.createdBy,
+      createdAt: cur?.createdAt ?? now()
+    }
+    writeJson(this.p('projects', p.id + '.json'), p)
+    return p
+  }
+
+  deleteProject(id: string): void {
+    rmSync(this.p('projects', id + '.json'), { force: true })
+    for (const t of this.listTasks()) if (t.projectId === id) this.updateTask(t.id, { projectId: undefined })
+  }
+
+  projectPaths(): Record<string, string> {
+    return readJson<Record<string, string>>(this.p('.local', 'paths.json')) ?? {}
+  }
+
+  setProjectPath(id: string, path: string): void {
+    const all = this.projectPaths()
+    if (path.trim()) all[id] = path.trim()
+    else delete all[id]
+    writeJson(this.p('.local', 'paths.json'), all)
+  }
+
+  /** This computer's existing folder for the project, if one is set. */
+  projectDir(id: string | undefined): string | null {
+    if (!id) return null
+    const p = this.projectPaths()[id]
+    return p && existsSync(p) ? p : null
+  }
+
+  // ---- shared run summaries (teammates see what ran on other computers) ----
+  addSharedRun(r: RunShared): void {
+    const dir = this.p('reports', r.taskId)
+    mkdirSync(dir, { recursive: true })
+    writeJson(join(dir, r.id + '.json'), r)
+  }
+
+  listSharedRuns(taskId: string): RunShared[] {
+    return listJson<RunShared>(this.p('reports', taskId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+  }
+
+  // ---- company model (shared: one file per unit / seat, so teammates' edits merge) ----
+  getCompany(): Company | null {
+    return readJson<Company>(this.p('company', 'company.json'))
+  }
+
+  saveCompany(c: Company): void {
+    mkdirSync(this.p('company'), { recursive: true })
+    writeJson(this.p('company', 'company.json'), c)
+  }
+
+  listUnits(): OrgUnit[] {
+    return listJson<OrgUnit>(this.p('company', 'units')).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+  }
+
+  saveUnit(u: OrgUnit): void {
+    mkdirSync(this.p('company', 'units'), { recursive: true })
+    writeJson(this.p('company', 'units', u.id + '.json'), u)
+  }
+
+  deleteUnit(id: string): void {
+    rmSync(this.p('company', 'units', id + '.json'), { force: true })
+  }
+
+  listSeats(): Seat[] {
+    return listJson<Seat>(this.p('company', 'seats')).sort((a, b) => (a.order ?? 1e9) - (b.order ?? 1e9) || a.id.localeCompare(b.id))
+  }
+
+  saveSeat(s: Seat): void {
+    mkdirSync(this.p('company', 'seats'), { recursive: true })
+    writeJson(this.p('company', 'seats', s.id + '.json'), s)
+  }
+
+  deleteSeat(id: string): void {
+    rmSync(this.p('company', 'seats', id + '.json'), { force: true })
+  }
+
+  /** Remove the whole org (units + seats); the company file is rewritten by the caller. */
+  clearOrg(): void {
+    rmSync(this.p('company', 'units'), { recursive: true, force: true })
+    rmSync(this.p('company', 'seats'), { recursive: true, force: true })
+  }
+
+  // ---- aptitude records (one file per task, shared) ----
+  getAptitude(taskId: string): AptitudeRecord | null {
+    return readJson<AptitudeRecord>(this.p('aptitude', taskId + '.json'))
+  }
+
+  saveAptitude(r: AptitudeRecord): void {
+    writeJson(this.p('aptitude', r.taskId + '.json'), r)
+  }
+
+  listAptitude(): AptitudeRecord[] {
+    return listJson<AptitudeRecord>(this.p('aptitude'))
+  }
+
+  // ---- committee agendas (shared) ----
+  getAgenda(id: string): Agenda | null {
+    return readJson<Agenda>(this.p('agenda', id + '.json'))
+  }
+  saveAgenda(a: Agenda): void {
+    writeJson(this.p('agenda', a.id + '.json'), a)
+  }
+  listAgendas(): Agenda[] {
+    return listJson<Agenda>(this.p('agenda')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+
+  // ---- final reports (shared) ----
+  getFinal(taskId: string): FinalReport | null {
+    return readJson<FinalReport>(this.p('finals', taskId + '.json'))
+  }
+
+  saveFinal(r: FinalReport): void {
+    writeJson(this.p('finals', r.id + '.json'), r)
+  }
+
+  listFinals(): FinalReport[] {
+    return listJson<FinalReport>(this.p('finals')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+
+  // ---- model availability on this computer ----
+  availability(): Record<string, ModelAvailability> {
+    return readJson<Record<string, ModelAvailability>>(this.p('.local', 'model-availability.json')) ?? {}
+  }
+
+  setAvailability(id: string, a: ModelAvailability): void {
+    writeJson(this.p('.local', 'model-availability.json'), { ...this.availability(), [id]: a })
   }
 
   // ---- per-machine budget usage ----

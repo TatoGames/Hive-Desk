@@ -1,0 +1,59 @@
+[
+  {
+    "id": "claude-fable-5-1", "company": "Anthropic", "family": "Fable", "version": "5.1", "adapter": "claude",
+    "cliArg": "claude-fable-5-1", "tier": "top", "weight": 10,
+    "domains": ["plan", "build", "review", "research"],
+    "note": "요금제에 따라 쓸 수 없을 수 있어요. [사용 확인]으로 이 계정에서 되는지 확인하세요."
+  },
+  {
+    "id": "claude-opus-5-5", "company": "Anthropic", "family": "Opus", "version": "5.5", "adapter": "claude",
+    "cliArg": "claude-opus-5-5", "aliasArg": "opus", "tier": "top", "weight": 5,
+    "domains": ["plan", "build", "review", "research"]
+  },
+  {
+    "id": "claude-sonnet-5-5", "company": "Anthropic", "family": "Sonnet", "version": "5.5", "adapter": "claude",
+    "cliArg": "claude-sonnet-5-5", "aliasArg": "sonnet", "tier": "balanced", "weight": 2,
+    "domains": ["build", "review", "docs"]
+  },
+  {
+    "id": "claude-haiku-5-5", "company": "Anthropic", "family": "Haiku", "version": "5.5", "adapter": "claude",
+    "cliArg": "claude-haiku-5-5", "aliasArg": "haiku", "tier": "light", "weight": 1,
+    "domains": ["docs", "ops", "qa"]
+  },
+  {
+    "id": "openai-gpt-6-astra", "company": "OpenAI", "family": "GPT-6 Astra", "version": "6", "adapter": "codex",
+    "cliArg": "gpt-6-astra", "tier": "top", "weight": 8,
+    "domains": ["plan", "build", "review", "research"]
+  },
+  {
+    "id": "openai-gpt-6-1-sol", "company": "OpenAI", "family": "GPT-6.1 Sol", "version": "6.1", "adapter": "codex",
+    "cliArg": "gpt-6.1-sol", "tier": "balanced", "weight": 4,
+    "domains": ["build", "review", "qa"],
+    "note": "Free·Go 요금제는 처음엔 쓸 수 없어요. 회사·학교 계정은 관리자가 켜야 해요."
+  },
+  {
+    "id": "openai-gpt-6-luna", "company": "OpenAI", "family": "GPT-6 Luna", "version": "6", "adapter": "codex",
+    "cliArg": "gpt-6-luna", "tier": "light", "weight": 1,
+    "domains": ["docs", "ops", "qa"]
+  },
+  {
+    "id": "google-gemini-3-pro", "company": "Google", "family": "Gemini Pro", "version": "3 (preview)", "adapter": "gemini",
+    "cliArg": "gemini-3-pro-preview", "tier": "top", "weight": 6,
+    "domains": ["plan", "research", "docs"]
+  },
+  {
+    "id": "google-gemini-3-flash", "company": "Google", "family": "Gemini Flash", "version": "3 (preview)", "adapter": "gemini",
+    "cliArg": "gemini-3-flash-preview", "tier": "light", "weight": 1,
+    "domains": ["docs", "ops", "research"]
+  },
+  {
+    "id": "google-gemini-2-5-pro", "company": "Google", "family": "Gemini Pro", "version": "2.5", "adapter": "gemini",
+    "cliArg": "gemini-2.5-pro", "tier": "balanced", "weight": 3,
+    "domains": ["plan", "research", "docs"]
+  },
+  {
+    "id": "google-gemini-2-5-flash", "company": "Google", "family": "Gemini Flash", "version": "2.5", "adapter": "gemini",
+    "cliArg": "gemini-2.5-flash", "tier": "light", "weight": 1,
+    "domains": ["docs", "ops", "research"]
+  }
+]

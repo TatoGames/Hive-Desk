@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type {
+  AdapterId,
   Report,
   RunRecord,
   RunResultKind,
@@ -13,10 +14,13 @@ import type {
 import { fmtTime } from '../store'
 import {
   ActivityFeed,
+  ConfirmButton,
   ChangedFiles,
+  FailureHint,
   MaterialsPanel,
   NeedBox,
-  ProgressStrip
+  ProgressStrip,
+  ReviewBox
 } from './Materials'
 
 const EVENT_LABEL: Record<TaskEventKind, string> = {
@@ -30,7 +34,10 @@ const EVENT_LABEL: Record<TaskEventKind, string> = {
   status: '상태',
   need: '자료 요청',
   reply: '답변',
-  instruction: '추가 지시'
+  instruction: '추가 지시',
+  rollback: '되돌리기',
+  changed: '변경',
+  delegation: '위임'
 }
 
 const OUTCOME_LABEL: Record<RunResultKind, string> = {
@@ -38,7 +45,10 @@ const OUTCOME_LABEL: Record<RunResultKind, string> = {
   failed: '실패',
   cancelled: '중지됨',
   awaiting_approval: '승인 대기',
-  needs_input: '자료 요청'
+  needs_input: '자료 요청',
+  running: '실행 중',
+  interrupted: '중단됨',
+  limit: '한도 도달'
 }
 
 const REPORT_ROWS: { key: keyof Report; label: string }[] = [
@@ -72,11 +82,15 @@ export default function TaskDetail({
   task,
   assigneeName,
   workDir,
+  adapter,
+  onGoAgents,
   onClose
 }: {
+  onGoAgents?: () => void
   task: Task
   assigneeName: string
   workDir: string
+  adapter?: AdapterId
   onClose: () => void
 }): JSX.Element {
   const [history, setHistory] = useState<TaskHistory | null>(null)
@@ -151,6 +165,12 @@ export default function TaskDetail({
             <NeedBox task={task} />
           </>
         )}
+        {task.status === 'needs_review' && (
+          <>
+            <h2 className="sec">결과 확인</h2>
+            <ReviewBox task={task} />
+          </>
+        )}
 
         {running && (
           <>
@@ -214,7 +234,7 @@ export default function TaskDetail({
         )}
 
         <h2 className="sec">자료와 권한</h2>
-        <MaterialsPanel task={task} />
+        <MaterialsPanel task={task} adapter={adapter} />
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval') && (
           <>
@@ -264,7 +284,7 @@ export default function TaskDetail({
             <pre className="out">{task.result}</pre>
           </details>
         )}
-        {task.error && <pre className="out err">{task.error}</pre>}
+        <FailureHint task={task} onGoAgents={onGoAgents} />
 
         <h2 className="sec">타임라인</h2>
         {!history ? (
@@ -292,8 +312,39 @@ export default function TaskDetail({
           </div>
         )}
 
+        {record && <UndoBar task={task} record={record} />}
         {record && <RunBody record={record} />}
       </div>
+    </div>
+  )
+}
+
+/** Undo a run: put the work folder back the way it was just before it. */
+function UndoBar({ task, record }: { task: Task; record: RunRecord }): JSX.Element | null {
+  const [msg, setMsg] = useState('')
+  const running = task.status === 'running'
+  if (record.outcome === 'running') return null
+  if (record.rolledBackAt) {
+    return <div className="muted small">↩ 이 실행은 {fmtTime(record.rolledBackAt)}에 되돌렸어요.</div>
+  }
+  if (!record.checkpoint) {
+    return record.checkpointNote ? <div className="muted small">되돌리기 불가: {record.checkpointNote}</div> : null
+  }
+  const cp = record.checkpoint
+  return (
+    <div className="undo">
+      <ConfirmButton
+        label="이 실행 되돌리기"
+        onConfirm={async () => setMsg((await window.hive.rollbackRun(task.id, record.id)).message)}
+      />
+      <span className="muted small">
+        {running
+          ? '실행이 끝난 뒤에 되돌릴 수 있어요.'
+          : cp.kind === 'git'
+            ? '실행 전 상태가 git 안에 저장돼 있어요. 이 실행 이후 직접 고친 내용도 함께 되돌려져요.'
+            : `실행 전 파일 ${cp.files}개를 백업해 뒀어요. 이 실행 이후 직접 고친 내용도 함께 되돌려져요.`}
+      </span>
+      {msg && <span className="small">{msg}</span>}
     </div>
   )
 }

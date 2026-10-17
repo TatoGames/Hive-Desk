@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createParser } from '../src/main/activity'
-import { buildCommand, runCli, type BuiltCommand, type Runner } from '../src/main/adapters'
+import { SECRET_READ_RULES } from '../src/main/secrets'
+import { buildCommand, claudePathRule, DESTRUCTIVE_BASH_RULES, runCli, type BuiltCommand, type Runner } from '../src/main/adapters'
 import { makeAgent } from '../src/main/config'
 import { Engine } from '../src/main/engine'
 import { diffScans, scanFolder, trackChanges } from '../src/main/gitdiff'
@@ -189,22 +190,23 @@ describe('building CLI commands', () => {
     const a = claudeAgent({ model: 'sonnet' })
     const plain = buildCommand(a)
     expect(plain.stream).toBeUndefined() // connection checks stay plain text
-    expect(plain.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits'])
+    expect(plain.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits', '--disallowedTools', ...DESTRUCTIVE_BASH_RULES, ...SECRET_READ_RULES])
 
     const edit = buildCommand(a, { stream: true })
     expect(edit.stream).toBe('claude')
     expect(edit.args).toEqual([
       '-p', '--output-format', 'stream-json', '--verbose',
-      '--model', 'sonnet', '--permission-mode', 'acceptEdits'
+      '--model', 'sonnet', '--permission-mode', 'acceptEdits',
+      '--disallowedTools', ...DESTRUCTIVE_BASH_RULES, ...SECRET_READ_RULES
     ])
 
     const read = buildCommand(a, { stream: true, permission: 'read' }).args
     expect(read).toContain('--disallowedTools')
-    expect(read.join(' ')).toMatch(/--permission-mode default --allowedTools Read,Grep,Glob --disallowedTools Edit,Write,MultiEdit,NotebookEdit,Bash/)
+    expect(read.join(' ')).toMatch(/--permission-mode default --allowedTools Read,Grep,Glob --disallowedTools Edit Write MultiEdit NotebookEdit Bash/)
     expect(read.filter((x) => x === '--permission-mode')).toHaveLength(1) // agent's own mode replaced, not duplicated
 
     const exec = buildCommand(a, { permission: 'exec' }).args
-    expect(exec.join(' ')).toMatch(/--permission-mode acceptEdits --allowedTools Bash$/)
+    expect(exec.join(' ')).toMatch(/--permission-mode acceptEdits --allowedTools Bash --disallowedTools Read/)
 
     const full = buildCommand(a, { stream: true, refDirs: ['/data/ref', 'C:\\My Docs'], resumeSession: 'abc' })
     expect(full.args).toContain('--add-dir=/data/ref')
@@ -213,12 +215,12 @@ describe('building CLI commands', () => {
     expect(full.resumed).toBe(true)
   })
 
-  it('Codex: --json, sandbox per level, --add-dir, prompt still on stdin', () => {
+  it('Codex: --json, sandbox per level, no --add-dir (read-only reference folders), prompt still on stdin', () => {
     const a = makeAgent('a', { name: 'x', adapter: 'codex' })
     expect(buildCommand(a).args).toEqual(['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-'])
     const read = buildCommand(a, { stream: true, permission: 'read', refDirs: ['/r'] })
     expect(read.stream).toBe('codex')
-    expect(read.args).toEqual(['exec', '--skip-git-repo-check', '--json', '--sandbox', 'read-only', '--add-dir', '/r', '-'])
+    expect(read.args).toEqual(['exec', '--skip-git-repo-check', '--json', '--sandbox', 'read-only', '-'])
     expect(buildCommand(a, { permission: 'exec' }).args).toContain('danger-full-access')
   })
 
@@ -412,7 +414,7 @@ describe('permission level', () => {
     h.updateTask(rd.id, { permission: 'read' })
     const calls2: BuiltCommand[] = []
     expect(await runTask(agent, rd.id, deps(h, { runner: fakeRunner(calls2) }))).toBe('done')
-    expect(calls2[0].args.join(' ')).toMatch(/--disallowedTools Edit,Write,MultiEdit,NotebookEdit,Bash/)
+    expect(calls2[0].args.join(' ')).toMatch(/--disallowedTools Edit Write MultiEdit NotebookEdit Bash/)
     const rec = h.getRun(rd.id, h.getTask(rd.id)!.lastRunId!)!
     expect(rec.permission).toBe('read')
     expect(rec.prompt).toContain('READ-ONLY')
@@ -487,6 +489,8 @@ describe('materials: attachments and reference folders', () => {
     ;(eng as unknown as { runner: Runner }).runner = fakeRunner(calls)
     await eng.runTask(t.id)
     expect(calls[0].args).toContain(`--add-dir=${ref}`)
+    // reference folders stay read-only: opened, but no edit tool may touch them
+    expect(calls[0].args).toContain(claudePathRule('Write', ref))
     const rec = eng.hive.getRun(t.id, eng.hive.getTask(t.id)!.lastRunId!)!
     expect(rec.prompt).toContain('Reference folders you may read')
     expect(rec.prompt).toContain(ref)

@@ -1,3 +1,6 @@
+import type { AptitudeRecord } from './aptitude'
+import type { Company, ModelAvailability, ModelEntry, ModelRef, OrgUnit, Seat } from './company'
+
 export type AdapterId = 'claude' | 'codex' | 'gemini' | 'agy' | 'custom'
 
 /** An agent that runs on THIS machine, using the owner's own logged-in CLI. */
@@ -23,6 +26,17 @@ export interface Agent {
   timeoutMinutes: number
   /** If true, every task for this agent needs human approval first. */
   requireApproval: boolean
+  // ---- company model (stage 2) ----
+  /** Rank id in the company's rank list. */
+  rankId?: string
+  /** Org unit the agent belongs to. */
+  unitId?: string
+  /** Work area (see JOBS): plan / build / review ... */
+  job?: string
+  /** Catalog model + how it is pinned. `model` holds the resulting CLI argument. */
+  modelRef?: ModelRef
+  /** The permission level tasks get when they do not set their own. */
+  permission?: PermissionLevel
 }
 
 /** What other team members see of an agent (no local paths). */
@@ -32,6 +46,56 @@ export interface RosterEntry {
   owner: string
   adapter: AdapterId
   role: string
+  /** Result of the owner's latest connection check (login / CLI works). */
+  check?: ConnectionCheck
+  rankId?: string
+  unitId?: string
+  job?: string
+  /** Catalog id of the agent's model, and the CLI argument it runs with. */
+  modelId?: string
+  model?: string
+}
+
+export interface ConnectionCheck {
+  at: string
+  ok: boolean
+  message: string
+}
+
+/** A body of work shared by the team: a briefing every run reads, and a work folder name. */
+export interface Project {
+  id: string
+  name: string
+  description: string
+  /** Fixed briefing: goals, rules, conventions. Put into every prompt of this project. */
+  briefing: string
+  /** Shared name of the work folder. Each computer maps it to its own path (see Snapshot.projectPaths). */
+  folderName: string
+  /** Most AI runs the project may use (0 = no limit). */
+  runBudget?: number
+  createdBy: string
+  createdAt: string
+}
+
+/** Shared, size-limited summary of a run: teammates on other computers see this (the full record stays local). */
+export interface RunShared {
+  id: string
+  taskId: string
+  agentId: string
+  machine: string
+  adapter: AdapterId
+  model?: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  outcome: RunResultKind
+  report?: Report
+  diffStat: { available: boolean; files: number; additions: number; deletions: number }
+  files: DiffFile[]
+  /** Only when small enough (see SHARED_PATCH_MAX). */
+  patch?: string
+  response?: string
+  error?: string
 }
 
 export type TaskStatus =
@@ -40,6 +104,12 @@ export type TaskStatus =
   /** The agent asked the human for a file, info or decision and stopped. */
   | 'needs_input'
   | 'running'
+  /** The run finished and changed things; a human looks at the result before it counts as done. */
+  | 'needs_review'
+  /** Delegated work waits for another agent (on a different model) to check it. */
+  | 'in_review'
+  /** A manager split the task up; it finishes when its sub-tasks are done. */
+  | 'delegated'
   | 'done'
   | 'failed'
 
@@ -90,6 +160,38 @@ export interface Task {
   followups?: string[]
   /** Id of the latest run record (kept on the machine that ran it). */
   lastRunId?: string
+  /** The app closed during this run; some changes may be left in the work folder. */
+  interruptedRun?: string
+  /** Upper limit for the total run time of this task (minutes). Default 240. */
+  maxMinutes?: number
+  /** What kind of failure `error` is, so the UI can offer the right fix. */
+  errorKind?: FailureKind
+  /** Let the agent read secret-looking files (.env, keys). Off by default. */
+  allowSecrets?: boolean
+  projectId?: string
+  // ---- delegation (stage 3) ----
+  /** What this task is in the delegation flow. Missing = a plain task. */
+  kind?: TaskKind
+  parentId?: string
+  /** 0 = what the board handed over; each split adds one. */
+  depth?: number
+  /** Runs without the global auto-run switch (the delegation tree drives itself). */
+  auto?: boolean
+  /** The board named this manager itself: its first plan goes to the board. */
+  directed?: boolean
+  /** Completion criteria the planner wrote for this sub-task. */
+  criteria?: string
+  plan?: Plan
+  /** For a review task: the task (work or plan) being checked. */
+  reviewOf?: string
+  /** For a work task: how its cross review stands. */
+  reviewState?: ReviewState
+  /** Planning attempts rejected for form/size (before a plan is accepted). */
+  planTries?: number
+  /** Not shown on the board (committee runs). */
+  hidden?: boolean
+  /** The agenda a committee run belongs to. */
+  agendaId?: string
   error?: string
   startedAt?: string
   finishedAt?: string
@@ -103,6 +205,48 @@ export interface Report {
   risks: string
   next: string
 }
+
+export type TaskKind = 'work' | 'plan' | 'review' | 'integrate' | 'committee'
+
+/** One sub-task a manager proposes. */
+export interface SubtaskSpec {
+  title: string
+  /** Agent id (from the team list the manager was given). */
+  assignee: string
+  /** Completion criteria. */
+  done: string
+  /** 1-based numbers of sub-tasks that must finish first. */
+  after: number[]
+}
+
+export type PlanStatus = 'awaiting_board' | 'awaiting_superior' | 'approved' | 'rejected'
+
+export interface Plan {
+  items: SubtaskSpec[]
+  /** Expected number of AI runs (work + reviews + planning). */
+  estimateRuns: number
+  flags: string[]
+  status: PlanStatus
+  approver: 'board' | 'superior' | 'auto'
+  /** Why the board has to decide ("큰 일" reasons). */
+  boardReasons: string[]
+  /** How often a plan for this task was sent back. */
+  rejections: number
+  childIds?: string[]
+  note?: string
+}
+
+export interface ReviewState {
+  status: 'pending' | 'passed' | 'changes' | 'skipped'
+  /** How many times the reviewer sent it back to the same worker. */
+  round: number
+  /** After repeated rejections the task moved up to the unit's lead. */
+  escalations: number
+  by?: string
+  note?: string
+}
+
+export type FailureKind = 'login' | 'limit' | 'permission' | 'not_found' | 'network' | 'timeout' | 'unknown'
 
 export type TaskEventKind =
   | 'created'
@@ -118,6 +262,12 @@ export type TaskEventKind =
   | 'need'
   | 'reply'
   | 'instruction'
+  /** A human undid a run. */
+  | 'rollback'
+  /** A field of the task was changed by hand (assignee, title, permission ...). */
+  | 'changed'
+  /** The delegation engine did something (plan, review, escalation ...). */
+  | 'delegation'
 
 /** One line of a task's timeline. Append-only: events are never rewritten. */
 export interface TaskEvent {
@@ -131,7 +281,33 @@ export interface TaskEvent {
   runId?: string
 }
 
-export type RunResultKind = 'done' | 'failed' | 'cancelled' | 'awaiting_approval' | 'needs_input'
+export type RunResultKind =
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'awaiting_approval'
+  | 'needs_input'
+  /** Written when a run starts; replaced by the real outcome when it ends. */
+  | 'running'
+  /** The app closed (or crashed) in the middle of the run: some changes may be left behind. */
+  | 'interrupted'
+  /** The CLI said the usage limit is used up. */
+  | 'limit'
+
+/** How the work folder can be put back the way it was before a run. */
+export interface Checkpoint {
+  /** `git` = a hidden ref in the repo; `copy` = files backed up under the hive's `.local/checkpoints`. */
+  kind: 'git' | 'copy'
+  /** git: the commit that holds the pre-run state (kept as `refs/hivedesk/<run>`). */
+  ref?: string
+  tree?: string
+  /** git: repository root. copy: the work folder that was backed up. */
+  root: string
+  /** copy: backup folder, relative to the hive. */
+  dir?: string
+  files?: number
+  bytes?: number
+}
 
 /** One human-readable line of what the agent is doing right now. */
 export type ActivityKind =
@@ -241,6 +417,11 @@ export interface RunRecord {
   sessionId?: string
   /** Step-by-step feed (read / edit / command ...), as the agent reported it. */
   activity: ActivityEvent[]
+  /** How to undo this run; absent when the folder could not be saved (see `checkpointNote`). */
+  checkpoint?: Checkpoint
+  checkpointNote?: string
+  /** Set when a human undid this run. */
+  rolledBackAt?: string
 }
 
 /** A run without the heavy fields, for lists. */
@@ -253,7 +434,7 @@ export interface TaskHistory {
   runs: RunSummary[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan'
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface Approval {
@@ -266,6 +447,8 @@ export interface Approval {
   createdAt: string
   decidedAt?: string
   decidedBy?: string
+  /** The decider's comment (a rejected plan's reason). */
+  note?: string
 }
 
 export interface Message {
@@ -282,6 +465,8 @@ export interface MemoryEntry {
   author: string
   text: string
   createdAt: string
+  /** `fixed` entries go into every prompt; the others only the most recent ones. */
+  kind?: 'fixed' | 'recent'
 }
 
 export interface Usage {
@@ -289,7 +474,43 @@ export interface Usage {
   ms: number
 }
 
+/** When a finished run waits for a human check before it counts as done. */
+export type HumanReview = 'off' | 'changes' | 'always'
+
+export type AgendaPhase = 'proposals' | 'critique' | 'votes' | 'board' | 'decided' | 'failed'
+
+/** A question the CEO committee works through before the board decides. */
+export interface Agenda {
+  id: string
+  title: string
+  body: string
+  createdAt: string
+  createdBy: string
+  phase: AgendaPhase
+  /** Roster ids of the committee (agents on CEO seats), frozen when the agenda opens. */
+  members: string[]
+  /** Hidden tasks of the phase that is running. */
+  taskIds: string[]
+  proposals: { agentId: string; text: string }[]
+  critiques: { agentId: string; text: string }[]
+  votes: { agentId: string; choice: number; reason: string }[]
+  recommendation?: {
+    /** 1-based proposal number, 0 when there is no clear winner. */
+    choice: number
+    tally: number[]
+    minority: { agentId: string; choice: number; reason: string }[]
+  }
+  decision?: { at: string; by: string; choice: number; note: string }
+  /** The task that was waiting for this decision ("direction unclear"). */
+  fromTaskId?: string
+  note?: string
+}
+
 export interface AppConfig {
+  /** Desktop notifications for approvals, reports and failures (default on). */
+  notifications?: boolean
+  /** `changes` (default): check results that changed files. */
+  humanReview: HumanReview
   /** Attachments above this size (MB) stay on this machine instead of syncing to the team. */
   attachShareMaxMB: number
   memberName: string
@@ -332,10 +553,18 @@ export interface Snapshot {
   gitEnabled: boolean
   /** Progress of tasks that are running right now (this machine). */
   live: Record<string, LiveSummary>
+  /** Tasks waiting for another task that works in the same folder: taskId → the task they wait for. */
+  waiting: Record<string, string>
+  /** CLIs whose usage limit is used up on this machine, until when (key = adapter id). */
+  limits: Record<string, { until: string; message: string; guessed: boolean }>
+  projects: Project[]
+  company: CompanySnapshot
+  /** This computer's folder for each project (project id → absolute path). */
+  projectPaths: Record<string, string>
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output' | 'setup' | 'activity'
+  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify'
   taskId?: string
   /** For `activity`: new feed lines and the up-to-date numbers. */
   events?: ActivityEvent[]
@@ -343,6 +572,9 @@ export interface EngineEvent {
   /** For `setup`: which CLI the installer output belongs to. */
   adapter?: AdapterId
   chunk?: string
+  /** For `notify`: a desktop notification. */
+  title?: string
+  body?: string
 }
 
 export interface SetupCheck {
@@ -356,6 +588,8 @@ export interface PreflightItem {
   text: string
   /** A one-click fix the UI can offer. */
   fix?: 'git-init'
+  /** The human must tick a box before the run can start (the risk cannot be enforced away). */
+  confirm?: boolean
 }
 
 /** The "before you run" screen: what the agent will touch and what could go wrong. */
@@ -367,8 +601,57 @@ export interface Preflight {
 }
 
 export interface AttachResult {
+  /** Hints about formats the AI may not be able to read (see attachAdvice). */
+  notes: string[]
   attached: Attachment[]
   /** Dropped folders become reference folders. */
   folders: string[]
   errors: string[]
+}
+
+/** The company model as the screens see it. */
+export interface CompanySnapshot {
+  company: Company | null
+  units: OrgUnit[]
+  seats: Seat[]
+  /** Defaults + the user's own entries. */
+  catalog: ModelEntry[]
+  /** [사용 확인] results on this computer (model id → result). */
+  availability: Record<string, ModelAvailability>
+  aptitude: AptitudeRecord[]
+  finals: FinalReport[]
+  agendas: Agenda[]
+}
+
+export interface ReportNode {
+  taskId: string
+  title: string
+  kind: TaskKind | 'work'
+  agentId: string | null
+  agentName: string
+  job?: string
+  model: string
+  status: TaskStatus
+  runs: number
+  minutes: number
+  files: DiffFile[]
+  report?: Report
+  /** Cross review result in one line. */
+  review?: string
+  children: ReportNode[]
+}
+
+/** What the board reads at the end of a delegated job. */
+export interface FinalReport {
+  id: string
+  title: string
+  createdAt: string
+  summary: string
+  tree: ReportNode
+  totals: { runs: number; minutes: number; files: number; additions: number; deletions: number; tasks: number }
+  verification: string[]
+  risks: string[]
+  next: string[]
+  /** The board's decision on the report. */
+  decision?: { at: string; by: string; accepted: boolean; note?: string }
 }

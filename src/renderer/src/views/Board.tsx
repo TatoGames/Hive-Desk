@@ -1,10 +1,14 @@
 import { useState } from 'react'
-import type { LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
+import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
 import {
+  ConfirmButton,
+  DropMessages,
   DropZone,
+  FailureHint,
   NeedBox,
+  ReviewBox,
   PermissionSelect,
   PreflightDialog,
   ProgressStrip,
@@ -12,11 +16,14 @@ import {
   type Dropped
 } from './Materials'
 
+const KIND_TAG: Record<string, string> = { plan: '계획', review: '검토', integrate: '통합', committee: '위원회', work: '' }
+
 const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'todo', label: '할 일' },
   { id: 'awaiting_approval', label: '승인 대기' },
   { id: 'needs_input', label: '자료 요청' },
   { id: 'running', label: '실행 중' },
+  { id: 'needs_review', label: '사람 확인' },
   { id: 'done', label: '완료' },
   { id: 'failed', label: '실패' }
 ]
@@ -24,8 +31,10 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
 export default function Board({
   snap,
   output,
-  live
+  live,
+  onGoAgents
 }: {
+  onGoAgents?: () => void
   snap: Snapshot
   output: Record<string, string>
   live: Record<string, LiveSummary>
@@ -63,7 +72,9 @@ export default function Board({
 
       <div className="board">
         {COLUMNS.map((col) => {
-          const items = snap.tasks.filter((t) => t.status === col.id)
+          const items = snap.tasks.filter(
+            (t) => !t.hidden && (t.status === col.id || (col.id === 'running' && (t.status === 'in_review' || t.status === 'delegated')))
+          )
           return (
             <section key={col.id} className={'col col-' + col.id}>
               <h2>
@@ -80,6 +91,11 @@ export default function Board({
                   live={output[t.id]}
                   progress={live[t.id]}
                   workDir={workDirOf(t)}
+                  projectName={snap.projects.find((p) => p.id === t.projectId)?.name}
+                  waitingFor={snap.tasks.find((x) => x.id === snap.waiting[t.id])?.title}
+                  limit={snap.limits[snap.roster.find((r) => r.id === t.assignee)?.adapter ?? '']}
+                  adapter={snap.roster.find((r) => r.id === t.assignee)?.adapter}
+                  onGoAgents={onGoAgents}
                   onRun={() => setPre(t.id)}
                   expanded={open === t.id}
                   onToggle={() => setOpen(open === t.id ? null : t.id)}
@@ -101,6 +117,8 @@ export default function Board({
           task={snap.tasks.find((t) => t.id === detail)!}
           assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
           workDir={workDirOf(snap.tasks.find((t) => t.id === detail)!)}
+          adapter={snap.roster.find((r) => r.id === snap.tasks.find((t) => t.id === detail)!.assignee)?.adapter}
+          onGoAgents={onGoAgents}
           onClose={() => setDetail(null)}
         />
       )}
@@ -115,9 +133,16 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const [risky, setRisky] = useState(false)
   const [dep, setDep] = useState('')
   const [more, setMore] = useState(false)
-  const [perm, setPerm] = useState<PermissionLevel>('edit')
+  const [perm, setPerm] = useState<PermissionLevel | undefined>(undefined)
+  const [project, setProject] = useState('')
+  const [delegate, setDelegate] = useState(false)
+  const [unit, setUnit] = useState('')
   const [items, setItems] = useState<Dropped[]>([])
   const [problems, setProblems] = useState<string[]>([])
+
+  const picked = snap.roster.find((r) => r.id === assignee)
+  const badCheck =
+    picked?.check && !picked.check.ok && Date.now() - new Date(picked.check.at).getTime() < 24 * 3600e3 ? picked : null
 
   const submit = async (): Promise<void> => {
     if (!title.trim()) return
@@ -127,7 +152,10 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
       assignee: assignee || null,
       risky,
       dependsOn: dep ? [dep] : [],
-      permission: perm === 'edit' ? undefined : perm
+      permission: perm,
+      projectId: project || undefined,
+      delegate: delegate || undefined,
+      unitId: delegate && unit ? unit : undefined
     })
     // materials are copied into the new task's folder (folders become reference folders)
     const errs = items.length ? await sendDropped(t.id, items) : []
@@ -158,6 +186,32 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
             </option>
           ))}
         </select>
+        {!!snap.projects.length && (
+          <select value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">프로젝트 없음</option>
+            {snap.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        {!!snap.company.units.length && (
+          <label className="small row" title="회사 조직이 일을 나누고, 서로 검토하고, 마지막에 보고서로 올려요">
+            <input type="checkbox" checked={delegate} onChange={(e) => setDelegate(e.target.checked)} />
+            조직에 위임
+          </label>
+        )}
+        {delegate && !assignee && (
+          <select value={unit} onChange={(e) => setUnit(e.target.value)}>
+            <option value="">총괄 본부장에게</option>
+            {snap.company.units.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+        )}
         <button className="ghost" onClick={() => setMore(!more)}>
           {more ? '간단히' : '자세히'}
         </button>
@@ -165,6 +219,11 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
           추가
         </button>
       </div>
+      {badCheck && (
+        <div className="warn-text small">
+          ⚠ {badCheck.name}({badCheck.owner})의 최근 연결 확인이 실패했어요: {badCheck.check?.message} — 배정해도 실행되지 않을 수 있어요.
+        </div>
+      )}
       {more && (
         <div className="more">
           <textarea
@@ -175,7 +234,11 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
           />
           <div className="row">
             <span className="muted small">권한</span>
-            <PermissionSelect value={perm} onChange={setPerm} />
+            <PermissionSelect
+              value={perm}
+              onChange={setPerm}
+              adapter={snap.roster.find((r) => r.id === assignee)?.adapter}
+            />
           </div>
           <DropZone compact onItems={(added) => setItems((cur) => [...cur, ...added])} />
           {!!items.length && (
@@ -191,11 +254,7 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
               ))}
             </ul>
           )}
-          {problems.map((e, i) => (
-            <div key={i} className="err-text small">
-              {e}
-            </div>
-          ))}
+          <DropMessages items={problems} />
           <div className="row">
             <label className="toggle">
               <input type="checkbox" checked={risky} onChange={(e) => setRisky(e.target.checked)} />
@@ -227,6 +286,12 @@ function Card(props: {
   live?: string
   progress?: LiveSummary
   workDir: string
+  projectName?: string
+  /** Title of the task this one waits for (same work folder). */
+  waitingFor?: string
+  limit?: { until: string; message: string; guessed: boolean }
+  adapter?: AdapterId
+  onGoAgents?: () => void
   onRun: () => void
   expanded: boolean
   onToggle: () => void
@@ -242,6 +307,14 @@ function Card(props: {
       <div className="card-top" onClick={props.onToggle}>
         <div className="title">
           {t.risky && <span className="tag warn">위험</span>}
+          {t.kind && t.kind !== 'work' && <span className="tag">{KIND_TAG[t.kind]}</span>}
+          {t.status === 'in_review' && <span className="tag warn">교차 검토</span>}
+          {t.status === 'delegated' && (
+            <span className="tag">
+              하위 {all.filter((x) => x.parentId === t.id && x.status === 'done').length}/{all.filter((x) => x.parentId === t.id).length}
+            </span>
+          )}
+          {props.projectName && <span className="tag">{props.projectName}</span>}
           {t.title}
         </div>
         <div className="meta">
@@ -254,6 +327,18 @@ function Card(props: {
           <div className="meta small">⏳ 대기: {blockedBy.map((b) => b.title).join(', ')}</div>
         )}
         {props.running && props.progress && <ProgressStrip s={props.progress} />}
+        {props.running && !props.progress && props.waitingFor && (
+          <div className="meta small wait">⏳ 폴더 대기: "{props.waitingFor}" 작업이 같은 폴더에서 끝나길 기다려요</div>
+        )}
+        {t.interruptedRun && !props.running && (
+          <div className="meta small warn-text">⚠ 중단됨: 일부 변경이 폴더에 남았을 수 있어요</div>
+        )}
+        {props.limit && t.status === 'todo' && !props.running && (
+          <div className="meta small wait">
+            ⏸ 한도 대기: {new Date(props.limit.until).toLocaleString('ko-KR', { hour12: false })}
+            {props.limit.guessed ? '쯤(추정)' : ''}까지 자동 실행을 쉬어요
+          </div>
+        )}
         {t.status === 'needs_input' && t.question && <div className="meta small need-q">❓ {t.question}</div>}
       </div>
 
@@ -274,11 +359,12 @@ function Card(props: {
             </button>
           </div>
           {t.status === 'needs_input' && <NeedBox task={t} />}
-          {props.running && !props.progress && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
+          {props.running && !props.progress && !props.waitingFor && <pre className="out live">{props.live || '시작하는 중…'}</pre>}
           {props.running && props.progress && props.live && <pre className="out live small-log">{props.live.slice(-1200)}</pre>}
           {!props.running && t.report && <ReportView report={t.report} />}
           {!props.running && t.result && <pre className="out">{t.result}</pre>}
-          {t.error && <pre className="out err">{t.error}</pre>}
+          {t.status === 'needs_review' && <ReviewBox task={t} />}
+          <FailureHint task={t} onGoAgents={props.onGoAgents} />
           <div className="muted small">
             만든 사람 {t.createdBy} · {fmtTime(t.createdAt)}
             {t.finishedAt && ` · 끝남 ${fmtTime(t.finishedAt)}`}
@@ -294,6 +380,14 @@ function Card(props: {
           <button className="primary sm" onClick={props.onRun}>
             실행
           </button>
+        )}
+        {props.limit && props.adapter && t.status === 'todo' && !props.running && (
+          <button className="sm ghost" onClick={() => void window.hive.clearLimit(props.adapter!)} title="한도가 풀렸다고 알려줘요">
+            한도 해제
+          </button>
+        )}
+        {t.interruptedRun && !props.running && (
+          <ConfirmButton label="되돌리기" onConfirm={() => window.hive.rollbackRun(t.id, t.interruptedRun!)} />
         )}
         {props.running && (
           <button className="sm" onClick={() => void window.hive.stopTask(t.id)}>
@@ -311,30 +405,5 @@ function Card(props: {
         {!props.running && <ConfirmButton label="삭제" onConfirm={() => window.hive.deleteTask(t.id)} />}
       </div>
     </article>
-  )
-}
-
-/** Two-step delete without native dialogs: first click arms, second confirms. */
-export function ConfirmButton({
-  label,
-  onConfirm
-}: {
-  label: string
-  onConfirm: () => unknown
-}): JSX.Element {
-  const [armed, setArmed] = useState(false)
-  return (
-    <button
-      className={'sm ' + (armed ? 'danger' : 'ghost')}
-      onBlur={() => setArmed(false)}
-      onClick={() => {
-        if (armed) {
-          setArmed(false)
-          void onConfirm()
-        } else setArmed(true)
-      }}
-    >
-      {armed ? '정말 ' + label + '?' : label}
-    </button>
   )
 }
