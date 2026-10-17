@@ -247,7 +247,7 @@ describe('git sharing', () => {
     expect((await initSync(b.root, remote)).ok).toBe(true)
     b.createTask({ title: 'from bob', createdBy: 'bob' })
     const s2 = await syncNow(b.root, 'bob')
-    expect(s2.ok).toBe(true)
+    expect(s2.message).toBe('동기화했어요.')
     expect(b.listTasks().map((t) => t.title).sort()).toEqual(['from alice', 'from bob'])
 
     expect((await syncNow(a.root, 'alice')).ok).toBe(true)

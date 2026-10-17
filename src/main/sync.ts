@@ -33,8 +33,39 @@ export async function initSync(root: string, remoteUrl: string): Promise<SyncRes
       ? await git(root, ['remote', 'set-url', 'origin', remoteUrl.trim()])
       : await git(root, ['remote', 'add', 'origin', remoteUrl.trim()])
     if (!r.ok) return { ok: false, message: '공유 저장소 주소를 설정하지 못했어요: ' + r.out }
+    const joined = await adoptRemoteHistory(root)
+    if (!joined.ok) return joined
   }
   return { ok: true, message: '공유를 켰어요. "지금 동기화"를 눌러 첫 동기화를 하세요.' }
+}
+
+/**
+ * A teammate joining an existing shared hive has no commits yet, while the remote
+ * already has history. Start from the remote's history (keeping local files as
+ * uncommitted changes) so the first sync is a normal fast-forward, not a clash of
+ * two unrelated histories.
+ */
+async function adoptRemoteHistory(root: string): Promise<SyncResult> {
+  const hasLocalCommit = (await git(root, ['rev-parse', '--verify', 'HEAD'])).ok
+  if (hasLocalCommit) return { ok: true, message: '' }
+  const heads = await git(root, ['ls-remote', '--symref', 'origin', 'HEAD'])
+  if (!heads.ok) return { ok: false, message: '공유 저장소에 접속하지 못했어요 (주소·권한·로그인을 확인하세요): ' + heads.out.slice(-300) }
+  const m = heads.out.match(/ref: refs\/heads\/(\S+)\s+HEAD/)
+  const branch = m?.[1]
+  if (!branch) return { ok: true, message: '' } // empty remote: we will create it on first push
+  const f = await git(root, ['fetch', 'origin', branch])
+  if (!f.ok) return { ok: false, message: '공유 저장소 내용을 받아오지 못했어요: ' + f.out.slice(-300) }
+  await git(root, ['checkout', '-B', branch])
+  const r = await git(root, ['reset', '--mixed', `origin/${branch}`])
+  if (!r.ok) return { ok: false, message: '공유 저장소 이력을 가져오지 못했어요: ' + r.out.slice(-300) }
+  // A mixed reset leaves teammates' files only in the index: write them to disk too,
+  // otherwise the next `git add -A` would record them as deleted.
+  const missing = (await git(root, ['ls-files', '--deleted'])).out.split('\n').filter(Boolean)
+  for (let i = 0; i < missing.length; i += 200) {
+    await git(root, ['checkout', '--', ...missing.slice(i, i + 200)])
+  }
+  await git(root, ['branch', `--set-upstream-to=origin/${branch}`, branch])
+  return { ok: true, message: '' }
 }
 
 /** commit local changes → pull (rebase) → push. Aborts cleanly on conflict. */
