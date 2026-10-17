@@ -1,0 +1,36 @@
+{
+  "name": "hivedesk",
+  "version": "0.1.0",
+  "description": "여러 AI CLI(Claude Code, Codex, Antigravity/Gemini)를 각자 계정으로 팀처럼 돌리는 데스크톱 앱. 칸반 보드, 공유 메모리, 메시지함, 승인 큐, 예산 제한. API 키 불필요.",
+  "main": "./out/main/index.js",
+  "author": "TatoGames",
+  "license": "MIT",
+  "homepage": "https://github.com/TatoGames/Hive-Desk",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TatoGames/Hive-Desk.git"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "dist": "electron-vite build && electron-builder",
+    "dist:dir": "electron-vite build && electron-builder --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8",
+    "vitest": "^2.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
