@@ -84,8 +84,8 @@ function registerIpc(): void {
   })
   ipcMain.handle('task:run', (_e, id: string) => engine.runTask(id))
   ipcMain.handle('task:stop', (_e, id: string) => engine.stopTask(id))
-  ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected') =>
-    engine.decideApproval(id, d)
+  ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected', note?: string) =>
+    engine.decideApproval(id, d, note)
   )
   ipcMain.handle('message:send', (_e, from: string, to: string, body: string) =>
     engine.sendMessage(from, to, body)

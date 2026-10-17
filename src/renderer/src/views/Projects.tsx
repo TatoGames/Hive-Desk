@@ -91,6 +91,15 @@ export default function Projects({ snap }: { snap: Snapshot }): JSX.Element {
               작업 폴더 이름 (팀 공통 이름, 경로는 컴퓨터마다 따로 지정)
               <input value={draft.folderName} onChange={(e) => setDraft({ ...draft, folderName: e.target.value })} />
             </label>
+            <label className="full">
+              AI 실행 예산 (횟수, 0이면 제한 없음 — 위임 계획이 넘기면 이사회 승인을 받아요)
+              <input
+                type="number"
+                min={0}
+                value={draft.runBudget ?? 0}
+                onChange={(e) => setDraft({ ...draft, runBudget: Math.max(0, Number(e.target.value) || 0) })}
+              />
+            </label>
             <div className="row end">
               <button onClick={() => setDraft(null)}>취소</button>
               <button className="primary" disabled={!draft.name.trim()} onClick={() => void save()}>

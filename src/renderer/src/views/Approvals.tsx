@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import type { ApprovalKind, Snapshot } from '@shared/types'
+import { FLAG_LABEL } from '@shared/delegation'
 import { fmtTime } from '../store'
 import { NeedBox, ReviewBox } from './Materials'
 
@@ -66,15 +68,21 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
               {agent(a.agentId)} · {fmtTime(a.createdAt)}
             </div>
             <p>{a.reason}</p>
-            {t?.result && <pre className="out">{t.result}</pre>}
-            <div className="row">
-              <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
-                승인
-              </button>
-              <button className="danger" onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>
-                거절
-              </button>
-            </div>
+            {a.kind === 'plan' && t?.plan ? (
+              <PlanBox snap={snap} id={a.id} task={t} />
+            ) : (
+              <>
+                {t?.result && <pre className="out">{t.result}</pre>}
+                <div className="row">
+                  <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
+                    승인
+                  </button>
+                  <button className="danger" onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>
+                    거절
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )
       })}
@@ -89,6 +97,56 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
           ))}
         </section>
       )}
+    </div>
+  )
+}
+
+function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapshot['tasks'][number] }): JSX.Element {
+  const [note, setNote] = useState('')
+  const plan = task.plan!
+  const who = (aid: string) => snap.roster.find((r) => r.id === aid)?.name ?? aid
+  return (
+    <div>
+      <div className="small">
+        예상 AI 실행 <b>{plan.estimateRuns}회</b>
+        {plan.flags.map((f) => (
+          <span key={f} className="tag warn" style={{ marginLeft: 6 }}>
+            {FLAG_LABEL[f] ?? f}
+          </span>
+        ))}
+      </div>
+      {!!plan.boardReasons.length && (
+        <ul className="small">
+          {plan.boardReasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      )}
+      <ol className="plan-items">
+        {plan.items.map((it, i) => (
+          <li key={i}>
+            <b>{it.title}</b> — {who(it.assignee)}
+            <div className="muted small">
+              완료 조건: {it.done || '-'}
+              {!!it.after.length && ` · 먼저 끝나야 함: ${it.after.join(', ')}번`}
+            </div>
+          </li>
+        ))}
+      </ol>
+      <input
+        className="grow"
+        placeholder="반려할 때 이유 (담당 관리자에게 전달돼요)"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      <div className="row">
+        <button className="primary" onClick={() => void window.hive.decideApproval(id, 'approved')}>
+          계획대로 진행
+        </button>
+        <button className="danger" disabled={!note.trim()} onClick={() => void window.hive.decideApproval(id, 'rejected', note)}>
+          반려 (다시 계획)
+        </button>
+      </div>
     </div>
   )
 }

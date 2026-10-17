@@ -35,6 +35,8 @@ const api = {
     permission?: PermissionLevel
     refDirs?: string[]
     projectId?: string
+    delegate?: boolean
+    unitId?: string
   }): Promise<Task> => ipcRenderer.invoke('task:create', t),
   updateTask: (id: string, patch: Partial<Task>): Promise<Task> =>
     ipcRenderer.invoke('task:update', id, patch),
@@ -72,8 +74,8 @@ const api = {
   },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
-  decideApproval: (id: string, d: 'approved' | 'rejected'): Promise<void> =>
-    ipcRenderer.invoke('approval:decide', id, d),
+  decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
+    ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>
     ipcRenderer.invoke('message:send', from, to, body),
   addMemory: (text: string, kind?: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:add', text, kind),

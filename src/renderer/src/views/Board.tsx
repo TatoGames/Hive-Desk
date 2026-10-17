@@ -16,6 +16,8 @@ import {
   type Dropped
 } from './Materials'
 
+const KIND_TAG: Record<string, string> = { plan: '계획', review: '검토', integrate: '통합', committee: '위원회', work: '' }
+
 const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'todo', label: '할 일' },
   { id: 'awaiting_approval', label: '승인 대기' },
@@ -70,7 +72,9 @@ export default function Board({
 
       <div className="board">
         {COLUMNS.map((col) => {
-          const items = snap.tasks.filter((t) => t.status === col.id)
+          const items = snap.tasks.filter(
+            (t) => !t.hidden && (t.status === col.id || (col.id === 'running' && (t.status === 'in_review' || t.status === 'delegated')))
+          )
           return (
             <section key={col.id} className={'col col-' + col.id}>
               <h2>
@@ -131,6 +135,8 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const [more, setMore] = useState(false)
   const [perm, setPerm] = useState<PermissionLevel | undefined>(undefined)
   const [project, setProject] = useState('')
+  const [delegate, setDelegate] = useState(false)
+  const [unit, setUnit] = useState('')
   const [items, setItems] = useState<Dropped[]>([])
   const [problems, setProblems] = useState<string[]>([])
 
@@ -147,7 +153,9 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
       risky,
       dependsOn: dep ? [dep] : [],
       permission: perm,
-      projectId: project || undefined
+      projectId: project || undefined,
+      delegate: delegate || undefined,
+      unitId: delegate && unit ? unit : undefined
     })
     // materials are copied into the new task's folder (folders become reference folders)
     const errs = items.length ? await sendDropped(t.id, items) : []
@@ -184,6 +192,22 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
             {snap.projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        {!!snap.company.units.length && (
+          <label className="small row" title="회사 조직이 일을 나누고, 서로 검토하고, 마지막에 보고서로 올려요">
+            <input type="checkbox" checked={delegate} onChange={(e) => setDelegate(e.target.checked)} />
+            조직에 위임
+          </label>
+        )}
+        {delegate && !assignee && (
+          <select value={unit} onChange={(e) => setUnit(e.target.value)}>
+            <option value="">총괄 본부장에게</option>
+            {snap.company.units.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
               </option>
             ))}
           </select>
@@ -283,6 +307,13 @@ function Card(props: {
       <div className="card-top" onClick={props.onToggle}>
         <div className="title">
           {t.risky && <span className="tag warn">위험</span>}
+          {t.kind && t.kind !== 'work' && <span className="tag">{KIND_TAG[t.kind]}</span>}
+          {t.status === 'in_review' && <span className="tag warn">교차 검토</span>}
+          {t.status === 'delegated' && (
+            <span className="tag">
+              하위 {all.filter((x) => x.parentId === t.id && x.status === 'done').length}/{all.filter((x) => x.parentId === t.id).length}
+            </span>
+          )}
           {props.projectName && <span className="tag">{props.projectName}</span>}
           {t.title}
         </div>
