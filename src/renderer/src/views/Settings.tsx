@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Snapshot, SyncResult } from '@shared/types'
+import type { HumanReview, Snapshot, SyncResult } from '@shared/types'
 
 export default function Settings({
   snap,
@@ -15,6 +15,7 @@ export default function Settings({
   const [ws, setWs] = useState(c.workspace)
   const [maxC, setMaxC] = useState(c.maxConcurrent)
   const [strip, setStrip] = useState(c.stripApiKeys)
+  const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [interval, setIntervalMin] = useState(c.syncIntervalMinutes)
   const [remote, setRemote] = useState('')
   const [msg, setMsg] = useState<SyncResult | null>(null)
@@ -27,6 +28,7 @@ export default function Settings({
       workspace: ws.trim() || c.workspace,
       maxConcurrent: Math.max(1, maxC),
       stripApiKeys: strip,
+      humanReview: review,
       syncIntervalMinutes: Math.max(0, interval)
     })
     await onSaved()
@@ -83,6 +85,14 @@ export default function Settings({
         <label>
           동시에 실행할 최대 태스크 수
           <input type="number" min={1} value={maxC} onChange={(e) => setMaxC(Number(e.target.value) || 1)} />
+        </label>
+        <label className="full">
+          결과 확인 (완료로 처리하기 전에 사람이 보는 단계)
+          <select value={review} onChange={(e) => setReview(e.target.value as HumanReview)}>
+            <option value="changes">파일을 바꾼 작업만 확인 (권장)</option>
+            <option value="always">모든 작업 확인 (읽기만 하는 작업 제외)</option>
+            <option value="off">확인 없이 바로 완료</option>
+          </select>
         </label>
         <label className="toggle full">
           <input type="checkbox" checked={strip} onChange={(e) => setStrip(e.target.checked)} />

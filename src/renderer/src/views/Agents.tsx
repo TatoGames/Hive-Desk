@@ -246,7 +246,7 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
             />
           </label>
           <label>
-            1회 제한 시간(분)
+            무응답 제한(분) — 이 시간 동안 아무 반응이 없으면 중지
             <input
               type="number"
               value={d.timeoutMinutes}

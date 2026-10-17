@@ -4,8 +4,11 @@ import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
 import {
   ConfirmButton,
+  DropMessages,
   DropZone,
+  FailureHint,
   NeedBox,
+  ReviewBox,
   PermissionSelect,
   PreflightDialog,
   ProgressStrip,
@@ -18,6 +21,7 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'awaiting_approval', label: '승인 대기' },
   { id: 'needs_input', label: '자료 요청' },
   { id: 'running', label: '실행 중' },
+  { id: 'needs_review', label: '사람 확인' },
   { id: 'done', label: '완료' },
   { id: 'failed', label: '실패' }
 ]
@@ -25,8 +29,10 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
 export default function Board({
   snap,
   output,
-  live
+  live,
+  onGoAgents
 }: {
+  onGoAgents?: () => void
   snap: Snapshot
   output: Record<string, string>
   live: Record<string, LiveSummary>
@@ -84,6 +90,7 @@ export default function Board({
                   waitingFor={snap.tasks.find((x) => x.id === snap.waiting[t.id])?.title}
                   limit={snap.limits[snap.roster.find((r) => r.id === t.assignee)?.adapter ?? '']}
                   adapter={snap.roster.find((r) => r.id === t.assignee)?.adapter}
+                  onGoAgents={onGoAgents}
                   onRun={() => setPre(t.id)}
                   expanded={open === t.id}
                   onToggle={() => setOpen(open === t.id ? null : t.id)}
@@ -106,6 +113,7 @@ export default function Board({
           assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
           workDir={workDirOf(snap.tasks.find((t) => t.id === detail)!)}
           adapter={snap.roster.find((r) => r.id === snap.tasks.find((t) => t.id === detail)!.assignee)?.adapter}
+          onGoAgents={onGoAgents}
           onClose={() => setDetail(null)}
         />
       )}
@@ -200,11 +208,7 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
               ))}
             </ul>
           )}
-          {problems.map((e, i) => (
-            <div key={i} className="err-text small">
-              {e}
-            </div>
-          ))}
+          <DropMessages items={problems} />
           <div className="row">
             <label className="toggle">
               <input type="checkbox" checked={risky} onChange={(e) => setRisky(e.target.checked)} />
@@ -240,6 +244,7 @@ function Card(props: {
   waitingFor?: string
   limit?: { until: string; message: string; guessed: boolean }
   adapter?: AdapterId
+  onGoAgents?: () => void
   onRun: () => void
   expanded: boolean
   onToggle: () => void
@@ -303,7 +308,8 @@ function Card(props: {
           {props.running && props.progress && props.live && <pre className="out live small-log">{props.live.slice(-1200)}</pre>}
           {!props.running && t.report && <ReportView report={t.report} />}
           {!props.running && t.result && <pre className="out">{t.result}</pre>}
-          {t.error && <pre className="out err">{t.error}</pre>}
+          {t.status === 'needs_review' && <ReviewBox task={t} />}
+          <FailureHint task={t} onGoAgents={props.onGoAgents} />
           <div className="muted small">
             만든 사람 {t.createdBy} · {fmtTime(t.createdAt)}
             {t.finishedAt && ` · 끝남 ${fmtTime(t.finishedAt)}`}

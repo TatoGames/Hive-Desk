@@ -4,6 +4,7 @@ import type { AdapterId, Agent, AppConfig, EngineEvent, Task } from '../shared/t
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
+import { checkForUpdate } from './updates'
 import { fixPath } from './shellPath'
 import { checkCli, installCli, installCommand, openLogin } from './setup'
 
@@ -112,6 +113,13 @@ function registerIpc(): void {
     if (!win) return null
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
     return r.canceled ? null : r.filePaths[0]
+  })
+  ipcMain.handle('task:review', (_e, id: string, decision: 'approve' | 'changes', text?: string) =>
+    engine.reviewTask(id, decision, text)
+  )
+  ipcMain.handle('update:check', () => checkForUpdate(app.getVersion()))
+  ipcMain.handle('open:url', (_e, url: string) => {
+    if (/^https:\/\/github\.com\//.test(url)) void shell.openExternal(url)
   })
   ipcMain.handle('open:path', (_e, p: string) => shell.openPath(p))
 }

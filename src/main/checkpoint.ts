@@ -68,6 +68,7 @@ export async function createCheckpoint(hive: Hive, runId: string, source?: Track
     }
     const base = hive.checkpointDir(runId)
     const files = join(base, 'files')
+    mkdirSync(files, { recursive: true }) // also for an empty folder
     for (const rel of source.files.keys()) {
       const to = join(files, rel)
       mkdirSync(dirname(to), { recursive: true })

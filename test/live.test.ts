@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createParser } from '../src/main/activity'
+import { SECRET_READ_RULES } from '../src/main/secrets'
 import { buildCommand, claudePathRule, DESTRUCTIVE_BASH_RULES, runCli, type BuiltCommand, type Runner } from '../src/main/adapters'
 import { makeAgent } from '../src/main/config'
 import { Engine } from '../src/main/engine'
@@ -189,14 +190,14 @@ describe('building CLI commands', () => {
     const a = claudeAgent({ model: 'sonnet' })
     const plain = buildCommand(a)
     expect(plain.stream).toBeUndefined() // connection checks stay plain text
-    expect(plain.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits', '--disallowedTools', ...DESTRUCTIVE_BASH_RULES])
+    expect(plain.args).toEqual(['-p', '--model', 'sonnet', '--permission-mode', 'acceptEdits', '--disallowedTools', ...DESTRUCTIVE_BASH_RULES, ...SECRET_READ_RULES])
 
     const edit = buildCommand(a, { stream: true })
     expect(edit.stream).toBe('claude')
     expect(edit.args).toEqual([
       '-p', '--output-format', 'stream-json', '--verbose',
       '--model', 'sonnet', '--permission-mode', 'acceptEdits',
-      '--disallowedTools', ...DESTRUCTIVE_BASH_RULES
+      '--disallowedTools', ...DESTRUCTIVE_BASH_RULES, ...SECRET_READ_RULES
     ])
 
     const read = buildCommand(a, { stream: true, permission: 'read' }).args
@@ -205,7 +206,7 @@ describe('building CLI commands', () => {
     expect(read.filter((x) => x === '--permission-mode')).toHaveLength(1) // agent's own mode replaced, not duplicated
 
     const exec = buildCommand(a, { permission: 'exec' }).args
-    expect(exec.join(' ')).toMatch(/--permission-mode acceptEdits --allowedTools Bash$/)
+    expect(exec.join(' ')).toMatch(/--permission-mode acceptEdits --allowedTools Bash --disallowedTools Read/)
 
     const full = buildCommand(a, { stream: true, refDirs: ['/data/ref', 'C:\\My Docs'], resumeSession: 'abc' })
     expect(full.args).toContain('--add-dir=/data/ref')

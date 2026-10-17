@@ -40,6 +40,8 @@ export type TaskStatus =
   /** The agent asked the human for a file, info or decision and stopped. */
   | 'needs_input'
   | 'running'
+  /** The run finished and changed things; a human looks at the result before it counts as done. */
+  | 'needs_review'
   | 'done'
   | 'failed'
 
@@ -92,6 +94,12 @@ export interface Task {
   lastRunId?: string
   /** The app closed during this run; some changes may be left in the work folder. */
   interruptedRun?: string
+  /** Upper limit for the total run time of this task (minutes). Default 240. */
+  maxMinutes?: number
+  /** What kind of failure `error` is, so the UI can offer the right fix. */
+  errorKind?: FailureKind
+  /** Let the agent read secret-looking files (.env, keys). Off by default. */
+  allowSecrets?: boolean
   error?: string
   startedAt?: string
   finishedAt?: string
@@ -105,6 +113,8 @@ export interface Report {
   risks: string
   next: string
 }
+
+export type FailureKind = 'login' | 'limit' | 'permission' | 'not_found' | 'network' | 'timeout' | 'unknown'
 
 export type TaskEventKind =
   | 'created'
@@ -324,7 +334,12 @@ export interface Usage {
   ms: number
 }
 
+/** When a finished run waits for a human check before it counts as done. */
+export type HumanReview = 'off' | 'changes' | 'always'
+
 export interface AppConfig {
+  /** `changes` (default): check results that changed files. */
+  humanReview: HumanReview
   /** Attachments above this size (MB) stay on this machine instead of syncing to the team. */
   attachShareMaxMB: number
   memberName: string
@@ -408,6 +423,8 @@ export interface Preflight {
 }
 
 export interface AttachResult {
+  /** Hints about formats the AI may not be able to read (see attachAdvice). */
+  notes: string[]
   attached: Attachment[]
   /** Dropped folders become reference folders. */
   folders: string[]

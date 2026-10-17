@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import type {
   ActivityEvent,
   Agent,
+  HumanReview,
   PermissionLevel,
   Report,
   RunDiff,
@@ -12,6 +13,7 @@ import type {
 import { createParser, LiveRun } from './activity'
 import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type Runner } from './adapters'
 import { createCheckpoint } from './checkpoint'
+import { classifyFailure, failureMessage } from './failure'
 import { detectLimit, type LimitInfo } from './limits'
 import { diffStat, trackChanges, unavailable } from './gitdiff'
 import { Hive, newId } from './hive'
@@ -202,6 +204,8 @@ export interface RunnerDeps {
   onActivity?: (taskId: string, events: ActivityEvent[], live: LiveRun) => void
   /** How often to look at the work folder while a run is in progress (ms). */
   watchMs?: number
+  /** When a finished run waits for a human check. Default: never (the engine passes the setting). */
+  humanReview?: HumanReview
   /** The CLI reported that its usage limit is used up. */
   onLimit?: (adapter: Agent['adapter'], info: LimitInfo) => void
   signal?: AbortSignal
@@ -218,6 +222,9 @@ export type RunOutcome =
   | 'cancelled'
   /** Stopped by the usage limit; the task is ready again once it resets. */
   | 'limited'
+
+/** Total time cap per run when the task does not set one. */
+export const DEFAULT_MAX_MINUTES = 240
 
 /** The folder an agent's runs happen in. */
 export function resolveCwd(agent: Agent, defaultCwd: string): string {
@@ -311,7 +318,8 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
       stream: true,
       permission: level,
       refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
-      resumeSession
+      resumeSession,
+      allowSecrets: task.allowSecrets
     })
   } catch (e) {
     staged.cleanup()
@@ -359,6 +367,8 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
 
   const watchMs = deps.watchMs ?? 3000
+  let touch: (() => void) | undefined
+  let lastSig = ''
   let watching = true
   let watchTimer: NodeJS.Timeout | undefined
   const poll = async (): Promise<void> => {
@@ -368,6 +378,12 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     if (!watching) return
     live.setDiff(d)
     live.setPlan(parser.plan())
+    // files changing means the agent is alive even if the CLI prints nothing
+    const sig = d.files.map((f) => `${f.path}:${f.status}:${f.additions}:${f.deletions}`).join('|')
+    if (sig !== lastSig) {
+      lastSig = sig
+      touch?.()
+    }
     deps.onActivity?.(task.id, [], live)
     // big folders: look less often so watching never slows the agent down
     watchTimer = setTimeout(() => void poll(), Math.max(watchMs, (Date.now() - t0) * 3))
@@ -379,7 +395,10 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     res = await deps.runner(built, {
       cwd,
       prompt,
-      timeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
+      // the agent's setting = how long it may stay silent; the task's setting = how long it may take in all
+      idleTimeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
+      timeoutMs: Math.max(1, task.maxMinutes ?? DEFAULT_MAX_MINUTES) * 60_000,
+      onTouchReady: (t) => (touch = t),
       env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
       onOutput: (c) => {
         push(parser.push(c))
@@ -466,15 +485,20 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'cancelled'
   }
   if (res.spawnError) {
-    const error = res.spawnError
-    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
+    const f = classifyFailure(res.spawnError)
+    const kind = f.kind
+    const error = failureMessage(f, res.spawnError)
+    hive.updateTask(task.id, { status: 'failed', error, errorKind: kind, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
   if (res.timedOut) {
-    const error = `제한 시간 ${agent.timeoutMinutes}분을 넘겨 중지했어요.`
+    const kindOfTimeout = res.timeoutKind ?? 'total'
+    const minutes = kindOfTimeout === 'idle' ? agent.timeoutMinutes : (task.maxMinutes ?? DEFAULT_MAX_MINUTES)
+    const error = failureMessage(classifyFailure('', { timeout: kindOfTimeout, minutes }), '')
     hive.updateTask(task.id, {
       status: 'failed',
       error,
+      errorKind: 'timeout',
       result: stdout.trim() || undefined,
       finishedAt,
       sessionId,
@@ -501,8 +525,9 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
   if (res.code !== 0) {
     const detail = (res.stderr.trim() || stdout.trim() || lastError || '').slice(-1500)
-    const error = `CLI가 오류 코드 ${res.code}로 끝났어요.${detail ? '\n' + detail : ''}`
-    hive.updateTask(task.id, { status: 'failed', error, finishedAt, lastRunId: saveRun('failed', { error }) })
+    const f = classifyFailure([res.stderr, stdout.slice(-3000), lastError ?? ''].join('\n'))
+    const error = failureMessage(f, `(오류 코드 ${res.code})${detail ? '\n' + detail : ''}`)
+    hive.updateTask(task.id, { status: 'failed', error, errorKind: f.kind, finishedAt, lastRunId: saveRun('failed', { error }) })
     return 'failed'
   }
 
@@ -550,17 +575,36 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     return 'needs_input'
   }
 
+  const review = needsReview(deps.humanReview ?? 'off', level, diff)
+  const lastRunId = saveRun('done', { report: parsed.report })
+  if (review) {
+    hive.addEvent(task.id, 'review', 'system', `사람 확인을 기다려요: ${reviewReason(diff)}`, runId)
+  }
   hive.updateTask(task.id, {
-    status: 'done',
+    status: review ? 'needs_review' : 'done',
     result: parsed.clean,
     report: parsed.report,
     error: undefined,
+    errorKind: undefined,
     question: undefined,
     finishedAt,
     sessionId,
-    lastRunId: saveRun('done', { report: parsed.report })
+    lastRunId
   })
   return 'done'
+}
+
+/** Should a finished run wait for a human to look at it before it counts as done? */
+export function needsReview(mode: HumanReview, level: PermissionLevel, diff: RunDiff): boolean {
+  if (mode === 'off' || level === 'read') return false
+  if (mode === 'always') return true
+  // "changes": anything that touched files — and anything we could not check
+  return !diff.available || diff.files.length > 0
+}
+
+function reviewReason(diff: RunDiff): string {
+  if (!diff.available) return '바뀐 내용을 비교하지 못해서 직접 확인이 필요해요.'
+  return diff.files.length ? `파일 ${diff.files.length}개가 바뀌었어요.` : '설정에 따라 확인이 필요해요.'
 }
 
 function cap(s: string, n: number): string {

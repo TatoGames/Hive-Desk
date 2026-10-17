@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { defaultPermission } from '../shared/permission'
+import { SECRET_READ_RULES } from './secrets'
 import type { AdapterId, AdapterInfo, Agent, PermissionLevel } from '../shared/types'
 import type { StreamKind } from './activity'
 
@@ -125,6 +126,8 @@ export interface BuildOptions {
   refDirs?: string[]
   /** Continue this CLI session instead of starting a new one. */
   resumeSession?: string
+  /** Let the file-reading tool open .env / key files (blocked by default). */
+  allowSecrets?: boolean
 }
 
 /** What HiveDesk can really enforce per CLI (the pre-run check shows this honestly). */
@@ -231,6 +234,7 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     } else {
       deny.push(...DESTRUCTIVE_BASH_RULES)
     }
+    if (!opts.allowSecrets) deny.push(...SECRET_READ_RULES)
     // Reference folders are opened with --add-dir, which also allows writing: take that back.
     for (const d of dirs) for (const tool of EDIT_TOOLS) deny.push(claudePathRule(tool, d))
     if (deny.length) extra.push('--disallowedTools', ...deny)
@@ -305,7 +309,12 @@ function winQuote(a: string): string {
 export interface RunOptions {
   cwd: string
   prompt: string
+  /** Hard cap on the total run time. */
   timeoutMs: number
+  /** Stop when nothing has happened (no output, no file change) for this long. 0/undefined = off. */
+  idleTimeoutMs?: number
+  /** Gives the caller a function to call whenever something happened outside the CLI's output (e.g. a file changed). */
+  onTouchReady?: (touch: () => void) => void
   env: NodeJS.ProcessEnv
   onOutput?: (chunk: string) => void
   signal?: AbortSignal
@@ -316,6 +325,8 @@ export interface RunResult {
   stdout: string
   stderr: string
   timedOut: boolean
+  /** Why it timed out: no activity for a while, or the total time cap. */
+  timeoutKind?: 'idle' | 'total'
   aborted: boolean
   spawnError?: string
 }
@@ -331,15 +342,18 @@ export const runCli: Runner = (built, opts) =>
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let timeoutKind: 'idle' | 'total' | undefined
     let aborted = false
     let settled = false
+    let idleTimer: NodeJS.Timeout | undefined
 
     const done = (r: Partial<RunResult>): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (idleTimer) clearTimeout(idleTimer)
       opts.signal?.removeEventListener('abort', onAbort)
-      resolve({ code: null, stdout, stderr, timedOut, aborted, ...r })
+      resolve({ code: null, stdout, stderr, timedOut, timeoutKind, aborted, ...r })
     }
 
     let child
@@ -391,8 +405,21 @@ export const runCli: Runner = (built, opts) =>
     }
     const timer = setTimeout(() => {
       timedOut = true
+      timeoutKind = 'total'
       kill()
     }, opts.timeoutMs)
+    // "Still alive" = it printed something or the caller saw files change; silence for too long ends the run.
+    const touch = (): void => {
+      if (!opts.idleTimeoutMs || settled) return
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        timedOut = true
+        timeoutKind = 'idle'
+        kill()
+      }, opts.idleTimeoutMs)
+    }
+    touch()
+    opts.onTouchReady?.(touch)
     const onAbort = (): void => {
       aborted = true
       kill()
@@ -402,10 +429,12 @@ export const runCli: Runner = (built, opts) =>
     child.stdout?.on('data', (d: Buffer) => {
       const s = d.toString('utf8')
       stdout += s
+      touch()
       opts.onOutput?.(s)
     })
     child.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8')
+      touch()
     })
     child.on('error', (e: NodeJS.ErrnoException) => {
       done({

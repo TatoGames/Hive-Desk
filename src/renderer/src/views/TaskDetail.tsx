@@ -16,9 +16,11 @@ import {
   ActivityFeed,
   ConfirmButton,
   ChangedFiles,
+  FailureHint,
   MaterialsPanel,
   NeedBox,
-  ProgressStrip
+  ProgressStrip,
+  ReviewBox
 } from './Materials'
 
 const EVENT_LABEL: Record<TaskEventKind, string> = {
@@ -79,8 +81,10 @@ export default function TaskDetail({
   assigneeName,
   workDir,
   adapter,
+  onGoAgents,
   onClose
 }: {
+  onGoAgents?: () => void
   task: Task
   assigneeName: string
   workDir: string
@@ -157,6 +161,12 @@ export default function TaskDetail({
           <>
             <h2 className="sec">에이전트가 기다리고 있어요</h2>
             <NeedBox task={task} />
+          </>
+        )}
+        {task.status === 'needs_review' && (
+          <>
+            <h2 className="sec">결과 확인</h2>
+            <ReviewBox task={task} />
           </>
         )}
 
@@ -272,7 +282,7 @@ export default function TaskDetail({
             <pre className="out">{task.result}</pre>
           </details>
         )}
-        {task.error && <pre className="out err">{task.error}</pre>}
+        <FailureHint task={task} onGoAgents={onGoAgents} />
 
         <h2 className="sec">타임라인</h2>
         {!history ? (

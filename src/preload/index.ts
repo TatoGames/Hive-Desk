@@ -51,6 +51,11 @@ const api = {
   addInstruction: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:instruct', id, text),
   rollbackRun: (taskId: string, runId: string): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke('task:rollback', taskId, runId),
+  reviewTask: (id: string, decision: 'approve' | 'changes', text?: string): Promise<void> =>
+    ipcRenderer.invoke('task:review', id, decision, text),
+  checkUpdate: (): Promise<{ available: boolean; current: string; version?: string; url?: string; name?: string }> =>
+    ipcRenderer.invoke('update:check'),
+  openUrl: (url: string): Promise<void> => ipcRenderer.invoke('open:url', url),
   clearLimit: (adapter: AdapterId): Promise<void> => ipcRenderer.invoke('limit:clear', adapter),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:files'),
   /** Absolute path of a dropped File ('' if the browser gave no real file). */

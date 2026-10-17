@@ -20,6 +20,9 @@ import type {
 import type { LiveRun } from './activity'
 import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
 import { STAGE_DIR } from './staging'
+import { attachmentAdvice } from './attachAdvice'
+import { personalClaudeRules } from './claudeSettings'
+import { findSecrets } from './secrets'
 import { SHARED_DIRS } from './hive'
 import { loadConfig, makeAgent, saveConfig } from './config'
 import { diffSinceCheckpoint, rollback } from './checkpoint'
@@ -36,6 +39,7 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   awaiting_approval: '승인 대기',
   needs_input: '자료 요청',
   running: '실행 중',
+  needs_review: '사람 확인',
   done: '완료',
   failed: '실패'
 }
@@ -63,9 +67,9 @@ export class Engine {
     private configFile: string,
     private emit: Emit,
     private runner: Runner = runCli,
-    home: string = homedir()
+    private home: string = homedir()
   ) {
-    this.config = loadConfig(configFile, home)
+    this.config = loadConfig(configFile, this.home)
     mkdirSync(this.config.workspace, { recursive: true })
     this.hive = new Hive(this.config.workspace)
     this.loadLimits()
@@ -370,6 +374,7 @@ export class Engine {
       defaultCwd: this.config.workspace,
       signal: ac.signal,
       watchMs: this.watchMs,
+      humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
       onOutput: (taskId, chunk) => this.emit({ type: 'output', taskId, chunk }),
       onLive: (live) => this.liveRuns.set(live.taskId, live),
@@ -430,6 +435,26 @@ export class Engine {
     const lim = this.limitFor(agent.adapter)
     if (lim) {
       add('warn', `이 CLI는 사용량 한도에 걸려 있어요 (${new Date(lim.until).toLocaleString('ko-KR', { hour12: false })}${lim.guessed ? '쯤 추정' : ''}까지). 지금 실행하면 다시 실패할 수 있어요.`)
+    }
+
+    // secrets and personal settings
+    if (canRun) {
+      const secrets = findSecrets(cwd)
+      if (secrets.length) {
+        const shown = secrets.slice(0, 3).join(', ') + (secrets.length > 3 ? ` 외 ${secrets.length - 3}개` : '')
+        add(
+          'warn',
+          agent.adapter === 'claude' && !task.allowSecrets
+            ? `작업 폴더에 비밀번호·키로 보이는 파일이 있어요 (${shown}). 파일 읽기 도구로는 열지 못하게 막아 뒀어요 (셸 명령까지는 막지 못해요).`
+            : `작업 폴더에 비밀번호·키로 보이는 파일이 있어요 (${shown}). 에이전트가 읽어서 응답이나 기록에 남길 수 있어요.`
+        )
+      }
+      if (agent.adapter === 'claude') {
+        const mine = personalClaudeRules(cwd, this.home)
+        if (mine.length) {
+          add('warn', `Claude 개인 설정에 허용 규칙이 있어요: ${mine.join(' · ')}. 앱이 보내는 차단 규칙(삭제·참고 폴더 수정·비밀 파일)은 항상 우선하지만, 허용 규칙 때문에 권한 단계보다 더 많은 일을 할 수 있어요.`)
+        }
+      }
     }
 
     // permission level
@@ -501,7 +526,7 @@ export class Engine {
   // ---- materials ----
   /** Files become attachments; dropped folders become reference folders. */
   attachPaths(id: string, paths: string[]): AttachResult {
-    const out: AttachResult = { attached: [], folders: [], errors: [] }
+    const out: AttachResult = { notes: [], attached: [], folders: [], errors: [] }
     const by = this.config.memberName || 'me'
     for (const p of paths) {
       try {
@@ -511,7 +536,10 @@ export class Engine {
           if (t && !(t.refDirs ?? []).includes(p)) this.hive.updateTask(id, { refDirs: [...(t.refDirs ?? []), p] })
           out.folders.push(p)
         } else if (st.isFile()) {
-          out.attached.push(this.hive.addAttachment(id, { path: p }, by, this.config.attachShareMaxMB))
+          const att = this.hive.addAttachment(id, { path: p }, by, this.config.attachShareMaxMB)
+          out.attached.push(att)
+          const tip = attachmentAdvice(att.name)
+          if (tip) out.notes.push(tip)
         } else out.errors.push(`${p}: 파일이 아니에요`)
       } catch (e) {
         out.errors.push(`${p}: ${(e as Error).message}`)
@@ -522,11 +550,13 @@ export class Engine {
   }
 
   attachData(id: string, name: string, data: Uint8Array): AttachResult {
-    const out: AttachResult = { attached: [], folders: [], errors: [] }
+    const out: AttachResult = { notes: [], attached: [], folders: [], errors: [] }
     try {
       out.attached.push(
         this.hive.addAttachment(id, { name, data: Buffer.from(data) }, this.config.memberName || 'me', this.config.attachShareMaxMB)
       )
+      const tip = attachmentAdvice(name)
+      if (tip) out.notes.push(tip)
     } catch (e) {
       out.errors.push(`${name}: ${(e as Error).message}`)
     }
@@ -571,6 +601,24 @@ export class Engine {
     return this.running.size
   }
 
+  /** The human looked at a finished run: accept it, or send it back with what to change. */
+  reviewTask(id: string, decision: 'approve' | 'changes', text = ''): void {
+    const t = this.hive.getTask(id)
+    if (!t || t.status !== 'needs_review') return
+    const by = this.config.memberName || 'me'
+    if (decision === 'approve') {
+      this.hive.updateTask(id, { status: 'done' })
+      this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
+    } else {
+      const body = text.trim()
+      if (!body) return
+      this.hive.updateTask(id, { status: 'todo', reply: body })
+      this.hive.addEvent(id, 'review', by, `수정을 요청했어요: ${body}`)
+      if (this.localAgent(t.assignee)) void this.runTask(id)
+    }
+    this.changed()
+  }
+
   /** Undo everything a run changed in its work folder (back to how it was just before the run). */
   async rollbackRun(taskId: string, runId: string): Promise<{ ok: boolean; message: string }> {
     const task = this.hive.getTask(taskId)
@@ -587,7 +635,7 @@ export class Engine {
     this.hive.addRun({ ...rec, rolledBackAt: new Date().toISOString() })
     this.hive.addEvent(taskId, 'rollback', by, `이 실행을 되돌렸어요. ${r.message}`, runId)
     const patch: Partial<Task> = { interruptedRun: undefined }
-    if (task.status === 'done' || task.status === 'failed') {
+    if (task.status === 'done' || task.status === 'failed' || task.status === 'needs_review') {
       patch.status = 'todo'
       patch.notes = [...task.notes, '실행을 되돌려서 다시 할 일로 돌려놨어요.']
     }
