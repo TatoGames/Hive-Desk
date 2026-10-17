@@ -15,6 +15,7 @@ export default function Settings({
   const [ws, setWs] = useState(c.workspace)
   const [maxC, setMaxC] = useState(c.maxConcurrent)
   const [strip, setStrip] = useState(c.stripApiKeys)
+  const [notif, setNotif] = useState(c.notifications !== false)
   const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [interval, setIntervalMin] = useState(c.syncIntervalMinutes)
   const [remote, setRemote] = useState('')
@@ -28,6 +29,7 @@ export default function Settings({
       workspace: ws.trim() || c.workspace,
       maxConcurrent: Math.max(1, maxC),
       stripApiKeys: strip,
+      notifications: notif,
       humanReview: review,
       syncIntervalMinutes: Math.max(0, interval)
     })
@@ -97,6 +99,10 @@ export default function Settings({
         <label className="toggle full">
           <input type="checkbox" checked={strip} onChange={(e) => setStrip(e.target.checked)} />
           API 키 환경변수 숨기기 (권장) — CLI가 API 과금 대신 내 로그인 계정을 쓰도록 해요
+        </label>
+        <label className="toggle full">
+          <input type="checkbox" checked={notif} onChange={(e) => setNotif(e.target.checked)} />
+          데스크톱 알림 — 승인·자료 요청·결과 확인·실패·보고서가 생기면 알려줘요
         </label>
         <div className="row end full">
           <button className="primary" onClick={() => void save()}>

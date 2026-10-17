@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Notification, powerSaveBlocker, shell } from 'electron'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, Task } from '../shared/types'
 import { detectAll } from './adapters'
@@ -24,6 +24,11 @@ function syncPowerBlocker(): void {
 
 function emit(e: EngineEvent): void {
   win?.webContents.send('engine:event', e)
+  if (e.type === 'notify' && engine?.config.notifications !== false && Notification.isSupported()) {
+    const n = new Notification({ title: e.title, body: e.body })
+    n.on('click', () => win?.show())
+    n.show()
+  }
   if (e.type === 'changed') syncPowerBlocker()
 }
 
@@ -135,6 +140,9 @@ function registerIpc(): void {
   ipcMain.handle('task:review', (_e, id: string, decision: 'approve' | 'changes', text?: string) =>
     engine.reviewTask(id, decision, text)
   )
+  ipcMain.handle('agenda:open', (_e, title: string, body: string) => engine.openAgenda(title, body))
+  ipcMain.handle('agenda:decide', (_e, id: string, choice: number, note?: string) => engine.decideAgenda(id, choice, note))
+  ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))
   ipcMain.handle('update:check', () => checkForUpdate(app.getVersion()))
   ipcMain.handle('open:url', (_e, url: string) => {
     if (/^https:\/\/github\.com\//.test(url)) void shell.openExternal(url)

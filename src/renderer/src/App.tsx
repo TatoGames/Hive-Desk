@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
+import Committee from './views/Committee'
+import Performance from './views/Performance'
 import Reports from './views/Reports'
 import Projects from './views/Projects'
 import Company from './views/Company'
@@ -50,7 +52,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'board' | 'company' | 'projects' | 'reports' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -79,6 +81,8 @@ export default function App(): JSX.Element {
     { id: 'company', label: '회사' },
     { id: 'projects', label: '프로젝트' },
     { id: 'reports', label: '보고서함', badge: snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review').length },
+    { id: 'committee', label: 'CEO 위원회', badge: snap.company.agendas.filter((a) => a.phase === 'board').length },
+    { id: 'performance', label: '성과' },
     { id: 'agents', label: '에이전트' },
     { id: 'inbox', label: '메시지 · 메모리', badge: unread },
     { id: 'approvals', label: '승인·확인·자료 요청', badge: pending },
@@ -131,6 +135,8 @@ export default function App(): JSX.Element {
         {current === 'company' && <Company snap={snap} />}
         {current === 'projects' && <Projects snap={snap} />}
         {current === 'reports' && <Reports snap={snap} />}
+        {current === 'committee' && <Committee snap={snap} />}
+        {current === 'performance' && <Performance snap={snap} />}
         {current === 'agents' && <Agents snap={snap} goBoard={() => setTab('board')} />}
         {current === 'inbox' && <Inbox snap={snap} />}
         {current === 'approvals' && <Approvals snap={snap} />}

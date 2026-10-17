@@ -24,6 +24,7 @@ import type {
   Project,
   RunShared,
   ConnectionCheck,
+  Agenda,
   FinalReport,
   RosterEntry,
   RunRecord,
@@ -35,7 +36,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -554,6 +555,17 @@ export class Hive {
 
   listAptitude(): AptitudeRecord[] {
     return listJson<AptitudeRecord>(this.p('aptitude'))
+  }
+
+  // ---- committee agendas (shared) ----
+  getAgenda(id: string): Agenda | null {
+    return readJson<Agenda>(this.p('agenda', id + '.json'))
+  }
+  saveAgenda(a: Agenda): void {
+    writeJson(this.p('agenda', a.id + '.json'), a)
+  }
+  listAgendas(): Agenda[] {
+    return listJson<Agenda>(this.p('agenda')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
 
   // ---- final reports (shared) ----

@@ -23,6 +23,7 @@ import type {
 import type { LiveRun } from './activity'
 import { adapterAccess, effectivePermission, runCli, type Runner } from './adapters'
 import { checkCli } from './setup'
+import { Committee } from './committee'
 import { Delegation } from './delegation'
 import { newId } from './hive'
 import { STAGE_DIR } from './staging'
@@ -84,6 +85,7 @@ export class Engine {
   recovering: Promise<void> = Promise.resolve()
   private timer: NodeJS.Timeout | null = null
   readonly delegation: Delegation
+  readonly committee: Committee
   private syncTimer: NodeJS.Timeout | null = null
   private ticking = false
 
@@ -104,7 +106,16 @@ export class Engine {
       catalog: () => self.catalog(),
       changed: () => self.changed(),
       notify: (title, body) => self.notify(title, body),
+      escalate: (t, q) => self.escalateToCommittee(t, q),
       aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d)
+    })
+    this.committee = new Committee({
+      get hive(): Hive {
+        return self.hive
+      },
+      me: () => self.config.memberName || 'me',
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body)
     })
     this.config = loadConfig(configFile, this.home)
     mkdirSync(this.config.workspace, { recursive: true })
@@ -214,7 +225,31 @@ export class Engine {
     this.emit({ type: 'notify', title, body })
   }
 
+  private seenAttention: Set<string> | null = null
+
+  /** Tell the person about things that now wait for them (new approvals, questions, results, failures). */
+  private notifyAttention(): void {
+    let now: Map<string, [string, string]>
+    try {
+      now = new Map()
+      for (const a of this.hive.listApprovals()) if (a.status === 'pending') now.set('a' + a.id, ['승인이 필요해요', a.reason.slice(0, 80)])
+      for (const t of this.hive.listTasks()) {
+        if (t.hidden) continue
+        if (t.status === 'needs_input') now.set('i' + t.id, ['에이전트가 자료를 기다려요', t.title])
+        else if (t.status === 'needs_review' && !t.parentId) now.set('r' + t.id, ['결과를 확인해 주세요', t.title])
+        else if (t.status === 'failed') now.set('f' + t.id, ['작업이 실패했어요', t.title])
+      }
+    } catch {
+      return
+    }
+    const seen = this.seenAttention
+    this.seenAttention = new Set(now.keys())
+    if (!seen) return
+    for (const [k, [title, body]] of now) if (!seen.has(k)) this.notify(title, body)
+  }
+
   private changed(): void {
+    this.notifyAttention()
     this.emit({ type: 'changed' })
   }
 
@@ -240,7 +275,8 @@ export class Engine {
         catalog: this.catalog(),
         availability: this.hive.availability(),
         aptitude: this.hive.listAptitude(),
-        finals: this.hive.listFinals()
+        finals: this.hive.listFinals(),
+        agendas: this.hive.listAgendas()
       },
       projects: this.hive.listProjects(),
       projectPaths: this.hive.projectPaths(),
@@ -463,7 +499,10 @@ export class Engine {
         outcome = await this.runOnce(agent, id, ac)
       }
       // delegation: what a plan / review / work run produced decides what happens next
-      if (!ac.signal.aborted) this.delegation.onRunFinished(id)
+      if (!ac.signal.aborted) {
+        this.delegation.onRunFinished(id)
+        this.committee.onRunFinished(id)
+      }
       return outcome
     } finally {
       if (locked) this.unlockFolder(key)
@@ -484,7 +523,7 @@ export class Engine {
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
-      promptExtras: (task, a) => this.delegation.promptExtras(task, a),
+      promptExtras: (task, a) => [...this.delegation.promptExtras(task, a), ...this.committee.promptExtras(task, a)],
       onRunEnd: ({ agent: a, taskId, ms, result }) =>
         this.noteAptitude(a, taskId, {
           runs: 1,
@@ -723,6 +762,45 @@ export class Engine {
   /** How many tasks are running right now (the app keeps the computer awake while this is > 0). */
   runningCount(): number {
     return this.running.size
+  }
+
+  // ---- CEO committee ----
+  openAgenda(title: string, body: string): void {
+    if (!title.trim()) return
+    this.committee.open(title, body, this.config.memberName || 'me')
+    this.changed()
+  }
+
+  decideAgenda(id: string, choice: number, note = ''): void {
+    this.committee.decide(id, choice, note, this.config.memberName || 'me')
+    this.changed()
+  }
+
+  private escalateToCommittee(t: Task, question: string): void {
+    try {
+      this.committee.open(`방향 확인: ${t.title}`, `${question}\n\n(업무: ${t.title}\n${t.description})`, 'manager', t.id)
+      this.hive.updateTask(t.id, { status: 'needs_input', question: `방향이 불분명해서 CEO 위원회에 올렸어요: ${question}` })
+      this.hive.addEvent(t.id, 'delegation', 'delegation', '방향이 불분명해서 CEO 위원회에 올렸어요.')
+    } catch (e) {
+      // no committee: the board answers directly
+      this.hive.updateTask(t.id, { status: 'needs_input', question })
+      this.hive.addEvent(t.id, 'delegation', 'delegation', `방향이 불분명해요: ${(e as Error).message}`)
+      this.notify('방향을 정해 주세요', t.title)
+    }
+  }
+
+  /** Move local agents of a job from one model to a better one (a recommendation from the aptitude board). */
+  applyReassignment(domain: string, fromKey: string, toKey: string): number {
+    if (!this.catalog().some((m) => m.id === toKey)) return 0
+    const seats = this.hive.listSeats().filter((s) => (s.job || 'general') === domain && s.agentId)
+    let n = 0
+    for (const s of seats) {
+      const a = this.config.agents.find((x) => x.id === s.agentId)
+      if (!a || a.modelRef?.id !== fromKey) continue
+      this.saveAgent({ ...a, modelRef: { id: toKey, pin: a.modelRef.pin } })
+      n++
+    }
+    return n
   }
 
   /** The human looked at a finished run: accept it, or send it back with what to change. */

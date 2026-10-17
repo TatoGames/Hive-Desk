@@ -83,6 +83,8 @@ export interface Reassignment {
   domain: string
   from: string
   to: string
+  fromKey: string
+  toKey: string
   gain: number
   text: string
 }
@@ -109,6 +111,8 @@ export function recommendReassignments(
         domain: c.domain,
         from: c.modelLabel,
         to: best.modelLabel,
+        fromKey: c.modelKey,
+        toKey: best.modelKey,
         gain: best.score - mine.score,
         text: `${jobLabel(c.domain)} 분야: ${c.modelLabel}(${mine.score}점) 대신 ${best.modelLabel}(${best.score}점)이 더 잘했어요.`
       })

@@ -74,6 +74,11 @@ const api = {
   },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
+  openAgenda: (title: string, body: string): Promise<void> => ipcRenderer.invoke('agenda:open', title, body),
+  decideAgenda: (id: string, choice: number, note?: string): Promise<void> =>
+    ipcRenderer.invoke('agenda:decide', id, choice, note),
+  applyReassignment: (domain: string, from: string, to: string): Promise<number> =>
+    ipcRenderer.invoke('reassign:apply', domain, from, to),
   decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
     ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>

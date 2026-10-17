@@ -1,3 +1,4 @@
+import { parseEscalation } from '../shared/committee'
 import {
   FLAG_LABEL,
   LIMITS,
@@ -32,6 +33,8 @@ export interface DelegationCtx {
   catalog: () => ModelEntry[]
   changed: () => void
   notify: (title: string, body: string) => void
+  /** A manager cannot tell which direction to take: hand the question to the CEO committee. */
+  escalate?: (task: Task, question: string) => void
   /** Credit/charge the model that did a task (cross review result). */
   aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
 }
@@ -241,6 +244,7 @@ export class Delegation {
       '## Your role in this task: MANAGER (planner)',
       'You are a manager. Your job is to plan, not to do the work — unless it is small.',
       'Step 1 — Requirement check. Check the request for: goal, scope, completion criteria, constraints, deliverable format, priority.',
+      'If the direction itself is unclear (two or more very different ways, and the choice matters), ask the CEO committee with [[ESCALATE: the question and the options]] and stop.',
       'If something essential is missing, do NOT plan. Ask the board exactly what you need with [[NEED: your specific questions]] and stop.',
       'Step 2 — Size. If the job is small enough that you can do it yourself, answer only [[SELF: why it is small]] (no sub-tasks).',
       'Step 3 — Otherwise write a distribution plan, one line per sub-task, in this exact form:',
@@ -342,7 +346,9 @@ export class Delegation {
       return
     }
     if (t.status !== 'done') return
-    if (t.kind === 'plan') this.afterPlan(t)
+    const q = t.kind === 'plan' ? parseEscalation(t.result ?? '') : null
+    if (q && this.c.escalate) this.c.escalate(t, q)
+    else if (t.kind === 'plan') this.afterPlan(t)
     else if (t.kind === 'review') this.afterReview(t)
     else if (t.kind === 'work') this.afterWork(t)
     else if (t.kind === 'integrate') this.afterIntegrate(t)

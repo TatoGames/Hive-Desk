@@ -477,7 +477,38 @@ export interface Usage {
 /** When a finished run waits for a human check before it counts as done. */
 export type HumanReview = 'off' | 'changes' | 'always'
 
+export type AgendaPhase = 'proposals' | 'critique' | 'votes' | 'board' | 'decided' | 'failed'
+
+/** A question the CEO committee works through before the board decides. */
+export interface Agenda {
+  id: string
+  title: string
+  body: string
+  createdAt: string
+  createdBy: string
+  phase: AgendaPhase
+  /** Roster ids of the committee (agents on CEO seats), frozen when the agenda opens. */
+  members: string[]
+  /** Hidden tasks of the phase that is running. */
+  taskIds: string[]
+  proposals: { agentId: string; text: string }[]
+  critiques: { agentId: string; text: string }[]
+  votes: { agentId: string; choice: number; reason: string }[]
+  recommendation?: {
+    /** 1-based proposal number, 0 when there is no clear winner. */
+    choice: number
+    tally: number[]
+    minority: { agentId: string; choice: number; reason: string }[]
+  }
+  decision?: { at: string; by: string; choice: number; note: string }
+  /** The task that was waiting for this decision ("direction unclear"). */
+  fromTaskId?: string
+  note?: string
+}
+
 export interface AppConfig {
+  /** Desktop notifications for approvals, reports and failures (default on). */
+  notifications?: boolean
   /** `changes` (default): check results that changed files. */
   humanReview: HumanReview
   /** Attachments above this size (MB) stay on this machine instead of syncing to the team. */
@@ -589,6 +620,7 @@ export interface CompanySnapshot {
   availability: Record<string, ModelAvailability>
   aptitude: AptitudeRecord[]
   finals: FinalReport[]
+  agendas: Agenda[]
 }
 
 export interface ReportNode {

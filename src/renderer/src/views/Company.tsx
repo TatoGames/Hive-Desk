@@ -628,8 +628,15 @@ function Perf({ snap }: { snap: Snapshot }): JSX.Element {
         <div className="recs">
           <b>재배치 추천</b>
           {recs.map((r, i) => (
-            <div key={i} className="small">
-              {r.text}
+            <div key={i} className="small row">
+              <span>{r.text}</span>
+              <button
+                className="sm"
+                onClick={() => void window.hive.applyReassignment(r.domain, r.fromKey, r.toKey)}
+                title="이 컴퓨터의 해당 분야 에이전트 모델을 바꿔요"
+              >
+                적용
+              </button>
             </div>
           ))}
         </div>
