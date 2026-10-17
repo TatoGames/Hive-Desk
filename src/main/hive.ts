@@ -13,6 +13,7 @@ import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { AptitudeRecord } from '../shared/aptitude'
 import type { ModelAgent } from '../shared/connections'
+import type { ExternalItem } from '../shared/collab'
 import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
@@ -37,7 +38,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda', 'external']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -573,6 +574,31 @@ export class Hive {
   saveAgenda(a: Agenda): void {
     writeJson(this.p('agenda', a.id + '.json'), a)
   }
+  // ---- external box: copies that came from other companies (with their source) ----
+  listExternal(): ExternalItem[] {
+    return listJson<ExternalItem>(this.p('external')).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+  }
+  addExternal(i: Omit<ExternalItem, 'id' | 'receivedAt'>): ExternalItem {
+    const item: ExternalItem = { ...i, id: newId(), receivedAt: now() }
+    writeJson(this.p('external', item.id + '.json'), item)
+    return item
+  }
+  /** Mark the copies of a channel as recalled: kept for the record, never given to an AI again. */
+  recallExternal(channelId: string): number {
+    let n = 0
+    for (const i of this.listExternal()) {
+      if (i.channelId === channelId && !i.recalledAt) {
+        writeJson(this.p('external', i.id + '.json'), { ...i, recalledAt: now() })
+        n++
+      }
+    }
+    return n
+  }
+  /** What an AI may see: copies not recalled. */
+  externalForPrompt(): ExternalItem[] {
+    return this.listExternal().filter((i) => !i.recalledAt && i.kind !== 'request')
+  }
+
   listAgendas(): Agenda[] {
     return listJson<Agenda>(this.p('agenda')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }

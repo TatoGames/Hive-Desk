@@ -27,6 +27,9 @@ import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Ru
 import { checkCli } from './setup'
 import { Committee } from './committee'
 import { Delegation } from './delegation'
+import { Collaboration } from './collaboration'
+import { CollabStore } from './collab'
+import type { ChannelInput } from './collaboration'
 import { newId } from './hive'
 import { STAGE_DIR } from './staging'
 import { attachmentAdvice } from './attachAdvice'
@@ -116,6 +119,7 @@ export class Engine {
   private timer: NodeJS.Timeout | null = null
   readonly delegation: Delegation
   readonly committee: Committee
+  collab!: Collaboration
   private syncTimer: NodeJS.Timeout | null = null
   private ticking = false
 
@@ -174,6 +178,24 @@ export class Engine {
       this.config = { ...this.config, activeCompanyId: this.primaryId }
       saveConfig(this.configFile, this.config)
     }
+    this.initCollab()
+  }
+
+  private initCollab(): void {
+    const self = this
+    this.collab = new Collaboration({
+      store: new CollabStore(join(this.config.workspace, 'collab')),
+      hive: (id) => self.hives.get(id),
+      companyIds: () => [...self.hives.keys()],
+      name: (id) => self.companyName(id),
+      createExternalTask: (h, title, body, external) =>
+        self.inCompany(h, () => {
+          const t = self.createTask({ title, description: body, delegate: true })
+          return h.updateTask(t.id, { external })
+        }),
+      notify: (title, body) => self.notify(title, body),
+      changed: () => self.changed()
+    })
   }
 
   /** Run `fn` for one company, whatever is on screen. */
@@ -328,6 +350,11 @@ export class Engine {
   }
 
   private changed(): void {
+    try {
+      this.collab?.settle()
+    } catch {
+      /* a failed hand-back must not break the screen */
+    }
     this.notifyAttention()
     this.emit({ type: 'changed' })
   }
@@ -340,6 +367,8 @@ export class Engine {
       // only this company's employees are shown: other companies' agents are not visible here
       config: { ...this.config, agents: local },
       companies: this.companySummaries(),
+      collab: this.collab.view(),
+      external: this.hive.listExternal(),
       connections: this.connectionViews(),
       tasks: this.hive.listTasks(),
       approvals: this.hive.listApprovals(),
@@ -860,6 +889,8 @@ export class Engine {
       if (!ac.signal.aborted) {
         this.delegation.onRunFinished(id)
         this.committee.onRunFinished(id)
+        const done = this.hive.getTask(id)
+        if (done?.status === 'done') this.collab.onTaskDone(this.hive.id, done)
       }
       return outcome
     } finally {

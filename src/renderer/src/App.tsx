@@ -4,6 +4,7 @@ import Board from './views/Board'
 import Agents from './views/Agents'
 import Connections from './views/Connections'
 import Boardroom from './views/Boardroom'
+import Collab from './views/Collab'
 import Committee from './views/Committee'
 import Performance from './views/Performance'
 import Reports from './views/Reports'
@@ -54,7 +55,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'boardroom' | 'connections' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'boardroom' | 'collab' | 'connections' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -87,6 +88,7 @@ export default function App(): JSX.Element {
     { id: 'reports', label: '보고서함', badge: snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review').length },
     { id: 'committee', label: 'CEO 위원회', badge: snap.company.agendas.filter((a) => a.phase === 'board').length },
     { id: 'performance', label: '성과' },
+    { id: 'collab', label: '협업', badge: snap.collab.requests.filter((r) => r.status === 'pending').length },
     { id: 'connections', label: 'AI 연결' },
     { id: 'agents', label: '에이전트' },
     { id: 'inbox', label: '메시지 · 메모리', badge: unread },
@@ -153,6 +155,7 @@ export default function App(): JSX.Element {
           </div>
         )}
         {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
+        {current === 'collab' && <Collab snap={snap} />}
         {current === 'connections' && <Connections snap={snap} />}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
         {current === 'company' && <Company snap={snap} />}

@@ -113,6 +113,13 @@ const api = {
   verifyModel: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('model:verify', id),
   saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
   deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
+  collabCreate: (input: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('collab:create', input),
+  collabClose: (id: string): Promise<number> => ipcRenderer.invoke('collab:close', id),
+  collabShareable: (companyId: string): Promise<import('../shared/collab').ShareableRef[]> => ipcRenderer.invoke('collab:shareable', companyId),
+  collabSendMaterial: (channelId: string, sender: string, ref: string): Promise<void> => ipcRenderer.invoke('collab:send-material', channelId, sender, ref),
+  collabSendMessage: (channelId: string, sender: string, text: string): Promise<void> => ipcRenderer.invoke('collab:send-message', channelId, sender, text),
+  collabRequestWork: (channelId: string, sender: string, title: string, body: string): Promise<void> => ipcRenderer.invoke('collab:request-work', channelId, sender, title, body),
+  collabDecide: (id: string, decision: 'approved' | 'rejected', scope?: Record<string, unknown>): Promise<void> => ipcRenderer.invoke('collab:decide', id, decision, scope),
   createCompany: (name: string, templateId?: string, place?: boolean): Promise<CompanySummary> =>
     ipcRenderer.invoke('company:create', name, templateId, place),
   switchCompany: (id: string): Promise<void> => ipcRenderer.invoke('company:switch', id),

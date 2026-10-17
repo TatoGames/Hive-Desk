@@ -145,6 +145,18 @@ function registerIpc(): void {
   ipcMain.handle('company:create', (_e, name: string, templateId?: string, place?: boolean) => engine.createCompany(name, templateId, place))
   ipcMain.handle('company:switch', (_e, id: string) => engine.switchCompany(id))
   ipcMain.handle('company:rename', (_e, id: string, name: string) => engine.renameCompany(id, name))
+  const me = (): string => engine.snapshot().config.memberName || '나'
+  ipcMain.handle('collab:create', (_e, input) => engine.collab.createChannel(input, me()))
+  ipcMain.handle('collab:close', (_e, id: string) => engine.collab.closeChannel(id, me()))
+  ipcMain.handle('collab:shareable', (_e, companyId: string) => engine.collab.listShareable(companyId))
+  ipcMain.handle('collab:send-material', (_e, channelId: string, sender: string, ref: string) => engine.collab.sendMaterial(channelId, sender, { ref }))
+  ipcMain.handle('collab:send-message', (_e, channelId: string, sender: string, text: string) => engine.collab.sendMessage(channelId, sender, text))
+  ipcMain.handle('collab:request-work', (_e, channelId: string, sender: string, title: string, body: string) => {
+    engine.collab.requestWork(channelId, sender, title, body)
+  })
+  ipcMain.handle('collab:decide', (_e, id: string, decision: 'approved' | 'rejected', scope) => {
+    engine.collab.decideRequest(id, decision, me(), scope)
+  })
   ipcMain.handle('conn:verify-all', (_e, adapter: AdapterId) => engine.verifyAllModels(adapter))
   ipcMain.handle('conn:hire', (_e, input) => engine.hire(input))
   ipcMain.handle('conn:hire-seat', (_e, seatId: string, modelAgentId: string) => engine.hireToSeat(seatId, modelAgentId))

@@ -171,6 +171,8 @@ export interface Task {
   /** Let the agent read secret-looking files (.env, keys). Off by default. */
   allowSecrets?: boolean
   projectId?: string
+  /** This task is a work request from another company (v3 stage 5-4). */
+  external?: { channelId: string; fromCompanyId: string; fromCompanyName: string; returned?: boolean }
   // ---- delegation (stage 3) ----
   /** What this task is in the delegation flow. Missing = a plain task. */
   kind?: TaskKind
@@ -567,6 +569,8 @@ export interface SyncResult {
 export interface Snapshot {
   config: AppConfig
   companies: CompanySummary[]
+  collab: import('./collab').CollabView
+  external: import('./collab').ExternalItem[]
   connections: import('./connections').ConnectionView[]
   tasks: Task[]
   approvals: Approval[]

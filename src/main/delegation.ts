@@ -244,6 +244,7 @@ export class Delegation {
       '## Your role in this task: MANAGER (planner)',
       'You are a manager. Your job is to plan, not to do the work — unless it is small.',
       'Step 1 — Requirement check. Check the request for: goal, scope, completion criteria, constraints, deliverable format, priority.',
+      'If you need help from outside the company (information or work only another company could give), write [[COLLAB: 외부 도움 필요 | what you need | why]]; the board decides who, if anyone, helps. Never guess other companies\' names.',
       'If the direction itself is unclear (two or more very different ways, and the choice matters), ask the CEO committee with [[ESCALATE: the question and the options]] and stop.',
       'If something essential is missing, do NOT plan. Ask the board exactly what you need with [[NEED: your specific questions]] and stop.',
       'Step 2 — Size. If the job is small enough that you can do it yourself, answer only [[SELF: why it is small]] (no sub-tasks).',
