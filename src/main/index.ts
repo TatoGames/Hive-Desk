@@ -1,10 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
-import type { Agent, AppConfig, EngineEvent, Task } from '../shared/types'
+import type { AdapterId, Agent, AppConfig, EngineEvent, Task } from '../shared/types'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
 import { fixPath } from './shellPath'
+import { checkCli, installCli, installCommand, openLogin } from './setup'
 
 let win: BrowserWindow | null = null
 let engine: Engine
@@ -59,9 +60,20 @@ function registerIpc(): void {
   )
   ipcMain.handle('memory:add', (_e, text: string) => engine.addMemory(text))
   ipcMain.handle('memory:delete', (_e, id: string) => engine.deleteMemory(id))
-  ipcMain.handle('adapters:detect', () => {
+  ipcMain.handle('adapters:detect', async () => {
     fixPath() // pick up CLIs installed while the app was open
-    return detectAll(cleanEnv(process.env, false))
+    const infos = await detectAll(cleanEnv(process.env, false))
+    return infos.map((i) => ({ ...i, canInstall: !!installCommand(i.id) }))
+  })
+  ipcMain.handle('setup:install', async (_e, id: AdapterId) => {
+    const r = await installCli(id, (chunk) => emit({ type: 'setup', adapter: id, chunk }))
+    fixPath()
+    return r
+  })
+  ipcMain.handle('setup:login', (_e, id: AdapterId) => openLogin(id))
+  ipcMain.handle('setup:check', (_e, id: AdapterId) => {
+    fixPath()
+    return checkCli(id)
   })
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
   ipcMain.handle('share:sync', () => engine.sync())

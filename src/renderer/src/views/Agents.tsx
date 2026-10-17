@@ -20,6 +20,14 @@ const DEFAULT_ARGS: Record<AdapterId, string> = {
 
 type Draft = Partial<Agent> & { name: string; adapter: AdapterId }
 
+const SHORT_NAME: Record<AdapterId, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  gemini: 'Gemini',
+  agy: 'Antigravity',
+  custom: '에이전트'
+}
+
 const EMPTY: Draft = {
   name: '',
   adapter: 'claude',
@@ -67,32 +75,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
         </button>
       </header>
 
-      <section className="panel">
-        <div className="panel-head">
-          <h2>이 PC에 설치된 AI CLI</h2>
-          <button className="sm ghost" onClick={() => void detect()}>
-            다시 확인
-          </button>
-        </div>
-        <p className="muted small">
-          HiveDesk는 API 키를 쓰지 않아요. 각자 설치한 CLI에 각자 계정(무료·구독)으로 로그인해 두면, 그 CLI를
-          대신 실행해요.
-        </p>
-        <div className="cli-grid">
-          {!detected && <div className="muted">확인 중…</div>}
-          {detected?.map((d) => (
-            <div key={d.id} className={'cli ' + (d.found ? 'ok' : 'no')}>
-              <div className="cli-name">
-                {d.found ? '●' : '○'} {d.label}
-              </div>
-              <div className="small">{d.found ? d.version || '설치됨' : '설치 안 됨'}</div>
-              {!d.found && d.install && <code className="small">{d.install}</code>}
-              <div className="small muted">{d.login}</div>
-              {d.note && <div className="small note">{d.note}</div>}
-            </div>
-          ))}
-        </div>
-      </section>
+      <CliSetup detected={detected} agents={snap.config.agents} onRedetect={detect} />
 
       <section className="panel">
         <h2>내 에이전트</h2>
@@ -294,5 +277,109 @@ function AgentDialog({ draft, onClose }: { draft: Draft; onClose: () => void }):
         </div>
       </div>
     </div>
+  )
+}
+
+type CardState = { busy?: 'install' | 'check' | 'login'; log?: string; msg?: string; ok?: boolean; needsLogin?: boolean }
+
+/** ① 설치 → ② 로그인 → ③ 연결 확인, all from inside the app. */
+function CliSetup({
+  detected,
+  agents,
+  onRedetect
+}: {
+  detected: AdapterInfo[] | null
+  agents: Agent[]
+  onRedetect: () => Promise<void>
+}): JSX.Element {
+  const [st, setSt] = useState<Partial<Record<AdapterId, CardState>>>({})
+  const patch = (id: AdapterId, p: CardState): void =>
+    setSt((s) => ({ ...s, [id]: { ...s[id], ...p } }))
+
+  useEffect(
+    () =>
+      window.hive.onEvent((e) => {
+        if (e.type !== 'setup' || !e.adapter) return
+        const id = e.adapter
+        setSt((s) => ({ ...s, [id]: { ...s[id], log: ((s[id]?.log ?? '') + (e.chunk ?? '')).slice(-4000) } }))
+      }),
+    []
+  )
+
+  const install = async (id: AdapterId): Promise<void> => {
+    patch(id, { busy: 'install', log: '', msg: '설치하는 중이에요. 1~2분 걸릴 수 있어요…', ok: undefined })
+    const r = await window.hive.installCli(id)
+    patch(id, { busy: undefined, msg: r.ok ? '설치했어요. 이제 "로그인"을 눌러 주세요.' : r.message, ok: r.ok ? undefined : false })
+    await onRedetect()
+  }
+
+  const login = async (id: AdapterId): Promise<void> => {
+    const r = await window.hive.openLogin(id)
+    patch(id, { msg: r.message, ok: r.ok ? undefined : false })
+  }
+
+  const check = async (id: AdapterId): Promise<void> => {
+    patch(id, { busy: 'check', msg: '확인하는 중이에요…', ok: undefined })
+    const r = await window.hive.checkCli(id)
+    let msg = r.message
+    if (r.ok && !agents.some((a) => a.adapter === id)) {
+      await window.hive.saveAgent({ name: SHORT_NAME[id], adapter: id, role: '' })
+      msg = `연결됐어요! "${SHORT_NAME[id]}" 에이전트를 만들었어요. 태스크 보드에서 바로 일을 맡길 수 있어요.`
+    }
+    patch(id, { busy: undefined, ok: r.ok, needsLogin: r.needsLogin, msg })
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2>AI 연결하기</h2>
+        <button className="sm ghost" onClick={() => void onRedetect()}>
+          다시 확인
+        </button>
+      </div>
+      <p className="muted small">
+        ① 설치 → ② 로그인 → ③ 연결 확인. 연결되면 에이전트가 자동으로 만들어져요. API 키는 필요 없어요. 각자
+        계정(무료·구독)으로 로그인해요.
+      </p>
+      <div className="cli-grid">
+        {!detected && <div className="muted">확인 중…</div>}
+        {detected?.map((d) => {
+          const s = st[d.id] ?? {}
+          const connected = s.ok === true || (agents.some((a) => a.adapter === d.id) && s.ok !== false)
+          return (
+            <div key={d.id} className={'cli ' + (connected ? 'ok' : d.found ? 'half' : 'no')}>
+              <div className="cli-name">
+                {d.found ? '●' : '○'} {d.label}
+              </div>
+              <div className="small muted">
+                {connected ? '연결됨' : d.found ? `설치됨 ${d.version ?? ''} · 로그인 확인 필요` : '설치 안 됨'}
+              </div>
+              <div className="row">
+                {!d.found && d.canInstall && (
+                  <button className="primary sm" disabled={!!s.busy} onClick={() => void install(d.id)}>
+                    {s.busy === 'install' ? '설치 중…' : '① 설치'}
+                  </button>
+                )}
+                {d.found && (
+                  <>
+                    <button className={'sm' + (s.needsLogin ? ' primary' : '')} disabled={!!s.busy} onClick={() => void login(d.id)}>
+                      ② 로그인
+                    </button>
+                    <button className={'sm' + (!connected && !s.needsLogin ? ' primary' : '')} disabled={!!s.busy} onClick={() => void check(d.id)}>
+                      {s.busy === 'check' ? '확인 중…' : '③ 연결 확인'}
+                    </button>
+                  </>
+                )}
+              </div>
+              {!d.found && !d.canInstall && d.install && <code className="small">{d.install}</code>}
+              {s.msg && <div className={'small ' + (s.ok === false ? 'err-text' : s.ok ? 'ok-inline' : '')}>{s.msg}</div>}
+              {s.busy === 'install' && s.log && <pre className="out small-log">{s.log}</pre>}
+              {s.ok === false && s.log && !s.busy && <pre className="out small-log">{s.log}</pre>}
+              {d.note && <div className="small note">{d.note}</div>}
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }

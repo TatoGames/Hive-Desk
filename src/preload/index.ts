@@ -6,6 +6,7 @@ import type {
   EngineEvent,
   Snapshot,
   SyncResult,
+  SetupCheck,
   Task
 } from '../shared/types'
 
@@ -34,6 +35,11 @@ const api = {
   addMemory: (text: string): Promise<void> => ipcRenderer.invoke('memory:add', text),
   deleteMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
   detectAdapters: (): Promise<AdapterInfo[]> => ipcRenderer.invoke('adapters:detect'),
+  installCli: (id: Agent['adapter']): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('setup:install', id),
+  openLogin: (id: Agent['adapter']): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('setup:login', id),
+  checkCli: (id: Agent['adapter']): Promise<SetupCheck> => ipcRenderer.invoke('setup:check', id),
   enableSharing: (url: string): Promise<SyncResult> => ipcRenderer.invoke('share:enable', url),
   sync: (): Promise<SyncResult> => ipcRenderer.invoke('share:sync'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:folder'),
