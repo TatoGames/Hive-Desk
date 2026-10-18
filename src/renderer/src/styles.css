@@ -351,3 +351,11 @@ textarea.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consola
 .ws-bar i { display: block; height: 100%; background: var(--accent); }
 .side-detail h1 { font-size: 17px; }
 .side-detail .row.between { flex-wrap: wrap; }
+/* v5.1 automatic checks in the task detail */
+.checks { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.check { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--panel); }
+.check summary { cursor: pointer; }
+.check.ok summary b { color: #16a34a; }
+.check.bad { border-color: #ef4444; }
+.check.bad summary b { color: #ef4444; }
+.check.skip { opacity: 0.7; }

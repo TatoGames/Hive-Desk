@@ -257,6 +257,7 @@ export default function TaskDetail({
         <UrlAttach task={task} />
         {snap && <TaskExternal snap={snap} task={task} />}
         <HandoffPanel snap={snap} task={task} />
+        <ChecksPanel task={task} />
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>
@@ -470,3 +471,34 @@ function RunBody({ record }: { record: RunRecord }): JSX.Element {
     </div>
   )
 }
+
+/** v5.1: what the app checked by itself after the work (tests, types, lint, the app on screen). */
+function ChecksPanel({ task }: { task: Task }): JSX.Element | null {
+  const c = task.checks
+  if (!c || !c.items.length) return null
+  return (
+    <>
+      <h2 className="sec">자동 검사 {c.ok ? '✅' : '❌'}</h2>
+      <div className="checks">
+        {c.items.map((i, k) => (
+          <details key={k} className={'check ' + (i.skipped ? 'skip' : i.ok ? 'ok' : 'bad')}>
+            <summary>
+              {i.skipped ? '⏭' : i.ok ? '✓' : '✗'} <b>{CHECK_LABEL[i.name] ?? i.name}</b> <span className="muted small">{i.cmd}</span>
+              {!i.skipped && <span className="muted small"> · {Math.max(1, Math.round(i.ms / 1000))}초</span>}
+              {i.skipped && <span className="muted small"> · {i.skipped}</span>}
+            </summary>
+            {i.tail.trim() && <pre className="out small-log">{i.tail.trim()}</pre>}
+            {i.screenshot && (
+              <button className="sm" onClick={() => void window.hive.openPath(i.screenshot!)}>
+                찍은 화면 보기
+              </button>
+            )}
+          </details>
+        ))}
+      </div>
+      {task.reviewState?.note && <p className="muted small">{task.reviewState.note}</p>}
+    </>
+  )
+}
+
+const CHECK_LABEL: Record<string, string> = { test: '테스트', typecheck: '타입 검사', lint: '린트', build: '빌드', app: '앱 실행', node: '패키지' }

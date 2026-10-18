@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { AutoApprove, HandoffSettings, HumanReview, Snapshot, SyncResult } from '@shared/types'
-import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF } from '@shared/types'
+import type { AutoApprove, HandoffSettings, HumanReview, ReviewSettings, Snapshot, SyncResult } from '@shared/types'
+import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF, DEFAULT_REVIEW } from '@shared/types'
 
 export default function Settings({
   snap,
@@ -23,6 +23,7 @@ export default function Settings({
   const [worktrees, setWorktrees] = useState(!!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
   const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
+  const [rv, setRv] = useState<ReviewSettings>({ ...DEFAULT_REVIEW, ...(c.review ?? {}) })
   const [samples, setSamples] = useState<{ at: string; adapter: string; text: string }[]>([])
   useEffect(() => {
     if (!firstRun) void window.hive.limitSamples().then(setSamples)
@@ -52,6 +53,7 @@ export default function Settings({
       liveInstructions: liveIn,
       autoApprove: auto,
       handoff: hand,
+      review: rv,
       staleBundleHours: Math.max(0, stale),
       approvalTimeoutHours: Math.max(0, timeout),
       discordWebhook: discord.trim() || undefined,
@@ -177,6 +179,33 @@ export default function Settings({
                 ))}
             </details>
           )}
+        </fieldset>
+        <fieldset className="full">
+          <legend>자동 검사와 AI 검토 — 앱이 먼저 공짜로 확인하고, AI 검토는 필요할 때만 해요</legend>
+          <label className="toggle">
+            <input type="checkbox" checked={rv.checks} onChange={(e) => setRv({ ...rv, checks: e.target.checked })} />
+            작업이 끝나면 프로젝트의 테스트·타입 검사·린트를 앱이 직접 돌려요 (실패하면 AI 검토 없이 바로 담당자에게 돌려보내요)
+          </label>
+          <label className="toggle">
+            <input type="checkbox" checked={rv.appCheck} onChange={(e) => setRv({ ...rv, appCheck: e.target.checked })} />
+            Electron 앱이면 직접 띄워서 오류를 보고 화면을 찍어요 (찍은 화면은 검토자에게 보여 줘요)
+          </label>
+          <label>
+            AI 검토
+            <select value={rv.policy} onChange={(e) => setRv({ ...rv, policy: e.target.value as ReviewSettings['policy'] })}>
+              <option value="risk">필요할 때만 — 작고 안전한 변경이 검사를 통과하면 생략 (추천)</option>
+              <option value="always">언제나 — 모든 변경을 다른 모델이 검토</option>
+            </select>
+          </label>
+          <label>
+            같은 담당자에게 돌려보내는 횟수 (넘으면 윗 직책에게 올려요)
+            <select value={rv.maxRounds} onChange={(e) => setRv({ ...rv, maxRounds: Number(e.target.value) })}>
+              <option value={1}>1번</option>
+              <option value={2}>2번</option>
+              <option value={3}>3번</option>
+            </select>
+          </label>
+          <p className="muted small">민감한 파일(로그인·토큰·결제·설정·배포), 많이 지우는 변경, 큰 변경은 "필요할 때만"이어도 언제나 검토해요.</p>
         </fieldset>
         <label>
           손대지 않은 묶음은 이 시간(시간) 뒤 다시 시작하기 전에 물어요 (0 = 안 물어봄)

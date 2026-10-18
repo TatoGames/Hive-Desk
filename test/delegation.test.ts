@@ -65,7 +65,7 @@ function scripted(s: Script): Runner {
 /** A small company: COO — 개발본부장 — 서버팀(팀장, 개발자 ×2, 리뷰어), 인프라팀(팀장). */
 function company(s: Script) {
   const eng = new Engine(join(dir, 'config.json'), () => {}, scripted(s), dir)
-  eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), humanReview: 'changes' })
+  eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), humanReview: 'changes', review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
   eng.watchMs = 20
   eng.applyTemplate('blank', '테스트 회사', false)
   const exec = eng.saveUnit({ name: '경영진', kind: '경영' })
@@ -183,7 +183,7 @@ describe('entry: who receives the job', () => {
 
   it('without a COO, an unassigned job is refused and nothing is left behind', () => {
     const eng = new Engine(join(dir, 'c2.json'), () => {}, scripted(makeScript()), dir)
-    eng.saveSettings({ memberName: 'a', workspace: join(dir, 'ws2') })
+    eng.saveSettings({ memberName: 'a', workspace: join(dir, 'ws2'), review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
     eng.applyTemplate('blank', 'x', false)
     expect(() => eng.createTask({ title: 'X', delegate: true })).toThrow('총괄 본부장')
     expect(eng.hive.listTasks()).toEqual([])
@@ -574,7 +574,7 @@ describe('cross review', () => {
   it('with nobody on another model, the review is skipped (and the task still finishes)', async () => {
     const s = makeScript()
     const eng = new Engine(join(dir, 'c3.json'), () => {}, scripted(s), dir)
-    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws3') })
+    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws3'), review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
     eng.watchMs = 20
     const w = join(dir, 'solo')
     mkdirSync(w)

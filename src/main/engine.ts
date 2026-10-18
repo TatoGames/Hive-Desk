@@ -84,11 +84,13 @@ import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './wo
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
-import { DEFAULT_HANDOFF } from '../shared/types'
+import { DEFAULT_HANDOFF, DEFAULT_REVIEW, type ReviewSettings } from '../shared/types'
 import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
+import { runChecks } from './checks'
+import { checksLine } from '../shared/review'
 import { domainOf, type ExtAccess, type ExtConnection, type ExtKind } from '../shared/external'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, movedPath, readMeta, recordFolderMove, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
@@ -191,7 +193,8 @@ export class Engine {
       cancelTree: (rootId) => void self.cancelTask(rootId, { scope: 'tree' }),
       aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d),
       quickEscalate: (t, why) => self.quick.escalate(t, why),
-      capabilities: () => self.external.capabilities(self.github.status())
+      capabilities: () => self.external.capabilities(self.github.status()),
+      reviewSettings: () => self.reviewSettings()
     })
     this.external = new External({
       get hive(): Hive {
@@ -1049,6 +1052,36 @@ export class Engine {
     next.grant()
   }
 
+  reviewSettings(): ReviewSettings {
+    return { ...DEFAULT_REVIEW, ...(this.config.review ?? {}) }
+  }
+
+  /** v5.1: run the project's own checks (and start an Electron app) on what a work run changed. */
+  private async checkWork(agent: Agent, id: string): Promise<void> {
+    const s = this.reviewSettings()
+    const runs = this.hive.listSharedRuns(id)
+    const run = runs[runs.length - 1]
+    // after a send-back by the checks they run again even when nothing changed (the failure must not slip through)
+    const recheck = this.hive.getTask(id)?.reviewState?.by === 'checks'
+    if (!s.checks || !run || (!run.files.length && !recheck)) {
+      if (this.hive.getTask(id)?.checks) this.hive.updateTask(id, { checks: undefined })
+      return
+    }
+    const dir = this.cwdFor(agent, id)
+    this.hive.addEvent(id, 'status', 'system', '자동 검사를 돌려요 (테스트·타입 검사 등 — AI를 쓰지 않아요).')
+    this.changed()
+    const checks = await runChecks(dir, {
+      app: s.appCheck,
+      shotDir: join(this.hive.root, '.local', 'checks'),
+      shotName: `${id}-${Date.now()}`,
+      env: cleanEnv(process.env, this.config.stripApiKeys)
+    }).catch((e) => ({ at: new Date().toISOString(), ok: true, items: [{ name: 'checks', cmd: '', ok: true, ms: 0, tail: '', skipped: (e as Error).message }] }))
+    if (!this.hive.getTask(id)) return
+    this.hive.updateTask(id, { checks })
+    const line = checksLine(checks)
+    if (line) this.hive.addEvent(id, 'status', 'system', line)
+  }
+
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
@@ -1119,6 +1152,8 @@ export class Engine {
       if (finished?.kind === 'work' && finished.worktree && !finished.worktree.merged) await commitWorktree(finished.worktree, finished.title).catch(() => false)
       if (finished?.github?.branch) await this.github.commit(id)
       if (finished?.status === 'done' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
+      // v5.1: the app checks the work itself before any AI review (still inside the folder lock)
+      if (!ac.signal.aborted && finished?.kind === 'work' && finished.status === 'done') await this.checkWork(agent, id)
       // delegation: what a plan / review / work run produced decides what happens next
       if (!ac.signal.aborted) {
         this.delegation.onRunFinished(id)
