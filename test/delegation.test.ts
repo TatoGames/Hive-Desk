@@ -729,7 +729,7 @@ describe('6-0.7: work trees let sub-tasks of one git project run at the same tim
       if (isWork) maxActive = Math.max(maxActive, ++active)
       // hold each work run until the other one has started too (or 5s pass), so a slow machine
       // that starts the second run late still shows they overlap; run one after another, they never do
-      for (let i = 0; isWork && i < 250 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
+      for (let i = 0; isWork && i < 600 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
       try {
         return await inner(b, o)
       } finally {

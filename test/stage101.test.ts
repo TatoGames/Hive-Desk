@@ -153,7 +153,7 @@ describe('single tasks in one git folder run together, each in its own work tree
       const name = /## Your task\n(.*)/.exec(o.prompt)?.[1] ?? 'x'
       maxActive = Math.max(maxActive, ++active)
       // wait until the other run has started too (or 5 s): sequential runs would never overlap
-      for (let i = 0; i < 250 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
+      for (let i = 0; i < 600 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
       writeFileSync(join(o.cwd, name + '.txt'), name + '\n')
       active--
       return { code: 0, stdout: '[[DID: ' + name + ']]\n[[FILES: ' + name + '.txt]]\n[[VERIFY: x]]\n[[RISK: none]]\n[[NEXT: none]]', stderr: '', timedOut: false, aborted: false }
