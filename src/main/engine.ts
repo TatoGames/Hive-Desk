@@ -1472,6 +1472,7 @@ export class Engine {
     return runTask(agent, id, {
       hive: this.hive,
       stripApiKeys: this.config.stripApiKeys,
+      projectSnapshot: this.config.projectSnapshot !== false,
       runner: this.runner,
       defaultCwd: this.hive.ensureWorkspace(),
       machine: this.config.memberName,

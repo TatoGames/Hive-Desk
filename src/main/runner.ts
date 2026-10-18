@@ -15,6 +15,7 @@ import type {
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
 import { isLongCommand } from '../shared/review'
+import { folderSnapshot, recentWork } from './snapshot'
 
 /** How long an install / build / test command may stay silent before the idle timeout counts again. */
 const LONG_COMMAND_MS = 20 * 60_000
@@ -133,6 +134,8 @@ export function buildPrompt(opts: {
   cwd?: string
   /** The company's own `results` folder: deliverables go here when the person named no folder or file. */
   resultsDir?: string
+  /** v0.6.1: the folder snapshot made by the app (structure, scripts, README, recent work). */
+  snapshot?: string
 }): string {
   const { agent, task, hive } = opts
   const mem = hive.memoryForPrompt(opts.maxMemory ?? 20)
@@ -166,6 +169,9 @@ export function buildPrompt(opts: {
   if (opts.cwd) {
     lines.push('', '## Where to save', `Your work folder is ${opts.cwd} — create and change files there.`)
     if (opts.resultsDir) lines.push(`The human did not name a folder or file for the result, so put every deliverable (documents, exports, generated files) in ${opts.resultsDir} (create it if it does not exist). Do not scatter result files elsewhere.`)
+  }
+  if (opts.snapshot) {
+    lines.push('', '## Project snapshot (made by the app from the work folder — you do not need to explore the whole folder again; open files only where the task needs them)', opts.snapshot)
   }
   const queued = queuedOf(task)
   if (queued.length) {
@@ -250,8 +256,18 @@ export function buildFollowUp(task: Task, hive: Hive, staged?: Map<string, strin
   return lines.join('\n')
 }
 
+/** The folder snapshot plus what was finished lately in the same project. */
+function makeSnapshot(cwd: string, task: Task, hive: Hive): string | undefined {
+  const base = folderSnapshot(cwd)
+  const recent = recentWork(hive.listTasks(), task.projectId, task.id)
+  const text = [base, ...(recent.length ? ['Finished lately in this project:', ...recent] : [])].filter(Boolean).join('\n')
+  return text || undefined
+}
+
 export interface RunnerDeps {
   hive: Hive
+  /** Put the folder snapshot into the prompt (default on). */
+  projectSnapshot?: boolean
   stripApiKeys: boolean
   runner: Runner
   /** Where to run when the agent has no workDir. */
@@ -491,7 +507,8 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
         staged: staged.paths,
         extras: [...(deps.promptExtras?.(task, agent) ?? []), ...(ext?.prompt ?? [])],
         cwd,
-        resultsDir: cwd === deps.defaultCwd ? join(cwd, 'results') : undefined
+        resultsDir: cwd === deps.defaultCwd ? join(cwd, 'results') : undefined,
+        snapshot: deps.projectSnapshot !== false && task.kind !== 'review' ? makeSnapshot(cwd, task, hive) : undefined
       })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
