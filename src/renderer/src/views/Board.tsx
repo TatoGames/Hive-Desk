@@ -1,4 +1,5 @@
 import { Hint } from './Help'
+import { WaitAdvice } from './WaitAdvice'
 import { useState } from 'react'
 import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
@@ -404,7 +405,10 @@ function Card(props: {
         )}
         {props.running && props.progress && <ProgressStrip s={props.progress} />}
         {props.running && !props.progress && props.waitingFor && (
-          <div className="meta small wait">⏳ 폴더 대기: "{props.waitingFor}" 작업이 같은 폴더에서 끝나길 기다려요</div>
+          <div className="meta small wait">
+            ⏳ 폴더 대기: "{props.waitingFor}" 작업이 같은 폴더에서 끝나길 기다려요
+            <WaitAdvice taskId={t.id} />
+          </div>
         )}
         {t.interruptedRun && !props.running && (
           <div className="meta small warn-text">⚠ 중단됨: 일부 변경이 폴더에 남았을 수 있어요</div>

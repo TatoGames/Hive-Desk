@@ -80,7 +80,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
-import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
@@ -1305,6 +1305,35 @@ export class Engine {
     if (!wt) return
     this.hive.updateTask(id, { worktree: wt })
     this.hive.addEvent(id, 'status', 'system', `별도 작업 폴더에서 실행해요 (브랜치 ${wt.branch}). 다른 하위 작업과 동시에 돌 수 있어요.`)
+  }
+
+  /** Why this task cannot run next to others in its folder, and what the person can do about it. */
+  async parallelAdvice(taskId: string): Promise<{ state: 'ok' | 'single' | 'off' | 'none' | 'no-commit' | 'not-top'; dir: string; message: string }> {
+    const t = this.hive.getTask(taskId)
+    const agent = t ? this.localAgent(t.assignee) : undefined
+    if (!t || !agent) return { state: 'ok', dir: '', message: '' }
+    const dir = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
+    if (t.kind !== 'work' || !t.parentId) {
+      return { state: 'single', dir, message: '단독으로 맡긴 업무는 같은 폴더에서 순서대로 돌아요. 조직에 맡긴 큰 일의 하위 업무는 폴더를 나눠 동시에 돌 수 있어요.' }
+    }
+    const g = await gitState(dir)
+    if (g === 'none') return { state: 'none', dir, message: '이 폴더는 git 폴더가 아니라서 업무가 순서대로만 돌아요.' }
+    if (g === 'no-commit') return { state: 'no-commit', dir, message: '이 폴더의 git에 아직 저장된 기록이 없어서 업무가 순서대로만 돌아요.' }
+    if (g === 'not-top') return { state: 'not-top', dir, message: '이 폴더는 git 폴더의 하위 폴더라서 동시에 돌 수 없어요. 프로젝트의 작업 폴더를 git 맨 위 폴더로 지정해 주세요.' }
+    if (!this.config.parallelWorktrees) return { state: 'off', dir, message: '병렬 작업 폴더가 꺼져 있어서 업무가 순서대로만 돌아요.' }
+    return { state: 'ok', dir, message: '' }
+  }
+
+  /** The person agreed: make the folder a git folder if it is not, and turn parallel work on. */
+  async enableParallel(taskId: string): Promise<{ ok: boolean; message: string }> {
+    const a = await this.parallelAdvice(taskId)
+    if (a.state === 'not-top' || a.state === 'single') return { ok: false, message: a.message }
+    if (a.state === 'none' || a.state === 'no-commit') {
+      const r = await initGitFolder(a.dir)
+      if (!r.ok) return r
+    }
+    this.saveSettings({ parallelWorktrees: true })
+    return { ok: true, message: '이제 하위 업무는 폴더를 나눠 동시에 돌아요. 이미 기다리는 업무는 다음 실행부터 적용돼요.' }
   }
 
   /** Before the integration run: merge the sub-tasks' branches. A clash stops it and asks the person. */

@@ -179,6 +179,8 @@ function registerIpc(): void {
   ipcMain.handle('conn:hire-seat', (_e, seatId: string, modelAgentId: string) => engine.hireToSeat(seatId, modelAgentId))
   ipcMain.handle('conn:auto-preview', () => engine.autoConnectPreview())
   ipcMain.handle('conn:auto-apply', (_e, rows) => engine.autoConnectApply(rows))
+  ipcMain.handle('task:parallel-advice', (_e, id: string) => engine.parallelAdvice(id))
+  ipcMain.handle('task:enable-parallel', (_e, id: string) => engine.enableParallel(id))
   ipcMain.handle('team:quick', (_e, templateId: string) => engine.quickTeam(templateId))
   ipcMain.handle('team:list', () => engine.listTeams())
   ipcMain.handle('team:save', (_e, name: string) => engine.saveTeam(name))

@@ -21,7 +21,7 @@ export default function Settings({
   const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [trial, setTrial] = useState(Math.round((c.quickTrialRate ?? 0.1) * 100))
   const [liveIn, setLiveIn] = useState(c.liveInstructions !== false)
-  const [worktrees, setWorktrees] = useState(!!c.parallelWorktrees)
+  const [worktrees, setWorktrees] = useState(firstRun ? true : !!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
   const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
   const [rv, setRv] = useState<ReviewSettings>({ ...DEFAULT_REVIEW, ...(c.review ?? {}) })

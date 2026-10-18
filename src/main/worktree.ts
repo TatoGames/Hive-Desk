@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git } from './gitdiff'
 
@@ -26,6 +26,62 @@ export async function canBranchFrom(dir: string): Promise<boolean> {
     return false
   }
   return (await git(dir, ['rev-parse', '--verify', 'HEAD'])).ok
+}
+
+export type GitState = 'ok' | 'none' | 'not-top' | 'no-commit'
+
+/** What is missing before work trees can be made from `dir`. */
+export async function gitState(dir: string): Promise<GitState> {
+  if (!existsSync(dir)) return 'none'
+  const top = await git(dir, ['rev-parse', '--show-toplevel'])
+  if (!top.ok) return 'none'
+  if (!(await canBranchFrom(dir))) {
+    // a repository, but `dir` is not its top (a sub-folder), or it has no commit yet
+    try {
+      const same = (a: string, b: string): boolean => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
+      if (!same(realpathSync.native(top.out.trim()), realpathSync.native(dir))) return 'not-top'
+    } catch {
+      return 'not-top'
+    }
+    return 'no-commit'
+  }
+  return 'ok'
+}
+
+/** More files than this: the first commit would be huge, so nothing is made (the person should add a .gitignore first). */
+export const INIT_MAX_FILES = 20000
+
+const IGNORE = ['node_modules/', 'dist/', 'out/', 'build/', '.venv/', '__pycache__/', '.DS_Store', WORKTREE_DIR + '/']
+
+/**
+ * Make `dir` a git folder with its current files as the first record (the person agreed to it).
+ * A `.gitignore` is added when there is none, so installed packages are not saved.
+ */
+export async function initGitFolder(dir: string): Promise<{ ok: boolean; message: string }> {
+  const state = await gitState(dir)
+  if (state === 'ok') return { ok: true, message: '이미 git 폴더예요.' }
+  if (state === 'not-top') return { ok: false, message: '이 폴더는 다른 git 폴더 안에 있어요. 그 맨 위 폴더를 작업 폴더로 지정해 주세요.' }
+  const created = state === 'none'
+  if (created) {
+    const r = await git(dir, ['init', '-q', '-b', 'main'])
+    if (!r.ok) return { ok: false, message: 'git을 실행할 수 없어요. git이 설치돼 있는지 확인해 주세요.' }
+  }
+  try {
+    const f = join(dir, '.gitignore')
+    if (!existsSync(f)) writeFileSync(f, IGNORE.join('\n') + '\n')
+  } catch {
+    /* without it the first record may include more files */
+  }
+  const count = await git(dir, ['ls-files', '-o', '--exclude-standard'])
+  const n = count.ok ? count.out.split('\n').filter(Boolean).length : 0
+  if (n > INIT_MAX_FILES) {
+    if (created) rmSync(join(dir, '.git'), { recursive: true, force: true })
+    return { ok: false, message: `파일이 ${n}개나 돼서 첫 기록을 만들지 않았어요. 불필요한 폴더를 .gitignore에 적은 뒤 다시 해 주세요.` }
+  }
+  await git(dir, ['add', '-A'], ENV)
+  const c = await git(dir, ['commit', '-q', '--allow-empty', '-m', 'HiveDesk: 시작 상태'], ENV)
+  if (!c.ok) return { ok: false, message: 'git 기록을 만들지 못했어요: ' + c.err.split('\n')[0] }
+  return { ok: true, message: `git 폴더로 만들었어요 (파일 ${n}개를 첫 기록으로 저장).` }
 }
 
 /** A separate folder + branch for one task, so tasks of the same project can run at the same time. */
