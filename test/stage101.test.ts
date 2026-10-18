@@ -71,10 +71,10 @@ function setup() {
 }
 
 describe('why a task waits for its folder, and the fix', () => {
-  it('single tasks are told how it works; sub-tasks in a plain folder are offered git', async () => {
+  it('single tasks and sub-tasks in a plain folder are offered git', async () => {
     const { eng, a } = setup()
     const solo = eng.createTask({ title: '단독', assignee: a.id })
-    expect((await eng.parallelAdvice(solo.id)).state).toBe('single')
+    expect((await eng.parallelAdvice(solo.id)).state).toBe('none')
     const { sub } = setup2(eng, a)
     expect((await eng.parallelAdvice(sub.id)).state).toBe('none')
     eng.shutdown()
@@ -136,5 +136,68 @@ describe('work trees share the project\'s installed packages (never saved, never
     await removeWorktree(wt)
     expect(existsSync(join(w, 'node_modules', 'dep', 'index.js'))).toBe(true)
     expect(existsSync(wt.path)).toBe(false)
+  })
+})
+
+describe('single tasks in one git folder run together, each in its own work tree, and are merged when done', () => {
+  it('two tasks of two employees overlap; both results end up in the folder; work trees are cleaned up', async () => {
+    const w = join(dir, 'proj')
+    mkdirSync(w, { recursive: true })
+    writeFileSync(join(w, 'README.md'), 'hi\n')
+    expect((await initGitFolder(w)).ok).toBe(true)
+    let active = 0
+    let maxActive = 0
+    const cwds: string[] = []
+    const runner: Runner = async (_b, o) => {
+      cwds.push(o.cwd)
+      const name = /## Your task\n(.*)/.exec(o.prompt)?.[1] ?? 'x'
+      maxActive = Math.max(maxActive, ++active)
+      // wait until the other run has started too (or 5 s): sequential runs would never overlap
+      for (let i = 0; i < 250 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
+      writeFileSync(join(o.cwd, name + '.txt'), name + '\n')
+      active--
+      return { code: 0, stdout: '[[DID: ' + name + ']]\n[[FILES: ' + name + '.txt]]\n[[VERIFY: x]]\n[[RISK: none]]\n[[NEXT: none]]', stderr: '', timedOut: false, aborted: false }
+    }
+    const eng = new Engine(join(dir, 'c.json'), () => {}, runner, dir)
+    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), parallelWorktrees: true, maxConcurrent: 4, humanReview: 'off', review: { checks: true, appCheck: false, policy: 'risk', maxRounds: 2 } })
+    const a = eng.saveAgent({ name: '가', adapter: 'claude', workDir: w, modelRef: { id: 'claude-sonnet-5-5', pin: 'pinned' } })
+    const b = eng.saveAgent({ name: '나', adapter: 'codex', workDir: w, modelRef: { id: 'openai-gpt-6-1-sol', pin: 'pinned' } })
+    const t1 = eng.createTask({ title: '파일하나', assignee: a.id })
+    const t2 = eng.createTask({ title: '파일둘', assignee: b.id })
+    await Promise.all([eng.runTask(t1.id), eng.runTask(t2.id)])
+    const merged = async (): Promise<void> => {
+      for (let i = 0; i < 300; i++) {
+        if ([t1.id, t2.id].every((id) => { const x = eng.hive.getTask(id); return x?.status === 'done' && (!x.worktree || x.worktree.merged) })) return
+        await new Promise((r) => setTimeout(r, 20))
+      }
+    }
+    await merged()
+    expect(maxActive).toBe(2)
+    // one worked in the folder itself, the other apart from it
+    expect(cwds.filter((c) => c.includes('.hive-worktrees')).length).toBe(1)
+    expect(existsSync(join(w, '파일하나.txt'))).toBe(true)
+    expect(existsSync(join(w, '파일둘.txt'))).toBe(true)
+    const apart = [t1, t2].map((t) => eng.hive.getTask(t.id)!).find((t) => t.worktree)!
+    expect(apart.worktree?.merged).toBe(true)
+    expect(eng.hive.listEvents(apart.id).some((e) => e.text.includes('별도 작업 폴더에서 동시에'))).toBe(true)
+    expect(existsSync(apart.worktree!.path)).toBe(false)
+    eng.shutdown()
+  }, 40_000)
+
+  it('a task alone in its folder stays in the folder (no work tree is made)', async () => {
+    const w = join(dir, 'solo')
+    mkdirSync(w, { recursive: true })
+    writeFileSync(join(w, 'a.txt'), 'a')
+    await initGitFolder(w)
+    const cwds: string[] = []
+    const runner: Runner = async (_b, o) => (cwds.push(o.cwd), { code: 0, stdout: '[[DID: ok]]', stderr: '', timedOut: false, aborted: false })
+    const eng = new Engine(join(dir, 'c.json'), () => {}, runner, dir)
+    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), parallelWorktrees: true, humanReview: 'off' })
+    const a = eng.saveAgent({ name: '가', adapter: 'claude', workDir: w, modelRef: { id: 'claude-sonnet-5-5', pin: 'pinned' } })
+    const t = eng.createTask({ title: '혼자', assignee: a.id })
+    await eng.runTask(t.id)
+    expect(cwds).toEqual([w])
+    expect(eng.hive.getTask(t.id)!.worktree).toBeUndefined()
+    eng.shutdown()
   })
 })
