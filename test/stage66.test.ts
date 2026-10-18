@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
 import { checksOf, parseRepo, taskBranch, type Exec } from '../src/main/github'
+import { ghInstallCommand } from '../src/main/setup'
 
 let dir: string
 beforeEach(() => {
@@ -85,6 +86,15 @@ describe('6-6: GitHub helpers', () => {
     expect(parseRepo('o/r')).toBe('o/r')
     expect(parseRepo('not a repo')).toBe('')
     expect(taskBranch('버튼 고치기!', 'abc-123456')).toBe('hive/버튼-고치기-123456')
+  })
+
+  it('the app can install the GitHub CLI: winget on Windows, the release archive into ~/.local/bin elsewhere (no admin)', () => {
+    expect(ghInstallCommand('win32')).toContain('winget install --id GitHub.cli')
+    const unix = ghInstallCommand('darwin')
+    expect(unix).toContain('https://github.com/cli/cli/releases/latest')
+    expect(unix).toContain('$HOME/.local/bin/gh')
+    expect(unix).not.toContain('sudo')
+    expect(unix).not.toContain('api.github.com')
   })
 
   it('CI: any failure fails, anything unfinished is pending, nothing is none', () => {
