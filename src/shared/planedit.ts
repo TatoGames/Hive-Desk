@@ -47,3 +47,40 @@ export function planIssues(items: SubtaskSpec[], has: { github: boolean; web: bo
   })
   return out
 }
+
+const norm = (f: string): string => f.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+
+/** Do two lists of files/folders touch the same thing? (a folder covers everything under it) */
+export function filesOverlap(a: string[], b: string[]): boolean {
+  for (const x of a.map(norm)) {
+    for (const y of b.map(norm)) {
+      if (!x || !y) continue
+      if (x === y || x.startsWith(y + '/') || y.startsWith(x + '/')) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Sub-tasks that declare the files they work on and do not overlap can start together; overlapping ones get an order
+ * (the earlier one first). Returns new items; `added` says which orders the app made up.
+ */
+export function orderByFiles(items: SubtaskSpec[]): { items: SubtaskSpec[]; added: [number, number][] } {
+  const added: [number, number][] = []
+  const out = items.map((it) => ({ ...it, after: [...it.after] }))
+  const reach = (i: number, seen = new Set<number>()): Set<number> => {
+    for (const a of out[i].after) if (!seen.has(a)) (seen.add(a), reach(a - 1, seen))
+    return seen
+  }
+  for (let i = 0; i < out.length; i++) {
+    if (!out[i].files?.length) continue
+    for (let j = 0; j < i; j++) {
+      if (!out[j].files?.length) continue
+      if (!filesOverlap(out[i].files!, out[j].files!)) continue
+      if (reach(i).has(j + 1)) continue // already waits for it, directly or through another
+      out[i].after.push(j + 1)
+      added.push([i + 1, j + 1])
+    }
+  }
+  return { items: out, added }
+}

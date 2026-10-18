@@ -24,6 +24,7 @@ import type {
   TaskStatus,
   SubtaskSpec
 } from '../shared/types'
+import { DEFAULT_AUTO_APPROVE } from '../shared/types'
 import type { LiveRun } from './activity'
 import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Runner } from './adapters'
 import { checkCli } from './setup'
@@ -76,7 +77,9 @@ import {
 } from '../shared/connections'
 import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
+import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
+import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './worktree'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
 /** After the account hit its usage limit, the company priority decides who may start work for this long. */
@@ -102,6 +105,9 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 }
 
 /** Owns config + hive, runs tasks (manually or via auto-run), and schedules git sync. */
+/** A request the app never answers by itself: deleting, deploying, sending data out, running commands, anything outside the folder. */
+const RISKY_REQUEST = /(삭제|지우|배포|푸시|\bpush\b|전송|보내|업로드|명령|실행|exec|delete|remove|rm -|deploy|upload|curl|install|설치|(?:^|[\s"'(])(?:\/|[A-Za-z]:\\))/i
+
 export class Engine {
   config: AppConfig
   /** This computer's own data (usage limits, model lists, connection checks), shared by every company. */
@@ -134,6 +140,7 @@ export class Engine {
   private timer: NodeJS.Timeout | null = null
   readonly delegation: Delegation
   private quick!: QuickAssign
+  private deciderOverride: string | null = null
   readonly committee: Committee
   collab!: Collaboration
   private syncTimer: NodeJS.Timeout | null = null
@@ -352,6 +359,7 @@ export class Engine {
   /** A desktop notification (the main process shows it when the app allows). */
   notify(title: string, body: string): void {
     this.emit({ type: 'notify', title, body })
+    if (this.config.notifications !== false && (this.config.discordWebhook || this.config.telegram)) void sendRemote(this.config, title, body)
   }
 
   private seenAttention: Set<string> | null = null
@@ -484,7 +492,7 @@ export class Engine {
         projectId: input.projectId,
         createdBy: by
       })
-      return this.hive.updateTask(made.id, { quick: x.quick, jobKind: x.jobKind, auto: true, kind: 'work', depth: 0 })
+      return this.hive.updateTask(made.id, { quick: x.quick, jobKind: x.jobKind, auto: true, kind: 'work', depth: 0, ...(x.quick.size === 'small' ? { effort: 'low' as const } : {}) })
     })
     const who = this.hive.listRoster().find((r) => r.id === t.assignee)?.name ?? t.assignee
     this.hive.addEvent(t.id, 'delegation', by, `빠른 배정: ${who}에게 바로 맡겼어요${t.quick?.trial ? ' (시험 배정)' : ''}${t.quick?.chosen ? ' (사람이 고른 직원)' : ''}.`)
@@ -884,7 +892,7 @@ export class Engine {
 
   /** Timeline (shared) + run list (this machine) for one task. */
   taskHistory(id: string): TaskHistory {
-    return { events: this.hive.listEvents(id), runs: this.hive.listRuns(id) }
+    return { events: this.hive.listEvents(id), runs: this.hive.listRuns(id), approvals: this.hive.listApprovals().filter((a) => a.taskId === id) }
   }
 
   runDetail(taskId: string, runId: string): RunRecord | null {
@@ -942,7 +950,7 @@ export class Engine {
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
-    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId))
+    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree?.path)
   }
 
   private folderBusy(agent: Agent, taskId: string): boolean {
@@ -968,11 +976,17 @@ export class Engine {
     const ac = new AbortController()
     this.running.set(id, ac)
     this.changed()
+    // Sub-tasks of a git project get their own work tree, so they do not queue behind each other
+    await this.prepareWorktree(id, agent)
     // Two agents editing the same folder would overwrite each other and mix up their diffs.
     const key = normPath(this.cwdFor(agent, id))
     let locked = false
     try {
+      if (task.kind === 'integrate' && !(await this.mergeBundle(id))) return 'needs_input'
+      const waitFrom = Date.now()
       locked = await this.lockFolder(key, id, ac.signal)
+      const waited = Date.now() - waitFrom
+      if (waited >= 1000) this.hive.updateTask(id, { folderWaitMs: (this.hive.getTask(id)?.folderWaitMs ?? 0) + waited })
       if (!locked) {
         this.applyStop(id, typeof ac.signal.reason === 'string' ? (ac.signal.reason as StopKind) : 'hold')
         return 'cancelled'
@@ -985,6 +999,9 @@ export class Engine {
         this.hive.updateTask(id, { status: 'todo', reply: undefined })
         outcome = await this.runOnce(agent, id, ac)
       }
+      // what a work-tree task changed is saved on its branch (it is merged when the bundle is integrated)
+      const finished = this.hive.getTask(id)
+      if (finished?.kind === 'work' && finished.worktree && !finished.worktree.merged) await commitWorktree(finished.worktree, finished.title).catch(() => false)
       // delegation: what a plan / review / work run produced decides what happens next
       if (!ac.signal.aborted) {
         this.delegation.onRunFinished(id)
@@ -999,6 +1016,52 @@ export class Engine {
       this.liveRuns.delete(id)
       this.changed()
     }
+  }
+
+  /** Make the work tree of a bundle's sub-task (or point its reviewer at the same one). Off unless the setting is on. */
+  private async prepareWorktree(id: string, agent: Agent): Promise<void> {
+    if (!this.config.parallelWorktrees) return
+    const t = this.hive.getTask(id)
+    if (!t || t.worktree) return
+    if (t.kind === 'review' && t.reviewOf) {
+      const target = this.hive.getTask(t.reviewOf)
+      if (target?.worktree && !target.worktree.merged) this.hive.updateTask(id, { worktree: { ...target.worktree } })
+      return
+    }
+    if (t.kind !== 'work' || !t.parentId) return
+    const base = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
+    const wt = await addWorktree(base, t.id).catch(() => null)
+    if (!wt) return
+    this.hive.updateTask(id, { worktree: wt })
+    this.hive.addEvent(id, 'status', 'system', `별도 작업 폴더에서 실행해요 (브랜치 ${wt.branch}). 다른 하위 작업과 동시에 돌 수 있어요.`)
+  }
+
+  /** Before the integration run: merge the sub-tasks' branches. A clash stops it and asks the person. */
+  private async mergeBundle(id: string): Promise<boolean> {
+    const kids = this.hive.listTasks().filter((k) => k.parentId === id && k.status === 'done' && k.worktree && !k.worktree.merged)
+    const skipClash = /빼고 진행/.test(this.hive.getTask(id)?.reply ?? '')
+    for (const k of kids) {
+      const wt = k.worktree!
+      const r = await mergeWorktree(wt, k.title)
+      if (!r.ok && skipClash) {
+        this.hive.addEvent(k.id, 'status', 'system', `충돌 때문에 이 작업의 변경은 합치지 않았어요 (브랜치 ${wt.branch}는 그대로 둬요).`)
+        this.hive.updateTask(k.id, { worktree: { ...wt, merged: true } })
+        continue
+      }
+      if (!r.ok) {
+        this.hive.updateTask(id, {
+          status: 'needs_input',
+          question: `"${k.title}"의 변경을 합치다가 충돌이 났어요. ${r.message}\n작업 폴더(${wt.base})에서 \`git merge ${wt.branch}\`로 직접 해결한 뒤 "해결했어요"라고 답해 주세요. 그 작업을 빼려면 답에 "빼고 진행"이라고 적어 주세요.`
+        })
+        this.hive.addEvent(id, 'status', 'system', `병합 충돌: ${r.message}`)
+        this.notify('병합 충돌', `${k.title}: ${r.message}`)
+        return false
+      }
+      await removeWorktree(wt).catch(() => undefined)
+      this.hive.updateTask(k.id, { worktree: { ...wt, merged: true } })
+      this.hive.addEvent(k.id, 'status', 'system', `작업 결과를 ${wt.base}에 합쳤어요.`)
+    }
+    return true
   }
 
   private runOnce(agent: Agent, id: string, ac: AbortController): Promise<string> {
@@ -1153,6 +1216,71 @@ export class Engine {
   private bundleCapped(h: Hive, all: Task[], t: Task): boolean {
     const root = rootOf(all, t)
     return (!!root.plan?.runCap && h.hasPendingApproval(root.id, 'bundle-cap')) || h.hasPendingApproval(root.id, 'stale-bundle')
+  }
+
+  /**
+   * Approvals the company settings let the app answer itself. Never: deleting, deploying, sending data out, running commands.
+   * Each one is logged on the task and recorded as decided by "자동".
+   */
+  private autoApprovals(h: Hive, all: Task[]): void {
+    const rules = { ...DEFAULT_AUTO_APPROVE, ...(this.config.autoApprove ?? {}) }
+    const bigJob = h.getCompany()?.bigJobRuns ?? 20
+    for (const a of h.listApprovals()) {
+      if (a.status !== 'pending') continue
+      const t = all.find((x) => x.id === a.taskId)
+      if (!t) continue
+      if (a.kind === 'agent-request' && rules.readToEdit && t.status === 'todo') {
+        const eff = t.permission ?? this.config.agents.find((x) => x.id === t.assignee)?.permission ?? 'edit'
+        if (eff !== 'read') continue
+        if (!/(쓰|작성|수정|저장|만들|파일|write|edit|create)/i.test(a.reason) || RISKY_REQUEST.test(a.reason)) continue
+        this.autoDecide(a.id, t, '① 읽기 전용 업무가 작업 폴더에 파일을 쓰려 해요', 'edit')
+      } else if (a.kind === 'plan' && t.plan && !t.plan.issues?.length && !t.plan.flags.length && !t.risky) {
+        const onlyEstimate = t.plan.boardReasons.length > 0 && t.plan.boardReasons.every((r) => r.startsWith('예상 AI 실행') || r.startsWith('이사회가 관리자를 직접 지정') || r.startsWith('계획이 반복해서 반려'))
+        if (!onlyEstimate) continue
+        const est = t.plan.estimateRuns
+        if (rules.planSmaller && t.plan.prevEstimate && est < t.plan.prevEstimate && !t.plan.boardReasons.some((r) => r.startsWith('이사회가 관리자를 직접 지정'))) {
+          this.autoDecide(a.id, t, `③ 반려 뒤 다시 낸 계획이 ${t.plan.prevEstimate}회 → ${est}회로 줄었어요`)
+        } else if (rules.planOverPercent > 0 && est <= bigJob * (1 + rules.planOverPercent / 100) && t.plan.boardReasons.every((r) => r.startsWith('예상 AI 실행'))) {
+          this.autoDecide(a.id, t, `② 예상 ${est}회가 기준 ${bigJob}회를 ${rules.planOverPercent}% 안에서 넘었어요`)
+        }
+      }
+    }
+  }
+
+  /**
+   * An approval nobody answered in time gets its default answer, so work is never stuck for ever:
+   * a permission request is declined (the task goes on without it), a plan / cap / old bundle puts the work on hold.
+   */
+  private expireApprovals(h: Hive, all: Task[]): void {
+    const hours = this.config.approvalTimeoutHours ?? 0
+    if (hours <= 0) return
+    for (const a of h.listApprovals()) {
+      if (a.status !== 'pending' || Date.now() - new Date(a.createdAt).getTime() < hours * 3600e3) continue
+      if (a.kind === 'failure') continue // has its own timer (failureHoldHours)
+      const t = all.find((x) => x.id === a.taskId)
+      this.deciderOverride = '시간 초과'
+      try {
+        if (a.kind === 'plan') {
+          this.hive.closeApproval(a.id, '시간 초과', `${hours}시간 동안 답이 없어서 보류했어요.`)
+          if (t) this.applyStop(t.id, 'hold')
+        } else {
+          this.decideApproval(a.id, 'rejected', `${hours}시간 동안 답이 없어서 거절했어요.`)
+        }
+      } finally {
+        this.deciderOverride = null
+      }
+      if (t) this.hive.addEvent(t.id, 'approval_decided', '시간 초과', `결재 대기 ${hours}시간이 지나 ${a.kind === 'plan' ? '보류' : '거절'}했어요.`)
+    }
+  }
+
+  private autoDecide(approvalId: string, t: Task, why: string, raise?: PermissionLevel): void {
+    this.deciderOverride = '자동'
+    try {
+      this.decideApproval(approvalId, 'approved', `자동 승인 규칙 ${why}`, raise)
+    } finally {
+      this.deciderOverride = null
+    }
+    this.hive.addEvent(t.id, 'approval_decided', '자동', `자동 승인: ${why}`)
   }
 
   /** A bundle nobody touched for a day (setting) must be confirmed before its waiting tasks start again. */
@@ -1558,7 +1686,7 @@ export class Engine {
   }
 
   decideApproval(id: string, decision: 'approved' | 'rejected', note?: string, raisePermission?: PermissionLevel, runCap?: number): void {
-    const by = this.config.memberName || 'me'
+    const by = this.deciderOverride ?? (this.config.memberName || 'me')
     const a = this.hive.listApprovals().find((x) => x.id === id)
     this.hive.decideApproval(id, decision, by, note)
     if (a?.kind === 'agent-request' && a.status === 'pending' && decision === 'approved') {
@@ -2008,6 +2136,8 @@ export class Engine {
         const all = h.listTasks()
         this.checkBundleCaps(h, all)
         this.checkStaleBundles(h, all)
+        this.inCompany(h, () => this.autoApprovals(h, all))
+        this.inCompany(h, () => this.expireApprovals(h, all))
         this.holdStaleFailures(h, all)
         for (const t of all) {
           if (this.running.size >= this.config.maxConcurrent) return

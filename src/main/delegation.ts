@@ -1,5 +1,5 @@
 import { parseEscalation } from '../shared/committee'
-import { planIssues, removeItem } from '../shared/planedit'
+import { orderByFiles, planIssues, removeItem } from '../shared/planedit'
 import {
   FLAG_LABEL,
   LIMITS,
@@ -256,8 +256,9 @@ export class Delegation {
       'If something essential is missing, do NOT plan. Ask the board exactly what you need with [[NEED: your specific questions]] and stop.',
       'Step 2 — Size. If the job is small enough that you can do it yourself, answer only [[SELF: why it is small]] (no sub-tasks).',
       'Step 3 — Otherwise write a distribution plan, one line per sub-task, in this exact form:',
-      '[[SUBTASK: <title> | assignee=<agent id from the list below> | access=<read|edit|exec> | done=<completion criteria> | after=<numbers of sub-tasks that must finish first, comma separated, or none>]]',
+      '[[SUBTASK: <title> | assignee=<agent id from the list below> | access=<read|edit|exec> | files=<folders or files it works in, comma separated> | est=<AI runs it needs, e.g. 2> | done=<completion criteria> | after=<numbers of sub-tasks that must finish first, comma separated, or none>]]',
       'access: edit = the result is files (writing, building, editing) — this is the usual case; read = only analysis or a report; exec = commands must run (build, test, install). Do NOT give read to a sub-task that has to create files.',
+      'files: sub-tasks whose files do not overlap start at the same time; the app orders overlapping ones for you, so use "after" only for real dependencies (one needs the other\'s result). est: your honest guess of AI runs for this sub-task (usually 1–3).',
       'Sub-tasks are numbered 1, 2, 3 … in the order you write them; "after" may only point at earlier numbers.',
       `Write at most ${LIMITS.maxSubtasks} sub-tasks. Give each piece to the lowest rank that can do it well.`,
       'Then write [[ESTIMATE: <total AI runs expected, counting reviews>]] and [[FLAGS: <comma separated of: risky, scope, other-unit, conflict — or none>]].',
@@ -520,6 +521,10 @@ export class Delegation {
     if (unknown.length) {
       return this.sendBack(t, `목록에 없는 담당자예요: ${[...new Set(unknown)].join(', ')}. 목록의 id만 쓰세요: ${[...ids].join(', ')}`)
     }
+    // sub-tasks that declare overlapping files get an order; the rest may start together
+    const ordered = orderByFiles(parsed.items)
+    parsed.items = ordered.items
+    for (const [later, earlier] of ordered.added) this.event(t.id, `${later}번 작업은 ${earlier}번과 같은 파일을 다뤄서 ${earlier}번이 끝난 뒤에 시작하도록 순서를 붙였어요.`)
     const depth = t.depth ?? 0
     const managers = parsed.items.map((i) => this.isManager(i.assignee))
     if (depth + 1 >= LIMITS.maxDepth && managers.some(Boolean)) {
@@ -571,6 +576,7 @@ export class Delegation {
       estimateRuns: estimate,
       estimateParts: { plan: est.plan, work: est.work, review: est.review, buffer: est.buffer, basis: est.basis },
       ...(issues.length ? { issues } : {}),
+      ...(t.plan?.estimateRuns && rejections > 0 ? { prevEstimate: t.plan.estimateRuns } : {}),
       flags: [...flags],
       status: approver === 'board' ? 'awaiting_board' : approver === 'superior' ? 'awaiting_superior' : 'approved',
       approver,
@@ -617,6 +623,7 @@ export class Delegation {
       list = removeItem(list, i)
     }
     if (!list.length) throw new Error('하위 작업이 하나도 남지 않았어요. 계획을 반려하거나 취소하세요.')
+    list = orderByFiles(list).items
     const bad = validateAfter(list)
     if (bad) throw new Error(bad)
     const unknown = list.filter((i) => !ids.has(i.assignee)).map((i) => i.assignee)

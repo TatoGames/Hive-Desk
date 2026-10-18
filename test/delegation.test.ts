@@ -683,3 +683,88 @@ describe('6-0.6: the board fixes a plan itself', () => {
     eng.shutdown()
   })
 })
+
+describe('6-0.7: work trees let sub-tasks of one git project run at the same time', () => {
+  it('two developers in the same repo each get their own folder and branch, run together, and are merged at integration', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { existsSync, readdirSync } = await import('node:fs')
+    const repo = join(dir, 'repo')
+    mkdirSync(repo)
+    const g = (...a: string[]): string => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo }).toString()
+    g('init', '-b', 'main')
+    writeFileSync(join(repo, 'README.md'), 'hi\n')
+    g('add', '-A')
+    g('commit', '-m', 'init')
+
+    let active = 0
+    let maxActive = 0
+    const cwds: string[] = []
+    const s = makeScript({
+      plan: (who) => {
+        if (who === 'coo') return '[[SUBTASK: 서버 만들기 | assignee=alice-hq | done=서버 동작 | after=none]]\n[[ESTIMATE: 6]]'
+        if (who === 'hq') return '[[SUBTASK: 서버팀 작업 | assignee=alice-srv | done=API 완성 | after=none]]\n[[ESTIMATE: 5]]'
+        return '[[SUBTASK: 모델 | assignee=alice-dev1 | done=모델 | after=none | files=src/model]]\n[[SUBTASK: 라우터 | assignee=alice-dev2 | done=라우터 | after=none | files=src/router]]\n[[ESTIMATE: 4]]'
+      },
+      work: (_who, task, cwd) => {
+        cwds.push(cwd)
+        writeFileSync(join(cwd, task + '.txt'), task + '\n')
+        return REPORT(task)
+      }
+    })
+    const { eng, ids } = company(s)
+    for (const n of ['dev1', 'dev2']) eng.saveAgent({ ...eng.config.agents.find((a) => a.id === ids[n])!, workDir: repo })
+    eng.saveSettings({ parallelWorktrees: true, maxConcurrent: 4 })
+    // measure overlap of the two work runs
+    const inner = (eng as unknown as { runner: Runner }).runner
+    ;(eng as unknown as { runner: Runner }).runner = async (b, o) => {
+      const isWork = o.cwd.includes('.hive-worktrees') && !o.prompt.includes('CROSS REVIEWER')
+      if (isWork) maxActive = Math.max(maxActive, ++active)
+      await new Promise((r) => setTimeout(r, isWork ? 150 : 0))
+      try {
+        return await inner(b, o)
+      } finally {
+        if (isWork) active--
+      }
+    }
+    const root = eng.createTask({ title: '게임 서버', delegate: true })
+    await settle(eng)
+    expect(task(eng, root.id).status).toBe('needs_review')
+    expect(cwds.length).toBe(2)
+    expect(cwds.every((c) => c.includes('.hive-worktrees'))).toBe(true)
+    expect(maxActive).toBe(2) // they really ran together
+    // merged into the project, work trees cleaned up
+    expect(existsSync(join(repo, '모델.txt'))).toBe(true)
+    expect(existsSync(join(repo, '라우터.txt'))).toBe(true)
+    expect(readdirSync(join(repo, '.hive-worktrees'))).toEqual([])
+    expect(g('status', '--porcelain').trim()).toBe('')
+    eng.shutdown()
+  })
+})
+
+describe('6-0.7: approvals the app may answer itself', () => {
+  it('a plan only a little over the limit is approved automatically (logged as 자동); a big one still goes to the board', async () => {
+    const { eng } = company(makeScript({ plan: (who) => (who === 'coo' ? '[[SUBTASK: 일 | assignee=alice-hq | done=끝 | after=none]]\n[[ESTIMATE: 22]]' : '[[SELF: x]]') }))
+    const t = eng.createTask({ title: '조금 큰 일', delegate: true })
+    await settle(eng)
+    expect(task(eng, t.id).status).not.toBe('awaiting_approval')
+    const ap = eng.hive.listApprovals().find((a) => a.kind === 'plan')!
+    expect(ap).toMatchObject({ status: 'approved', decidedBy: '자동' })
+    expect(events(eng, t.id).some((e) => e.includes('자동 승인'))).toBe(true)
+    eng.shutdown()
+  })
+
+  it('a read-only task that asks to write files in its folder is allowed to edit; risky requests are left to the board', async () => {
+    const { eng, ids } = company(makeScript())
+    const a = eng.createTask({ title: '문서 만들기', assignee: ids.dev1, permission: 'read' })
+    eng.hive.updateTask(a.id, { status: 'todo' })
+    eng.hive.createApproval({ kind: 'agent-request', taskId: a.id, agentId: ids.dev1, reason: '문서 파일을 작성하려면 쓰기 권한이 필요해요' })
+    const b = eng.createTask({ title: '정리', assignee: ids.dev2, permission: 'read' })
+    eng.hive.createApproval({ kind: 'agent-request', taskId: b.id, agentId: ids.dev2, reason: '오래된 파일을 삭제해도 될까요? 파일 수정이 필요해요' })
+    await eng.tick()
+    expect(task(eng, a.id).permission).toBe('edit')
+    expect(eng.hive.listApprovals().find((x) => x.taskId === a.id)).toMatchObject({ status: 'approved', decidedBy: '자동' })
+    expect(eng.hive.listApprovals().find((x) => x.taskId === b.id)?.status).toBe('pending')
+    expect(task(eng, b.id).permission).toBe('read')
+    eng.shutdown()
+  })
+})

@@ -120,6 +120,8 @@ export interface BuildOptions {
   refDirs?: string[]
   /** Continue this CLI session instead of starting a new one. */
   resumeSession?: string
+  /** How hard the model thinks (Claude `--effort`). Small jobs use `low`: faster and lighter on the limit. */
+  effort?: 'low' | 'medium' | 'high'
   /** Let the file-reading tool open .env / key files (blocked by default). */
   allowSecrets?: boolean
 }
@@ -236,6 +238,7 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     if (deny.length) extra.push('--disallowedTools', ...deny)
     args.push(...extra)
     for (const d of dirs) args.push(`--add-dir=${d}`)
+    if (opts.effort && !splitArgs(agent.extraArgs).includes('--effort')) args.push('--effort', opts.effort)
     if (opts.resumeSession) {
       args.push('--resume', opts.resumeSession)
       resumed = true

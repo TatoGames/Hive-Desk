@@ -182,9 +182,10 @@ export function buildPrompt(opts: {
     lines.push('', '## Results from tasks this depends on')
     for (const d of deps) lines.push(`### ${d.title}`, dependencyText(d))
   }
-  if (mem.recent.length) {
-    lines.push('', '## Shared team memory (most recent last)')
-    for (const m of mem.recent) lines.push(`- (${m.author}) ${m.text}`)
+  const recent = relevantMemory(mem.recent, `${task.title} ${task.description} ${project?.name ?? ''}`)
+  if (recent.length) {
+    lines.push('', '## Shared team memory (about this task, most recent last)')
+    for (const m of recent) lines.push(`- (${m.author}) ${m.text}`)
   }
   const ext = hive.externalForPrompt()
   if (ext.length) {
@@ -317,7 +318,8 @@ export function holdsAppData(hive: Hive, cwd: string): boolean {
 }
 
 /** The folder an agent's runs happen in. */
-export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string | null): string {
+export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string | null, worktree?: string | null): string {
+  if (worktree && existsSync(worktree)) return worktree
   if (projectDir && existsSync(projectDir)) return projectDir
   return agent.workDir && existsSync(agent.workDir) ? agent.workDir : defaultCwd
 }
@@ -326,6 +328,22 @@ export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string
 const DEP_RESULT_MAX = 1500
 
 /** What a finished task hands to the tasks that depend on it: its structured report first. */
+/**
+ * Not the whole recent memory on every run: the notes that share words with this task (title, description, project),
+ * and the very latest few. The fixed team rules are always included separately.
+ */
+export function relevantMemory<T extends { text: string }>(recent: T[], about: string, limit = 8, newest = 3): T[] {
+  if (recent.length <= limit) return recent
+  const topic = words(about)
+  const scored = recent.map((m, i) => ({ m, i, score: [...words(m.text)].filter((w) => topic.has(w)).length }))
+  const keep = new Set<number>(scored.slice(-newest).map((x) => x.i))
+  for (const x of [...scored].sort((a, b) => b.score - a.score || b.i - a.i)) {
+    if (keep.size >= limit) break
+    if (x.score > 0) keep.add(x.i)
+  }
+  return scored.filter((x) => keep.has(x.i)).map((x) => x.m)
+}
+
 export function dependencyText(t: Task): string {
   const r = t.report
   if (r && (r.did || r.files || r.verify)) {
@@ -395,7 +413,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     return 'awaiting_approval'
   }
 
-  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId))
+  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId), task.worktree?.path)
   if (holdsAppData(hive, cwd)) {
     const error = `작업 폴더(${cwd})에 회사 데이터가 들어 있어서 실행하지 않았어요. AI가 업무·메모리 파일을 고칠 수 있어요. 다른 작업 폴더를 지정하세요.`
     hive.addEvent(task.id, 'run_finished', agent.id, '실행 안 함 · ' + error)
@@ -449,6 +467,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       permission: level,
       refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
       resumeSession,
+      effort: task.effort,
       allowSecrets: task.allowSecrets
     })
   } catch (e) {

@@ -223,6 +223,9 @@ export default function Office({
               {pct(p.progress)}
               {startedAt && ` · ${elapsed(startedAt)} 경과`}
             </div>
+            {snap.waiting[v.task.id] && (
+              <div className="muted small">폴더 대기 중 · 앞의 업무: {snap.tasks.find((x) => x.id === snap.waiting[v.task!.id])?.title ?? '?'}</div>
+            )}
             <div onClick={(e) => e.stopPropagation()}>
               <TaskControls task={v.task} compact />
             </div>

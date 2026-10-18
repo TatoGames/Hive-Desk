@@ -1,3 +1,4 @@
+import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
 import { InstructionList, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
 import type {
@@ -168,6 +169,8 @@ export default function TaskDetail({
           )}
         </div>
 
+        {history && <TimeRow task={task} history={history} />}
+
         {task.status === 'needs_input' && (
           <>
             <h2 className="sec">에이전트가 기다리고 있어요</h2>
@@ -322,6 +325,18 @@ export default function TaskDetail({
         {record && <UndoBar task={task} record={record} />}
         {record && <RunBody record={record} />}
       </div>
+    </div>
+  )
+}
+
+/** Where the time went: AI run / waiting for the folder / for a decision / for an answer. */
+function TimeRow({ task, history }: { task: Task; history: TaskHistory }): JSX.Element | null {
+  const b = timeBreakdown(task, history.events, history.runs, history.approvals)
+  if (b.total < 5000) return null
+  const parts: [string, number][] = [['AI 실행', b.ai], ['폴더 대기', b.folder], ['결재 대기', b.approval], ['자료 요청 대기', b.asking], ['그 밖', b.other]]
+  return (
+    <div className="muted small" title="이 업무가 만들어진 뒤 걸린 시간을 나눠 본 거예요">
+      ⏱ 전체 {fmtLong(b.total)} — {parts.filter(([, v]) => v >= 1000).map(([k, v]) => `${k} ${fmtLong(v)}`).join(' · ')}
     </div>
   )
 }

@@ -190,6 +190,12 @@ export interface Task {
   jobKind?: import('./quick').JobKind
   /** Handed straight to one employee (6-0.5) instead of through the organisation. */
   quick?: QuickInfo
+  /** Time spent waiting for another task to leave the work folder. */
+  folderWaitMs?: number
+  /** How hard the model thinks for this task (Claude only). Quick assignment sets `low` for small jobs. */
+  effort?: 'low' | 'medium' | 'high'
+  /** A separate folder + branch this task works in (so tasks of one project can run at the same time). */
+  worktree?: { path: string; branch: string; base: string; merged?: boolean }
   /** When the person last confirmed a stale bundle should go on. */
   staleOkAt?: string
   /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
@@ -293,6 +299,8 @@ export interface Plan {
   estimateParts?: { plan: number; work: number; review: number; buffer: number; basis: string[] }
   /** Sub-tasks that cannot be done as written (no GitHub, web off, read-only but must write). */
   issues?: { index: number; kind: 'github' | 'web' | 'readonly'; text: string; fix?: { access: PermissionLevel } }[]
+  /** The estimate of the plan this one replaced (after a rejection). */
+  prevEstimate?: number
   /** The board approved "at most N runs": the bundle stops and asks when it reaches this. */
   runCap?: number
   flags: string[]
@@ -502,6 +510,7 @@ export type RunSummary = Omit<RunRecord, 'prompt' | 'response' | 'stderr' | 'dif
 export interface TaskHistory {
   events: TaskEvent[]
   runs: RunSummary[]
+  approvals: Approval[]
 }
 
 export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle'
@@ -593,6 +602,17 @@ export interface CompanySummary {
   minutesToday: number
 }
 
+export interface AutoApprove {
+  /** A read-only task asks to write files in its work folder → allow `edit`. */
+  readToEdit: boolean
+  /** A plan whose only reason for the board is an estimate over the limit by at most this many percent (0 = off). */
+  planOverPercent: number
+  /** A plan sent back and re-submitted with fewer expected runs. */
+  planSmaller: boolean
+}
+
+export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
+
 export interface AppConfig {
   /** Share of low-risk quick jobs given to a lighter model on trial (0..1). */
   quickTrialRate?: number
@@ -621,6 +641,15 @@ export interface AppConfig {
   failureHoldHours?: number
   /** A bundle nobody touched for this many hours asks before its waiting tasks start by themselves (0 = never ask). */
   staleBundleHours?: number
+  /** Also send notifications to a phone: a Discord webhook address and/or a Telegram bot. */
+  discordWebhook?: string
+  telegram?: { token: string; chatId: string }
+  /** Hours after which an unanswered approval gets its default answer (0 = wait for ever). */
+  approvalTimeoutHours?: number
+  /** Approvals the app may answer itself (never deletes, deploys, sending data out, or commands). */
+  autoApprove?: AutoApprove
+  /** Sub-tasks of a project in a git folder work in their own work trees and run at the same time (off by default). */
+  parallelWorktrees?: boolean
   maxConcurrent: number
   syncIntervalMinutes: number
 }

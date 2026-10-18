@@ -71,3 +71,21 @@ describe('6-0.6: bundles', () => {
     expect(isStale({ ...b, running: 0 }, 24, Date.now())).toBe(false)
   })
 })
+
+describe('6-0.7: sub-tasks that touch the same files get an order, the others run together', () => {
+  it('overlapping folders are ordered, disjoint ones are left alone', async () => {
+    const { orderByFiles, filesOverlap } = await import('../src/shared/planedit')
+    expect(filesOverlap(['src/api'], ['src/api/user.ts'])).toBe(true)
+    expect(filesOverlap(['src/api'], ['src/app'])).toBe(false)
+    const items: SubtaskSpec[] = [
+      { title: 'a', assignee: 'x', done: '', after: [], files: ['src/api'] },
+      { title: 'b', assignee: 'x', done: '', after: [], files: ['docs'] },
+      { title: 'c', assignee: 'x', done: '', after: [], files: ['src/api/user.ts'] },
+      { title: 'd', assignee: 'x', done: '', after: [1] }
+    ]
+    const r = orderByFiles(items)
+    expect(r.added).toEqual([[3, 1]])
+    expect(r.items[2].after).toEqual([1])
+    expect(r.items[1].after).toEqual([])
+  })
+})

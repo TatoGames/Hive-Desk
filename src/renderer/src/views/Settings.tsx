@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { HumanReview, Snapshot, SyncResult } from '@shared/types'
+import type { AutoApprove, HumanReview, Snapshot, SyncResult } from '@shared/types'
+import { DEFAULT_AUTO_APPROVE } from '@shared/types'
 
 export default function Settings({
   snap,
@@ -18,6 +19,13 @@ export default function Settings({
   const [notif, setNotif] = useState(c.notifications !== false)
   const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [trial, setTrial] = useState(Math.round((c.quickTrialRate ?? 0.1) * 100))
+  const [worktrees, setWorktrees] = useState(!!c.parallelWorktrees)
+  const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
+  const [stale, setStale] = useState(c.staleBundleHours ?? 24)
+  const [timeout, setTimeoutH] = useState(c.approvalTimeoutHours ?? 0)
+  const [discord, setDiscord] = useState(c.discordWebhook ?? '')
+  const [tgToken, setTgToken] = useState(c.telegram?.token ?? '')
+  const [tgChat, setTgChat] = useState(c.telegram?.chatId ?? '')
   const [interval, setIntervalMin] = useState(c.syncIntervalMinutes)
   const [remote, setRemote] = useState('')
   const [msg, setMsg] = useState<SyncResult | null>(null)
@@ -33,7 +41,13 @@ export default function Settings({
       notifications: notif,
       humanReview: review,
       syncIntervalMinutes: Math.max(0, interval),
-      quickTrialRate: Math.min(1, Math.max(0, trial / 100))
+      quickTrialRate: Math.min(1, Math.max(0, trial / 100)),
+      parallelWorktrees: worktrees,
+      autoApprove: auto,
+      staleBundleHours: Math.max(0, stale),
+      approvalTimeoutHours: Math.max(0, timeout),
+      discordWebhook: discord.trim() || undefined,
+      telegram: tgToken.trim() && tgChat.trim() ? { token: tgToken.trim(), chatId: tgChat.trim() } : undefined
     })
     await onSaved()
     setMsg({ ok: true, message: '저장했어요.' })
@@ -94,6 +108,48 @@ export default function Settings({
           빠른 배정 시험 비율(%)
           <input type="number" min={0} max={100} value={trial} onChange={(e) => setTrial(Number(e.target.value) || 0)} />
         </label>
+        <label className="full toggle" title="git 폴더의 프로젝트에서는 하위 작업마다 별도 작업 폴더와 브랜치를 만들어 동시에 실행하고, 통합할 때 합쳐요. 충돌이 나면 멈추고 물어봐요.">
+          <input type="checkbox" checked={worktrees} onChange={(e) => setWorktrees(e.target.checked)} />
+          하위 작업을 별도 작업 폴더(git 작업 트리)에서 동시에 실행 (실험 기능)
+        </label>
+        <fieldset className="full">
+          <legend>결재 자동 승인 (삭제·배포·외부 전송·명령 실행은 절대 자동 승인하지 않아요)</legend>
+          <label className="toggle">
+            <input type="checkbox" checked={auto.readToEdit} onChange={(e) => setAuto({ ...auto, readToEdit: e.target.checked })} />
+            읽기 전용 업무가 작업 폴더에 파일을 쓰려 하면 &lsquo;파일 수정&rsquo;으로 올려 승인
+          </label>
+          <label>
+            계획의 예상 실행이 기준을 이 비율(%) 안에서 넘으면 승인 (0 = 끔)
+            <input type="number" min={0} max={100} value={auto.planOverPercent} onChange={(e) => setAuto({ ...auto, planOverPercent: Number(e.target.value) || 0 })} />
+          </label>
+          <label className="toggle">
+            <input type="checkbox" checked={auto.planSmaller} onChange={(e) => setAuto({ ...auto, planSmaller: e.target.checked })} />
+            반려한 계획이 더 적은 실행 수로 다시 오면 승인
+          </label>
+        </fieldset>
+        <label>
+          손대지 않은 묶음은 이 시간(시간) 뒤 다시 시작하기 전에 물어요 (0 = 안 물어봄)
+          <input type="number" min={0} value={stale} onChange={(e) => setStale(Number(e.target.value) || 0)} />
+        </label>
+        <label>
+          결재를 이 시간(시간) 동안 못 받으면 기본 처리해요 (0 = 계속 기다림)
+          <input type="number" min={0} value={timeout} onChange={(e) => setTimeoutH(Number(e.target.value) || 0)} />
+        </label>
+        <fieldset className="full">
+          <legend>휴대폰 알림 (선택)</legend>
+          <label>
+            Discord 웹훅 주소
+            <input value={discord} placeholder="https://discord.com/api/webhooks/…" onChange={(e) => setDiscord(e.target.value)} />
+          </label>
+          <label>
+            Telegram 봇 토큰
+            <input value={tgToken} onChange={(e) => setTgToken(e.target.value)} />
+          </label>
+          <label>
+            Telegram 채팅 ID
+            <input value={tgChat} onChange={(e) => setTgChat(e.target.value)} />
+          </label>
+        </fieldset>
         <label className="full">
           결과 확인 (완료로 처리하기 전에 사람이 보는 단계)
           <select value={review} onChange={(e) => setReview(e.target.value as HumanReview)}>
