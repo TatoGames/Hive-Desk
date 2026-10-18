@@ -1,3 +1,4 @@
+import { companyDir } from '../src/main/workspace'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -198,7 +199,7 @@ describe('sharing one account between companies', () => {
     eng.saveSettings({ autoRun: true })
     return { eng, a, b, ta, tb }
   }
-  const statusOf = (c: string, t: string): string => JSON.parse(readFileSync(join(dir, 'ws', 'companies', c, 'tasks', t + '.json'), 'utf8')).status
+  const statusOf = (c: string, t: string): string => JSON.parse(readFileSync(join(companyDir(join(dir, 'ws'), c), 'tasks', t + '.json'), 'utf8')).status
   const waitIdle = async (eng: Engine): Promise<void> => {
     for (let i = 0; i < 200 && eng.snapshot().running.length; i++) await new Promise((r) => setTimeout(r, 10))
   }

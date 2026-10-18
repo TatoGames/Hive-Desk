@@ -1,3 +1,4 @@
+import { AutoSwitches, TaskControls } from './Controls'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { LiveSummary, RosterEntry, Snapshot, Task, TaskStatus } from '@shared/types'
 import type { OrgUnit, Seat } from '@shared/company'
@@ -221,6 +222,9 @@ export default function Office({
               {pct(p.progress)}
               {startedAt && ` · ${elapsed(startedAt)} 경과`}
             </div>
+            <div onClick={(e) => e.stopPropagation()}>
+              <TaskControls task={v.task} compact />
+            </div>
           </div>
         )}
         {!!v?.queued.length && (
@@ -283,6 +287,18 @@ export default function Office({
     )
   }
 
+  /** Management words ("전부 멈춰") are not jobs: ask before turning them into one. */
+  const manage = async (): Promise<boolean> => {
+    const c = await window.hive.classifyInput(boardTitle)
+    if (c.kind === 'task') return false
+    if (window.confirm(`"${c.command}" 은(는) 관리 명령 같아요.\n\n[확인] 모든 실행을 멈추고 자동 실행을 꺼요 (비상 정지)\n[취소] 그대로 두고 입력을 고쳐요`)) {
+      await window.hive.emergencyStop()
+      setBoardTitle(c.rest)
+      setMsg('비상 정지했어요.' + (c.rest ? ' 남은 입력은 업무로 접수할 수 있어요.' : ''))
+    }
+    return true
+  }
+
   const tree = delegationTrees(snap.tasks, live)
   const nameOf = (id: string | null): string => snap.roster.find((r) => r.id === id)?.name ?? (id ? '?' : '미배정')
   const renderNode = (n: TreeNode, depth: number): JSX.Element => (
@@ -295,6 +311,9 @@ export default function Office({
           {nameOf(n.task.assignee)} · {STATUS[n.task.status]} · {pct(n.progress)}
         </div>
         <Bar p={n.progress} />
+        <div onClick={(e) => e.stopPropagation()}>
+          <TaskControls task={n.task} compact />
+        </div>
       </div>
       {n.children.map((c) => renderNode(c, depth + 1))}
     </div>
@@ -317,10 +336,7 @@ export default function Office({
             <option value="unit">부서</option>
             <option value="person">개인</option>
           </select>
-          <label className="toggle">
-            <input type="checkbox" checked={snap.config.autoRun} onChange={(e) => void window.hive.saveSettings({ autoRun: e.target.checked })} />
-            자동 실행
-          </label>
+          <AutoSwitches snap={snap} />
         </div>
       </header>
 
@@ -332,6 +348,7 @@ export default function Office({
           onChange={(e) => setBoardTitle(e.target.value)}
           onKeyDown={async (e) => {
             if (e.key === 'Enter' && boardTitle.trim()) {
+              if (await manage()) return
               try {
                 await window.hive.createTask({ title: boardTitle, delegate: true })
                 setBoardTitle('')
@@ -346,6 +363,7 @@ export default function Office({
           className="primary"
           disabled={!boardTitle.trim()}
           onClick={async () => {
+            if (await manage()) return
             try {
               await window.hive.createTask({ title: boardTitle, delegate: true })
               setBoardTitle('')

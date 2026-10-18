@@ -13,6 +13,8 @@ const KIND: Record<ApprovalKind, string> = {
   'bundle-cap': '실행 상한'
 }
 
+const ACCESS = { read: '읽기만', edit: '파일 수정', exec: '명령 실행' } as const
+
 export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
   const pending = snap.approvals.filter((a) => a.status === 'pending')
   const asking = snap.tasks.filter((t) => t.status === 'needs_input')
@@ -72,6 +74,25 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
             <p>{a.reason}</p>
             {a.kind === 'plan' && t?.plan ? (
               <PlanBox snap={snap} id={a.id} task={t} />
+            ) : a.kind === 'failure' ? (
+              <div className="row">
+                <button className="primary" onClick={() => void window.hive.resolveFailure(a.id, 'retry')}>
+                  다른 모델로 다시 시도
+                </button>
+                <button onClick={() => void window.hive.resolveFailure(a.id, 'skip')}>이 일은 건너뛰고 계속</button>
+                <button className="danger" onClick={() => void window.hive.resolveFailure(a.id, 'cancel-all')}>
+                  묶음 전체 취소
+                </button>
+              </div>
+            ) : a.kind === 'bundle-cap' ? (
+              <div className="row">
+                <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
+                  상한을 늘려서 계속
+                </button>
+                <button className="danger" onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>
+                  여기서 보류
+                </button>
+              </div>
             ) : (
               <>
                 {t?.result && <pre className="out">{t.result}</pre>}
@@ -118,11 +139,18 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
 function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapshot['tasks'][number] }): JSX.Element {
   const [note, setNote] = useState('')
   const plan = task.plan!
+  const cap = Math.ceil(plan.estimateRuns * 1.5) + 2
   const who = (aid: string) => snap.roster.find((r) => r.id === aid)?.name ?? aid
   return (
     <div>
       <div className="small">
         예상 AI 실행 <b>{plan.estimateRuns}회</b>
+        {plan.estimateParts && (
+          <span className="muted">
+            {' '}
+            (계획·통합 {plan.estimateParts.plan} + 작업 {plan.estimateParts.work} + 검토 {plan.estimateParts.review} + 여유 {plan.estimateParts.buffer})
+          </span>
+        )}
         {plan.flags.map((f) => (
           <span key={f} className="tag warn" style={{ marginLeft: 6 }}>
             {FLAG_LABEL[f] ?? f}
@@ -140,6 +168,8 @@ function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapsho
         {plan.items.map((it, i) => (
           <li key={i}>
             <b>{it.title}</b> — {who(it.assignee)}
+            <span className="tag" style={{ marginLeft: 6 }}>{ACCESS[it.access ?? 'edit']}</span>
+            {it.est ? <span className="muted small"> · 약 {it.est}회</span> : null}
             <div className="muted small">
               완료 조건: {it.done || '-'}
               {!!it.after.length && ` · 먼저 끝나야 함: ${it.after.join(', ')}번`}
@@ -154,9 +184,10 @@ function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapsho
         onChange={(e) => setNote(e.target.value)}
       />
       <div className="row">
-        <button className="primary" onClick={() => void window.hive.decideApproval(id, 'approved')}>
-          계획대로 진행
+        <button className="primary" onClick={() => void window.hive.decideApproval(id, 'approved', undefined, undefined, cap)}>
+          {`최대 ${cap}회로 승인`}
         </button>
+        <button onClick={() => void window.hive.decideApproval(id, 'approved')}>상한 없이 진행</button>
         <button className="danger" disabled={!note.trim()} onClick={() => void window.hive.decideApproval(id, 'rejected', note)}>
           반려 (다시 계획)
         </button>

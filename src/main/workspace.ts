@@ -1,5 +1,6 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { uniqueName } from '../shared/names'
 
 /**
  * Workspace layout (v3): every company is a completely separate folder.
@@ -14,7 +15,32 @@ export interface CompanyMeta {
 }
 
 export const companiesDir = (ws: string): string => join(ws, 'companies')
-export const companyDir = (ws: string, id: string): string => join(companiesDir(ws), id)
+/**
+ * The folder of a company. Folders carry the company's name (`companies/졸작팀`); older ones are still named
+ * by id. The id in `meta.json` is what identifies a company, so both kinds are found.
+ */
+export function companyDir(ws: string, id: string): string {
+  const base = companiesDir(ws)
+  const byId = join(base, id)
+  if (existsSync(join(byId, 'meta.json'))) return byId
+  try {
+    for (const d of readdirSync(base)) {
+      const m = readMeta(join(base, d))
+      if (m && m.id === id) return join(base, d)
+    }
+  } catch {
+    /* no companies folder yet */
+  }
+  return byId
+}
+
+function folderNames(ws: string, except?: string): string[] {
+  try {
+    return readdirSync(companiesDir(ws)).filter((d) => d !== except)
+  } catch {
+    return []
+  }
+}
 
 export function readMeta(dir: string): CompanyMeta | null {
   try {
@@ -26,8 +52,26 @@ export function readMeta(dir: string): CompanyMeta | null {
 }
 
 export function writeMeta(ws: string, meta: CompanyMeta): void {
-  mkdirSync(companyDir(ws, meta.id), { recursive: true })
-  writeFileSync(join(companyDir(ws, meta.id), 'meta.json'), JSON.stringify(meta, null, 2) + '\n', 'utf8')
+  let dir = companyDir(ws, meta.id)
+  // a company that has no folder yet gets one named after it
+  if (!existsSync(join(dir, 'meta.json')) && !existsSync(dir)) dir = join(companiesDir(ws), uniqueName(meta.name, folderNames(ws)))
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n', 'utf8')
+}
+
+/** Give the company's folder the company's new name. Returns the new path, or null when it stays where it is (name unchanged, folder busy). */
+export function renameCompanyFolder(ws: string, id: string, name: string): string | null {
+  const cur = companyDir(ws, id)
+  if (!existsSync(cur)) return null
+  const want = uniqueName(name, folderNames(ws, basename(cur)))
+  if (want === basename(cur)) return null
+  const next = join(companiesDir(ws), want)
+  try {
+    renameSync(cur, next)
+    return next
+  } catch {
+    return null // open in another program (Windows) or a folder that cannot be moved: keep the old name
+  }
 }
 
 /** Companies in the order they were created. */

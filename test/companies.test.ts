@@ -1,3 +1,4 @@
+import { companyDir } from '../src/main/workspace'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -93,7 +94,7 @@ describe('moving a v0.2 workspace', () => {
     execFileSync('git', ['-c', 'user.name=a', '-c', 'user.email=a@a', 'add', '-A'], { cwd: ws })
     execFileSync('git', ['-c', 'user.name=a', '-c', 'user.email=a@a', 'commit', '-qm', 'old'], { cwd: ws })
     const r = migrateLegacy(ws, 'co-x')
-    expect(existsSync(join(ws, 'companies', r.companyId, '.git'))).toBe(true)
+    expect(existsSync(join(companyDir(ws, r.companyId), '.git'))).toBe(true)
     expect(existsSync(join(ws, '.git'))).toBe(false)
   })
 
@@ -143,9 +144,9 @@ describe('companies are separate', () => {
     expect(eng.snapshot().tasks.map((t) => t.title)).toEqual(['B 업무'])
     // each company is its own folder
     const ws = join(dir, 'ws')
-    expect(existsSync(join(ws, 'companies', a.id, 'tasks'))).toBe(true)
-    expect(readdirSync(join(ws, 'companies', a.id, 'tasks'))).toHaveLength(0)
-    expect(readdirSync(join(ws, 'companies', b.id, 'tasks'))).toHaveLength(1)
+    expect(existsSync(join(companyDir(ws, a.id), 'tasks'))).toBe(true)
+    expect(readdirSync(join(companyDir(ws, a.id), 'tasks'))).toHaveLength(0)
+    expect(readdirSync(join(companyDir(ws, b.id), 'tasks'))).toHaveLength(1)
     eng.shutdown()
   })
 
@@ -195,19 +196,20 @@ describe('companies are separate', () => {
     eng.switchCompany(a.id) // switching back and forth while both run
     eng.switchCompany(b.id)
     await Promise.all([pa, pb])
-    const ws = join(dir, 'ws', 'companies')
+    const ws = join(dir, 'ws')
+    const cd = (id: string): string => companyDir(ws, id)
     const doneIn = (id: string, taskId: string): boolean => {
-      const f = join(ws, id, 'tasks', taskId + '.json')
+      const f = join(cd(id), 'tasks', taskId + '.json')
       return existsSync(f) && ['done', 'needs_review'].includes(JSON.parse(readFileSync(f, 'utf8')).status)
     }
     expect(doneIn(a.id, ta.id)).toBe(true)
     expect(doneIn(b.id, tb.id)).toBe(true)
     // nothing of A's run leaked into B's folder and vice versa
-    expect(existsSync(join(ws, b.id, 'tasks', ta.id + '.json'))).toBe(false)
-    expect(existsSync(join(ws, a.id, 'tasks', tb.id + '.json'))).toBe(false)
-    expect(readdirSync(join(ws, a.id, 'events')).length).toBeGreaterThan(0)
-    expect(readdirSync(join(ws, b.id, 'events'))).not.toContain(ta.id)
-    expect(readdirSync(join(ws, a.id, 'events'))).not.toContain(tb.id)
+    expect(existsSync(join(cd(b.id), 'tasks', ta.id + '.json'))).toBe(false)
+    expect(existsSync(join(cd(a.id), 'tasks', tb.id + '.json'))).toBe(false)
+    expect(readdirSync(join(cd(a.id), 'events')).length).toBeGreaterThan(0)
+    expect(readdirSync(join(cd(b.id), 'events'))).not.toContain(ta.id)
+    expect(readdirSync(join(cd(a.id), 'events'))).not.toContain(tb.id)
     eng.shutdown()
   })
 
@@ -222,7 +224,7 @@ describe('companies are separate', () => {
     for (let i = 0; i < 100 && eng.snapshot().running.length; i++) await new Promise((r) => setTimeout(r, 10))
     await eng.tick()
     for (let i = 0; i < 100 && eng.snapshot().running.length; i++) await new Promise((r) => setTimeout(r, 10))
-    const get = (c: string, t: string) => JSON.parse(readFileSync(join(dir, 'ws', 'companies', c, 'tasks', t + '.json'), 'utf8')).status
+    const get = (c: string, t: string) => JSON.parse(readFileSync(join(companyDir(join(dir, 'ws'), c), 'tasks', t + '.json'), 'utf8')).status
     expect(['done', 'needs_review']).toContain(get(a.id, ta.id))
     expect(['done', 'needs_review']).toContain(get(b.id, tb.id))
     eng.shutdown()
@@ -260,7 +262,7 @@ describe('companies are separate', () => {
     execFileSync('git', ['init', '-q', '--bare', remote])
     eng.switchCompany(a.id)
     expect(eng.snapshot().gitEnabled).toBe(false)
-    await initSync(join(dir, 'ws', 'companies', a.id), remote)
+    await initSync(join(companyDir(join(dir, "ws"), a.id)), remote)
     expect(eng.snapshot().gitEnabled).toBe(true)
     eng.switchCompany(b.id)
     expect(eng.snapshot().gitEnabled).toBe(false) // B is not shared

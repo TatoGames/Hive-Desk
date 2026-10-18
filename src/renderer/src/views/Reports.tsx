@@ -33,17 +33,72 @@ function download(r: FinalReport): void {
   URL.revokeObjectURL(url)
 }
 
+/** Reports of single tasks (not the big organisation bundles): searchable, each is also a markdown file in the company folder. */
+function TaskReports({ snap }: { snap: Snapshot }): JSX.Element {
+  const [q, setQ] = useState('')
+  const [who, setWho] = useState('')
+  const finalIds = new Set(snap.company.finals.map((f) => f.id))
+  const list = snap.tasks
+    .filter((t) => !t.hidden && !finalIds.has(t.id) && (t.status === 'done' || t.status === 'needs_review') && (t.report || t.result))
+    .filter((t) => (!who || t.assignee === who) && (!q.trim() || (t.title + (t.report?.did ?? '')).toLowerCase().includes(q.trim().toLowerCase())))
+    .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))
+  const root = snap.companyRoot
+  return (
+    <>
+      <div className="row filters">
+        <input className="grow" placeholder="제목·내용 검색" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select value={who} onChange={(e) => setWho(e.target.value)}>
+          <option value="">모든 담당</option>
+          {snap.roster.map((r) => (
+            <option key={r.id} value={r.id}>{r.name}</option>
+          ))}
+        </select>
+        {root && (
+          <button onClick={() => void window.hive.openPath(root + '/보고서')} title="보고서 파일이 모인 폴더를 열어요">
+            폴더에서 보기
+          </button>
+        )}
+      </div>
+      {!list.length && <div className="panel empty">아직 업무 보고서가 없어요. 업무가 끝나면 보고서 파일이 자동으로 만들어져요.</div>}
+      {list.map((t) => (
+        <section key={t.id} className="panel">
+          <div>
+            <b>{t.title}</b> {t.status === 'needs_review' && <span className="tag warn">확인 대기</span>}
+          </div>
+          <div className="muted small">
+            {snap.roster.find((r) => r.id === t.assignee)?.name ?? t.assignee} · {fmtTime(t.finishedAt)}
+          </div>
+          {t.report ? <p className="small">{t.report.did}</p> : <pre className="out">{t.result}</pre>}
+          {t.reportFile && root && (
+            <div className="row">
+              <button className="sm" onClick={() => void window.hive.openPath(root + '/' + t.reportFile!.replace(/\\/g, '/'))}>
+                문서로 열기 ({t.reportFile.replace(/^.*[\\/]/, '')})
+              </button>
+            </div>
+          )}
+        </section>
+      ))}
+    </>
+  )
+}
+
 export default function Reports({ snap }: { snap: Snapshot }): JSX.Element {
+  const [tab, setTab] = useState<'final' | 'task'>('final')
   const [note, setNote] = useState('')
   const finals = [...snap.company.finals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return (
     <div className="page">
       <header className="page-head">
         <h1>보고서함</h1>
+        <div className="seg">
+          <button className={tab === 'final' ? 'on' : ''} onClick={() => setTab('final')}>최종 보고서</button>
+          <button className={tab === 'task' ? 'on' : ''} onClick={() => setTab('task')}>업무 보고서</button>
+        </div>
       </header>
-      <p className="muted small">조직이 끝낸 큰 일의 최종 보고서예요. 확인하면 완료, 고칠 점을 적으면 다시 통합해요.</p>
-      {!finals.length && <div className="panel empty">아직 보고서가 없어요.</div>}
-      {finals.map((r) => {
+      {tab === 'task' && <TaskReports snap={snap} />}
+      {tab === 'final' && <p className="muted small">조직이 끝낸 큰 일의 최종 보고서예요. 확인하면 완료, 고칠 점을 적으면 다시 통합해요.</p>}
+      {tab === 'final' && !finals.length && <div className="panel empty">아직 보고서가 없어요.</div>}
+      {tab === 'final' && finals.map((r) => {
         const task = snap.tasks.find((t) => t.id === r.id)
         const waiting = task?.status === 'needs_review'
         return (

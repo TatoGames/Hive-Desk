@@ -1,3 +1,4 @@
+import { companyDir } from '../src/main/workspace'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -158,7 +159,7 @@ describe('collaboration between companies', () => {
     expect(eng.snapshot().external.map((x) => x.body)).toEqual(['나'])
     const ws = join(dir, 'ws')
     expect(existsSync(join(ws, 'collab', 'channels'))).toBe(true)
-    for (const id of [a.id, b.id]) expect(readdirSync(join(ws, 'companies', id))).not.toContain('collab')
+    for (const id of [a.id, b.id]) expect(readdirSync(join(companyDir(ws, id)))).not.toContain('collab')
     eng.shutdown()
   })
 

@@ -1,3 +1,4 @@
+import { InstructionList, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
 import type {
   AdapterId,
@@ -158,6 +159,14 @@ export default function TaskDetail({
           </div>
           <button onClick={onClose}>닫기</button>
         </div>
+        <div className="sticky-bar">
+          <TaskControls task={task} />
+          {task.stoppedBy && (
+            <span className="muted small">
+              {task.stoppedBy.by}님이 {fmtTime(task.stoppedBy.at)}에 {task.stoppedBy.kind === 'cancel' ? '취소' : '중지'}했어요
+            </span>
+          )}
+        </div>
 
         {task.status === 'needs_input' && (
           <>
@@ -236,13 +245,13 @@ export default function TaskDetail({
         <h2 className="sec">자료와 권한</h2>
         <MaterialsPanel task={task} adapter={adapter} />
 
-        {(running || task.status === 'todo' || task.status === 'awaiting_approval') && (
+        {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>
             <h2 className="sec">추가 지시</h2>
             <div className="row">
               <input
                 className="grow"
-                placeholder={running ? '지금 단계가 끝나면 반영돼요' : '다음 실행에 반영돼요'}
+                placeholder={running ? '이번 실행이 끝난 뒤 반영돼요' : '다음 실행의 첫 입력으로 전달돼요'}
                 value={extra}
                 onChange={(e) => setExtra(e.target.value)}
                 onKeyDown={(e) => {
@@ -262,9 +271,7 @@ export default function TaskDetail({
                 보내기
               </button>
             </div>
-            {!!task.followups?.length && (
-              <div className="muted small">대기 중인 추가 지시: {task.followups.join(' / ')}</div>
-            )}
+            <InstructionList task={task} />
           </>
         )}
 

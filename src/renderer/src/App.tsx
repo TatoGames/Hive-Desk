@@ -134,7 +134,7 @@ export default function App(): JSX.Element {
         <div className="side-foot">
           <div className="who">{snap.config.memberName || '이름 미설정'}</div>
           <div className="muted small">
-            {snap.gitEnabled ? '팀 공유 켜짐' : '로컬 전용'} · 자동 실행 {snap.config.autoRun ? 'ON' : 'OFF'}
+            {snap.gitEnabled ? '팀 공유 켜짐' : '로컬 전용'} · {snap.config.autoRun ? '자동 실행 켜짐' : '자동 실행 꺼짐'}{snap.config.autoRunOrg === false ? ' · 조직 진행 꺼짐' : snap.config.autoRun ? '' : ' · 조직 자동 진행 켜짐 (위임 업무는 계속 돌아요)'}
           </div>
         </div>
       </aside>

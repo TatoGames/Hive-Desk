@@ -74,7 +74,7 @@ import {
 } from '../shared/connections'
 import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
-import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, writeMeta, type MigrationResult } from './workspace'
+import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
 /** After the account hit its usage limit, the company priority decides who may start work for this long. */
 export const SCARCE_HOURS = 6
@@ -445,6 +445,7 @@ export class Engine {
     writeMeta(this.config.workspace, meta)
     const h = new Hive(companyDir(this.config.workspace, meta.id), meta.id)
     this.hives.set(meta.id, h)
+    h.ensureWorkspace()
     if (templateId) this.inCompany(h, () => this.applyTemplate(templateId, clean, place))
     this.switchCompany(meta.id)
     return this.companySummaries().find((c) => c.id === meta.id)!
@@ -463,9 +464,15 @@ export class Engine {
     if (!m || !clean) return
     if (listCompanyMetas(this.config.workspace).some((x) => x.id !== id && x.name === clean)) throw new Error('같은 이름의 회사가 이미 있어요.')
     writeMeta(this.config.workspace, { ...m, name: clean })
-    const h = this.hives.get(id)!
+    let h = this.hives.get(id)!
     const c = h.getCompany()
     if (c) h.saveCompany({ ...c, name: clean })
+    // the folder carries the company's name; only while nothing of this company runs (a folder in use cannot move)
+    const busy = h.listTasks().some((t) => this.running.has(t.id))
+    if (!busy && renameCompanyFolder(this.config.workspace, id, clean)) {
+      h = new Hive(companyDir(this.config.workspace, id), id)
+      this.hives.set(id, h)
+    }
     this.changed()
   }
 
@@ -1108,7 +1115,7 @@ export class Engine {
   /** Continue a held task (same conversation when the AI kept one), with an optional new instruction. */
   resumeTask(id: string, instruction?: string): void {
     const t = this.hive.getTask(id)
-    if (!t || t.status !== 'held') return
+    if (!t || (t.status !== 'held' && t.status !== 'cancelled')) return
     const by = this.config.memberName || 'me'
     if (instruction?.trim()) addInstructionTo(this.hive, id, instruction, by, 'after')
     this.hive.updateTask(id, {

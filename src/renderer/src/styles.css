@@ -293,3 +293,15 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .tree { position: sticky; top: 12px; max-height: 80vh; overflow: auto; }
 .tnode { padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
 .tnode.root { cursor: default; }
+
+/* v4 controls */
+.stack { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.radio { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.row.ctl { gap: 6px; }
+.instr { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); }
+.chip.queued { color: var(--warn); }
+.chip.applied { color: var(--ok, #16a34a); }
+.emergency { background: var(--danger); color: #fff; border-color: var(--danger); }
+.sticky-bar { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 6px 0; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.cancelled-fold { opacity: 0.7; }

@@ -3,6 +3,7 @@ import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatu
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
 import Office from './Office'
+import { AutoSwitches, TaskControls } from './Controls'
 import {
   ConfirmButton,
   DropMessages,
@@ -24,9 +25,11 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'awaiting_approval', label: '승인 대기' },
   { id: 'needs_input', label: '자료 요청' },
   { id: 'running', label: '실행 중' },
+  { id: 'held', label: '보류' },
   { id: 'needs_review', label: '사람 확인' },
   { id: 'done', label: '완료' },
-  { id: 'failed', label: '실패' }
+  { id: 'failed', label: '실패' },
+  { id: 'cancelled', label: '취소됨' }
 ]
 
 function ListBoard({
@@ -70,14 +73,7 @@ function ListBoard({
           <button onClick={onSwitchView}>오피스</button>
           <button className="on">목록</button>
         </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={snap.config.autoRun}
-            onChange={(e) => void window.hive.saveSettings({ autoRun: e.target.checked })}
-          />
-          자동 실행 (내 에이전트에 배정된 준비된 태스크를 차례로 실행)
-        </label>
+        <AutoSwitches snap={snap} />
       </header>
 
       <NewTask snap={snap} />
@@ -183,8 +179,17 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
   const badCheck =
     picked?.check && !picked.check.ok && Date.now() - new Date(picked.check.at).getTime() < 24 * 3600e3 ? picked : null
 
-  const submit = async (): Promise<void> => {
+  const [cmd, setCmd] = useState<{ command: string; rest: string; kind: string } | null>(null)
+
+  const submit = async (force = false): Promise<void> => {
     if (!title.trim()) return
+    if (!force) {
+      const c = await window.hive.classifyInput(title)
+      if (c.kind !== 'task') {
+        setCmd({ command: c.command ?? '', rest: c.rest ?? '', kind: c.kind })
+        return
+      }
+    }
     const t = await window.hive.createTask({
       title,
       description: desc,
@@ -209,6 +214,35 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
 
   return (
     <div className="new-task">
+      {cmd && (
+        <div className="overlay" onClick={() => setCmd(null)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <h2>관리 명령 같아요</h2>
+            <p className="small">"{title}" 은(는) 새 업무가 아니라 지금 돌아가는 일을 멈추거나 취소하라는 말로 보여요.</p>
+            <div className="row end">
+              <button onClick={() => setCmd(null)}>닫기</button>
+              <button
+                onClick={() => {
+                  setCmd(null)
+                  void submit(true)
+                }}
+              >
+                그래도 업무로 만들기
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setCmd(null)
+                  setTitle(cmd.rest)
+                  void window.hive.emergencyStop()
+                }}
+              >
+                ⛔ 비상 정지
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="row">
         <input
           className="grow"
@@ -428,11 +462,7 @@ function Card(props: {
         {t.interruptedRun && !props.running && (
           <ConfirmButton label="되돌리기" onConfirm={() => window.hive.rollbackRun(t.id, t.interruptedRun!)} />
         )}
-        {props.running && (
-          <button className="sm" onClick={() => void window.hive.stopTask(t.id)}>
-            중지
-          </button>
-        )}
+        {(props.running || t.status === 'held' || t.status === 'cancelled' || t.status === 'needs_input') && <TaskControls task={t} compact />}
         {(t.status === 'failed' || t.status === 'done') && (
           <button
             className="sm"
