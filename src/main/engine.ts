@@ -1308,7 +1308,7 @@ export class Engine {
       const h = this.hive
       const ended = h.getTask(id)
       for (const target of [id, ended?.reviewOf].filter((x): x is string => !!x)) {
-        if (h.getTask(target)?.worktree && !h.getTask(target)?.worktree?.merged) queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(target)))
+        if (h.getTask(target)?.worktree && !h.getTask(target)?.worktree?.merged) queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(target)).catch(() => undefined))
       }
     }
   }
@@ -2181,7 +2181,7 @@ export class Engine {
       this.hive.updateTask(id, { status: 'done' })
       if (t.worktree && !t.worktree.merged && !t.parentId) {
         const h = this.hive
-        queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(id)))
+        queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(id)).catch(() => undefined))
       }
       this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
       this.noteTaskAptitude(t, { approved: 1 })
