@@ -56,7 +56,14 @@ const api = {
     ipcRenderer.invoke('task:attach-data', id, name, data),
   removeAttachment: (id: string, rel: string): Promise<void> => ipcRenderer.invoke('task:detach', id, rel),
   replyToTask: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:reply', id, text),
-  addInstruction: (id: string, text: string): Promise<void> => ipcRenderer.invoke('task:instruct', id, text),
+  addInstruction: (id: string, text: string, mode?: 'live' | 'interrupt' | 'after'): Promise<void> => ipcRenderer.invoke('task:instruct', id, text, mode),
+  dropInstruction: (id: string, instructionId: string): Promise<void> => ipcRenderer.invoke('task:instruct-drop', id, instructionId),
+  cancelTask: (id: string, opts: { scope: 'this' | 'tree' | 'pending'; files?: 'keep' | 'run' | 'task' }): Promise<number> => ipcRenderer.invoke('task:cancel', id, opts),
+  cancelPreview: (id: string, scope: 'this' | 'tree' | 'pending'): Promise<import('../shared/tree').CancelPreview & { files: number; additions: number; deletions: number }> => ipcRenderer.invoke('task:cancel-preview', id, scope),
+  resolveFailure: (id: string, choice: 'retry' | 'skip' | 'cancel-all'): Promise<void> => ipcRenderer.invoke('failure:resolve', id, choice),
+  resumeTask: (id: string, instruction?: string): Promise<void> => ipcRenderer.invoke('task:resume', id, instruction),
+  classifyInput: (text: string): Promise<import('../shared/manage').InputClass> => ipcRenderer.invoke('input:classify', text),
+  emergencyStop: (): Promise<number> => ipcRenderer.invoke('app:emergency-stop'),
   rollbackRun: (taskId: string, runId: string): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke('task:rollback', taskId, runId),
   reviewTask: (id: string, decision: 'approve' | 'changes', text?: string): Promise<void> =>
@@ -75,7 +82,7 @@ const api = {
     }
   },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
-  stopTask: (id: string): Promise<void> => ipcRenderer.invoke('task:stop', id),
+  stopTask: (id: string, kind?: 'hold' | 'cancel'): Promise<void> => ipcRenderer.invoke('task:stop', id, kind),
   openAgenda: (title: string, body: string): Promise<void> => ipcRenderer.invoke('agenda:open', title, body),
   decideAgenda: (id: string, choice: number, note?: string): Promise<void> =>
     ipcRenderer.invoke('agenda:decide', id, choice, note),
@@ -92,8 +99,8 @@ const api = {
   setCompanyOrder: (order: string[], adapter?: string): Promise<void> => ipcRenderer.invoke('conn:order', order, adapter),
   reassignTask: (id: string, agentId: string): Promise<Task> => ipcRenderer.invoke('office:reassign', id, agentId),
   officeFeed: (): Promise<{ at: string; taskId: string; taskTitle: string; actor: string; text: string }[]> => ipcRenderer.invoke('office:feed'),
-  decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
-    ipcRenderer.invoke('approval:decide', id, d, note),
+  decideApproval: (id: string, d: 'approved' | 'rejected', note?: string, raise?: 'edit' | 'exec', runCap?: number): Promise<void> =>
+    ipcRenderer.invoke('approval:decide', id, d, note, raise, runCap),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>
     ipcRenderer.invoke('message:send', from, to, body),
   addMemory: (text: string, kind?: 'fixed' | 'recent'): Promise<void> => ipcRenderer.invoke('memory:add', text, kind),

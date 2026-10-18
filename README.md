@@ -1,7 +1,7 @@
 # ⬢ HiveDesk
 
 **내 PC에 설치된 AI 코딩 CLI 여러 개를 하나의 팀처럼 돌리는 데스크톱 앱.**
-Claude Code · OpenAI Codex · Antigravity(agy) · Gemini CLI를 각자 **자기 계정(무료·구독)** 으로 연결해서
+Claude Code · OpenAI Codex · Antigravity(agy)를 각자 **자기 계정(무료·구독)** 으로 연결해서
 칸반 보드로 일을 나누고, 공유 메모리와 메시지함으로 서로 맥락을 넘기고, 위험한 작업은 사람이 승인해요.
 
 > API 키를 쓰지 않아요. HiveDesk는 이미 로그인된 CLI를 대신 실행할 뿐이라 **추가 API 요금이 나가지 않아요.**
@@ -24,7 +24,7 @@ Claude Code · OpenAI Codex · Antigravity(agy) · Gemini CLI를 각자 **자기
 | **실시간 활동 피드·진행** | 실행 중 AI가 하는 일(읽기·수정·명령·메시지)이 실시간으로 보이고, 경과 시간·단계 수·건드린 파일·바뀐 줄 수·계획 체크리스트(n/m)가 표시돼요. 작업 폴더 경로와 *폴더 열기* 버튼도 있어요. |
 | **바뀐 파일 실시간 확인** | 피드는 AI가 스스로 알려 주는 내용이라, 작업 폴더를 3초마다 직접 비교한 실제 변경 목록을 나란히 보여줘요. 파일별 diff 보기, 기본 앱으로 열기를 지원해요. git이 아닌 폴더는 파일 목록만 보여주고, *변경 추적 켜기*로 git 저장소로 만들 수 있어요. |
 | **자료 첨부·참고 폴더** | 파일·이미지를 끌어다 놓으면 작업공간의 태스크 폴더로 복사되고 경로가 프롬프트에 들어가요(팀 공유). 큰 파일은 설정한 크기(기본 5MB)를 넘으면 이 컴퓨터에만 둬요. 태스크마다 참고 폴더도 지정할 수 있어요. |
-| **권한 단계** | 태스크마다 읽기만 / 작업 폴더 수정 / 명령 실행(위험, 승인 필요). 에이전트에 '기본 권한'을 정해 둘 수도 있어요. Claude·Codex는 CLI 옵션으로 실제로 막고, Antigravity·Gemini·직접 지정은 기본이 '읽기만'이에요(수정을 맡기려면 실행 전 점검에서 '위험을 알고 있어요'를 체크). 기본 단계에서는 `rm`·`mv` 같은 삭제·이동 명령을 Claude에서 막아요. |
+| **권한 단계** | 태스크마다 읽기만 / 작업 폴더 수정 / 명령 실행(위험, 승인 필요). 에이전트에 '기본 권한'을 정해 둘 수도 있어요. Claude·Codex는 CLI 옵션으로 실제로 막고, Antigravity·직접 지정은 기본이 '읽기만'이에요(수정을 맡기려면 실행 전 점검에서 '위험을 알고 있어요'를 체크). 기본 단계에서는 `rm`·`mv` 같은 삭제·이동 명령을 Claude에서 막아요. |
 | **되돌리기** | 실행 전에 상태를 저장해 둬요(git 저장소는 숨은 참조, 아니면 파일 백업 — 파일 5000개·100MB 넘는 폴더는 백업 안 함). 태스크 상세·카드의 *되돌리기*로 그 실행이 바꾼 것만 원래대로 돌려요. |
 | **폴더 잠금·한도 대기** | 같은 작업 폴더에서는 한 번에 한 태스크만 실행해요(나머지는 '폴더 대기'). CLI가 사용량 한도를 알리면 그 CLI의 자동 실행을 풀릴 때까지 멈추고(수동으로 *한도 해제* 가능) 태스크는 '할 일'로 남아요. |
 | **앱 종료·절전 대응** | 실행 중에는 절전을 막고, 종료하려 하면 확인을 받아요. 실행 중 앱이 닫히면 다음에 켤 때 '중단됨'으로 표시하고 변경분을 보여 줘요. |
@@ -93,7 +93,6 @@ Claude Code · OpenAI Codex · Antigravity(agy) · Gemini CLI를 각자 **자기
 | Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` (Windows: `irm https://claude.ai/install.ps1 \| iex`) | `claude` 실행 → Claude Pro/Max 계정 로그인 |
 | OpenAI Codex | `npm install -g --prefix ~/.npm-global @openai/codex` (관리자 암호 없이 설치) | `codex login` → *Sign in with ChatGPT* |
 | Antigravity (agy) | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` 실행 → Google 계정 로그인 (무료 계정 가능) |
-| Gemini CLI | `npm i -g @google/gemini-cli` | Google 로그인. **2026-06-18부터 무료·AI Pro·Ultra 개인 계정은 agy로 이전**되어, Gemini CLI는 Code Assist 라이선스·Vertex·API 키가 있을 때만 써요 |
 | 기타 | 직접 지정 | stdin으로 프롬프트를 받아 stdout으로 답하는 CLI면 무엇이든 (예: `ollama run llama3`) |
 
 > 설치 후 터미널에서 `claude`를 못 찾는다고 나와도 괜찮아요. HiveDesk는 `~/.local/bin`, `~/.npm-global/bin`, Homebrew, nvm 폴더를 알아서 찾아요.
@@ -132,7 +131,7 @@ Windows에서 SmartScreen 경고가 뜨면 *추가 정보 → 실행*을 누르�
 |---|---|---|
 | Claude Code | `--permission-mode acceptEdits` | 작업 폴더 안 파일 수정은 허용. 삭제·이동 명령(`rm`·`mv` 등)과 비밀 파일 읽기는 차단, 그 밖의 셸 명령은 거부 |
 | Codex | `--sandbox workspace-write` | 작업 폴더 안에서만 쓰기 허용 |
-| Antigravity / Gemini / 직접 지정 | (없음) | HiveDesk가 막을 방법이 없어서 기본은 '읽기만'. 수정은 실행 전 점검에서 위험 확인 후 |
+| Antigravity / 직접 지정 | (없음) | HiveDesk가 막을 방법이 없어서 기본은 '읽기만'. 수정은 실행 전 점검에서 위험 확인 후 |
 
 더 넓은 권한이 필요하면 에이전트 설정의 *추가 인자*에서 바꿀 수 있어요. 그럴 때는 *모든 태스크 실행 전 승인 받기*를 함께 켜 두는 걸 권해요.
 
@@ -199,7 +198,7 @@ test/          vitest 테스트 + 가짜 CLI
 - 에이전트는 비대화형 모드로 돌아가요. 대화는 '자료 요청 → 답변 → 이어서 실행'과 '추가 지시'로 이어져요.
 - CLI별 지원 범위가 달라요.
 
-  | | Claude Code | Codex | Antigravity / Gemini / 직접 입력 |
+  | | Claude Code | Codex | Antigravity / 직접 입력 |
   |---|---|---|---|
   | 활동 피드 | 구조화(stream-json) | 구조화(`--json`, 실제 CLI로는 미검증) | 출력 텍스트 기반 |
   | 권한 단계 | 도구 허용/차단으로 강제 | 샌드박스로 강제(명령 실행은 danger-full-access) | 프롬프트로만 안내 |

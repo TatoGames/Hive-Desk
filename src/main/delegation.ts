@@ -2,7 +2,7 @@ import { parseEscalation } from '../shared/committee'
 import {
   FLAG_LABEL,
   LIMITS,
-  estimateRuns,
+  estimateBreakdown,
   parsePlan,
   parseVerdict,
   validateAfter
@@ -25,6 +25,7 @@ import type {
   RosterEntry,
   Task
 } from '../shared/types'
+import { rootOf, subtree } from '../shared/tree'
 import type { Hive } from './hive'
 
 export interface DelegationCtx {
@@ -35,6 +36,8 @@ export interface DelegationCtx {
   notify: (title: string, body: string) => void
   /** A manager cannot tell which direction to take: hand the question to the CEO committee. */
   escalate?: (task: Task, question: string) => void
+  /** Cancel a whole bundle (running parts are stopped). */
+  cancelTree?: (rootId: string) => void
   /** Credit/charge the model that did a task (cross review result). */
   aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
 }
@@ -249,7 +252,8 @@ export class Delegation {
       'If something essential is missing, do NOT plan. Ask the board exactly what you need with [[NEED: your specific questions]] and stop.',
       'Step 2 — Size. If the job is small enough that you can do it yourself, answer only [[SELF: why it is small]] (no sub-tasks).',
       'Step 3 — Otherwise write a distribution plan, one line per sub-task, in this exact form:',
-      '[[SUBTASK: <title> | assignee=<agent id from the list below> | done=<completion criteria> | after=<numbers of sub-tasks that must finish first, comma separated, or none>]]',
+      '[[SUBTASK: <title> | assignee=<agent id from the list below> | access=<read|edit|exec> | done=<completion criteria> | after=<numbers of sub-tasks that must finish first, comma separated, or none>]]',
+      'access: edit = the result is files (writing, building, editing) — this is the usual case; read = only analysis or a report; exec = commands must run (build, test, install). Do NOT give read to a sub-task that has to create files.',
       'Sub-tasks are numbered 1, 2, 3 … in the order you write them; "after" may only point at earlier numbers.',
       `Write at most ${LIMITS.maxSubtasks} sub-tasks. Give each piece to the lowest rank that can do it well.`,
       'Then write [[ESTIMATE: <total AI runs expected, counting reviews>]] and [[FLAGS: <comma separated of: risky, scope, other-unit, conflict — or none>]].',
@@ -315,7 +319,9 @@ export class Delegation {
   }
 
   private integratePrompt(task: Task): string[] {
-    const kids = this.children(task.id)
+    const all = this.children(task.id)
+    const kids = all.filter((k) => k.status !== 'cancelled')
+    const dropped = all.filter((k) => k.status === 'cancelled')
     const lines = [
       '',
       '## Your role in this task: INTEGRATION (confirm and report up)',
@@ -330,6 +336,10 @@ export class Delegation {
       if (k.report) lines.push(`did: ${k.report.did}`, `files: ${k.report.files}`, `verify: ${k.report.verify}`, `risks: ${k.report.risks}`)
       else lines.push((k.result ?? '').slice(0, 1500))
     }
+    if (dropped.length) {
+      lines.push('', 'These sub-tasks were cancelled or skipped by the board and were NOT done — leave them out and say so in RISK:')
+      for (const k of dropped) lines.push(`- ${k.title}`)
+    }
     return lines
   }
 
@@ -342,10 +352,7 @@ export class Delegation {
   onRunFinished(taskId: string): void {
     const t = this.c.hive.getTask(taskId)
     if (!t || !t.kind) return
-    if (t.status === 'failed') {
-      if (t.parentId) this.c.notify('하위 작업이 실패했어요', `${t.title}: 보드에서 다시 실행하거나 확인해 주세요.`)
-      return
-    }
+    if (t.status === 'failed') return void this.afterFailure(t)
     if (t.status !== 'done') return
     const q = t.kind === 'plan' ? parseEscalation(t.result ?? '') : null
     if (q && this.c.escalate) this.c.escalate(t, q)
@@ -354,6 +361,96 @@ export class Delegation {
     else if (t.kind === 'work') this.afterWork(t)
     else if (t.kind === 'integrate') this.afterIntegrate(t)
     this.c.changed()
+  }
+
+  /**
+   * A task of a bundle failed: whatever waits for it is marked blocked (with the reason), the manager above is told,
+   * and the board gets one decision to make: another model / go on without it / cancel the bundle.
+   */
+  afterFailure(t: Task): void {
+    const h = this.c.hive
+    const all = h.listTasks()
+    for (const d of all) {
+      if (d.dependsOn.includes(t.id) && d.status === 'todo' && !d.blocked) {
+        h.updateTask(d.id, { blocked: { by: t.id, reason: `앞 작업 "${t.title}"가 실패했어요` } })
+        this.event(d.id, `앞 작업 "${t.title}"가 실패해서 막혔어요.`)
+      }
+    }
+    if (!t.parentId && !t.reviewOf) return
+    const parent = all.find((x) => x.id === (t.parentId ?? t.reviewOf))
+    if (parent) this.event(parent.id, `하위 작업 "${t.title}"가 실패했어요: ${(t.error ?? '').split('\n')[0].slice(0, 120)}`)
+    if (h.hasPendingApproval(t.id, 'failure')) return
+    h.createApproval({
+      kind: 'failure',
+      taskId: t.id,
+      agentId: t.assignee ?? '',
+      reason: `"${t.title}"가 실패했어요 — ${(t.error ?? '').split('\n')[0].slice(0, 160)}\n이 작업을 기다리던 일이 멈췄어요. 정해 주세요.`
+    })
+    this.c.notify('묶음이 막혔어요', `${t.title}: 실패 · 결재함에서 다음 행동을 골라 주세요`)
+  }
+
+  /** The board's answer to a failure: another model, go on without it, or cancel the whole bundle. */
+  resolveFailure(approvalId: string, choice: 'retry' | 'skip' | 'cancel-all', by: string): void {
+    const h = this.c.hive
+    const a = h.listApprovals().find((x) => x.id === approvalId)
+    if (!a || a.kind !== 'failure' || a.status !== 'pending') return
+    const t = h.getTask(a.taskId)
+    h.closeApproval(approvalId, by, choice === 'retry' ? '다른 모델로 다시 시도' : choice === 'skip' ? '이 작업을 빼고 진행' : '묶음 전체 취소', 'approved')
+    if (!t) return
+    const unblock = (): void => {
+      for (const d of h.listTasks()) if (d.blocked?.by === t.id) h.updateTask(d.id, { blocked: undefined })
+    }
+    if (choice === 'cancel-all') {
+      this.c.cancelTree?.(rootOf(h.listTasks(), t).id)
+      return
+    }
+    if (choice === 'retry') {
+      const alt = t.assignee ? this.alternativeFor(t.assignee) : null
+      h.updateTask(t.id, {
+        status: 'todo', error: undefined, errorKind: undefined, auto: true, planTries: 0,
+        ...(alt ? { assignee: alt } : {}), reply: undefined
+      })
+      this.event(t.id, alt ? `다른 모델(${this.modelName(alt)}, ${this.rosterOf(alt)?.name ?? alt})로 다시 시도해요.` : '같은 담당자가 다시 시도해요 (바꿀 다른 모델이 없어요).')
+      unblock()
+      return void this.c.changed()
+    }
+    // skip
+    if (t.kind === 'review' && t.reviewOf) {
+      const target = h.getTask(t.reviewOf)
+      h.updateTask(t.id, { status: 'cancelled', error: undefined })
+      if (target) {
+        h.updateTask(target.id, { status: 'done', reviewState: { status: 'skipped', round: target.reviewState?.round ?? 0, escalations: target.reviewState?.escalations ?? 0, note: '검토가 실패해서 검토 없이 진행했어요.' } })
+        this.event(target.id, '검토가 실패해서 사람이 "검토 없이 진행"을 골랐어요.')
+        this.rollUp(h.getTask(target.id)!)
+      }
+    } else {
+      h.updateTask(t.id, { status: 'cancelled', error: '이사회가 이 작업을 빼고 진행하기로 했어요.' })
+      for (const d of h.listTasks()) {
+        if (d.dependsOn.includes(t.id)) h.updateTask(d.id, { dependsOn: d.dependsOn.filter((x) => x !== t.id), blocked: d.blocked?.by === t.id ? undefined : d.blocked })
+      }
+      this.event(t.id, '이 작업을 빼고 진행해요 (통합 보고서에 적혀요).')
+      if (t.parentId) this.checkParent(t.parentId)
+    }
+    unblock()
+    this.c.changed()
+  }
+
+  /** Another employee for the same kind of work: a different model, same or higher tier, preferably the same unit. */
+  alternativeFor(agentId: string): string | null {
+    const seat = this.seatOf(agentId)
+    const key = this.modelKeyOf(agentId)
+    const tier = this.modelOf(agentId)?.tier
+    const near = seat ? this.subtree(seat.unitId) : new Set<string>()
+    const cands = this.seats
+      .filter((s) => s.agentId && s.agentId !== agentId && s.job === (seat?.job ?? s.job) && this.modelKeyOf(s.agentId) !== key)
+      .map((s) => {
+        const m = this.modelOf(s.agentId!)
+        let score = near.has(s.unitId) ? 0 : 5
+        if (tier && m && tierRank(m.tier) < tierRank(tier)) score += 8
+        return { id: s.agentId!, score }
+      })
+      .sort((a, b) => a.score - b.score)
+    return cands[0]?.id ?? null
   }
 
   private event(taskId: string, text: string): void {
@@ -420,7 +517,13 @@ export class Delegation {
         return s && !mine.has(s.unitId)
       })) flags.add('other-unit')
     }
-    const estimate = Math.max(parsed.estimate ?? 0, estimateRuns(managers.map((m) => ({ manager: m }))))
+    const est = estimateBreakdown(
+      parsed.items.map((i, k) => ({ manager: managers[k], est: i.est, reviewed: i.access !== 'read' })),
+      this.runHistory()
+    )
+    // the planner's own total (if it gave one) is the first source; the parts show where a number from history/defaults would land
+    const estimate = parsed.estimate ?? est.total
+    if (parsed.estimate) est.basis = ['planner', ...est.basis.filter((b) => b !== 'planner')]
     const budget = this.budgetOf(t.projectId)
     if (budget && this.runsUsed(t.projectId) + estimate > budget) flags.add('budget')
 
@@ -445,6 +548,7 @@ export class Delegation {
     const plan: Plan = {
       items: parsed.items,
       estimateRuns: estimate,
+      estimateParts: { plan: est.plan, work: est.work, review: est.review, buffer: est.buffer, basis: est.basis },
       flags: [...flags],
       status: approver === 'board' ? 'awaiting_board' : approver === 'superior' ? 'awaiting_superior' : 'approved',
       approver,
@@ -464,6 +568,34 @@ export class Delegation {
     // superior approves: a plan-review task runs on the superior's agent
     this.makeReviewTask(t, superior!, `[계획 검토] ${t.title}`)
     h.updateTask(t.id, { status: 'in_review' })
+  }
+
+  /** What finished sub-tasks of this company really cost in AI runs (needs a few samples to count). */
+  private runHistory(): { worker?: number; manager?: number } {
+    const h = this.c.hive
+    const all = h.listTasks()
+    const runsOf = (ids: string[]): number => h.listAptitude().filter((a) => ids.includes(a.taskId.split('~')[0])).reduce((n, a) => n + a.runs, 0)
+    const avg = (ts: Task[], f: (t: Task) => number): number | undefined => {
+      const xs = ts.map(f).filter((n) => n > 0)
+      return xs.length >= 3 ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : undefined
+    }
+    const workers = all.filter((t) => t.parentId && t.kind === 'work' && t.status === 'done')
+    const managers = all.filter((t) => t.parentId && t.kind === 'plan' || t.parentId && t.kind === 'integrate').filter((t) => t.status === 'done')
+    return {
+      worker: avg(workers, (t) => runsOf([t.id, ...all.filter((x) => x.reviewOf === t.id).map((x) => x.id)])),
+      manager: avg(managers, (t) => runsOf(this.subtreeIds(t.id)))
+    }
+  }
+
+  private subtreeIds(id: string): string[] {
+    const all = this.c.hive.listTasks()
+    const out = new Set<string>([id])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const t of all) if (!out.has(t.id) && ((t.parentId && out.has(t.parentId)) || (t.reviewOf && out.has(t.reviewOf)))) (out.add(t.id), (grew = true))
+    }
+    return [...out]
   }
 
   private makeReviewTask(target: Task, reviewer: string, title: string): Task {
@@ -498,7 +630,8 @@ export class Delegation {
         assignee: it.assignee,
         dependsOn: it.after.map((n) => created[n - 1]).filter(Boolean),
         projectId: t.projectId,
-        ...(manager ? { permission: 'read' as const } : {}),
+        // managers only plan (read); workers get what their result needs — file work is `edit`, never read-only by accident
+        permission: manager ? ('read' as const) : (it.access ?? 'edit'),
         createdBy: by
       })
       h.updateTask(c.id, {
@@ -661,12 +794,17 @@ export class Delegation {
     this.checkParent(child.parentId)
   }
 
+  /** A sub-task was cancelled or skipped: the bundle may be ready to integrate. */
+  childSettled(parentId: string): void {
+    this.checkParent(parentId)
+  }
+
   private checkParent(parentId: string): void {
     const h = this.c.hive
     const p = h.getTask(parentId)
     if (!p || p.status !== 'delegated') return
     const kids = this.children(p.id)
-    if (!kids.length || !kids.every((k) => k.status === 'done')) return
+    if (!kids.length || !kids.every((k) => k.status === 'done' || k.status === 'cancelled') || !kids.some((k) => k.status === 'done')) return
     h.updateTask(p.id, { kind: 'integrate', status: 'todo', auto: true, permission: 'read', reply: undefined })
     this.event(p.id, '하위 작업이 모두 끝났어요. 담당 관리자가 확인하고 통합해요.')
   }
@@ -707,7 +845,7 @@ export class Delegation {
     return this.c.hive.listAptitude().filter((a) => ids.has(a.taskId.split('~')[0])).reduce((n, a) => n + a.runs, 0)
   }
 
-  // ---- final report ----
+// ---- final report ----
   buildFinal(rootId: string): FinalReport {
     const h = this.c.hive
     const all = h.listTasks()
@@ -765,6 +903,9 @@ export class Delegation {
       }
     }
     const tree = node(root)
+    const inTree = new Set(subtree(all, root.id).map((t) => t.id))
+    const skipped = all.filter((x) => x.status === 'cancelled' && x.kind !== 'review' && inTree.has(x.id))
+    if (skipped.length) risks.push(`취소되거나 빠진 하위 업무 ${skipped.length}건: ${skipped.map((k) => k.title).join(', ')}`)
     const sum = (n: ReportNode): { runs: number; minutes: number } =>
       n.children.reduce((a, c) => ({ runs: a.runs + sum(c).runs, minutes: a.minutes + sum(c).minutes }), { runs: n.runs, minutes: n.minutes })
     const total = sum(tree)

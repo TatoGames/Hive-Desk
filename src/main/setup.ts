@@ -36,14 +36,6 @@ export const SETUP: Partial<Record<AdapterId, SetupSpec>> = {
   agy: {
     install: { unix: 'curl -fsSL https://antigravity.google/cli/install.sh | bash' },
     login: 'agy'
-  },
-  gemini: {
-    install: {
-      unix: 'npm install -g --prefix "$HOME/.npm-global" @google/gemini-cli',
-      win32: 'npm install -g @google/gemini-cli'
-    },
-    login: 'gemini',
-    needsNode: true
   }
 }
 

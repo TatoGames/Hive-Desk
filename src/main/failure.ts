@@ -29,7 +29,7 @@ const RULES: { kind: FailureKind; re: RegExp; title: string; hint: string }[] = 
   },
   {
     kind: 'not_found',
-    re: /command not found|enoent|is not recognized|명령을 찾을 수 없|no such file or directory: ['"]?(claude|codex|agy|gemini)/i,
+    re: /command not found|enoent|is not recognized|명령을 찾을 수 없|no such file or directory: ['"]?(claude|codex|agy)/i,
     title: 'AI 프로그램을 찾을 수 없어요.',
     hint: '에이전트 화면에서 설치 상태를 확인하고, 없으면 [설치]를 눌러 주세요.'
   },

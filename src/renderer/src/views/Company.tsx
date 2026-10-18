@@ -578,7 +578,7 @@ function ModelDialog({ draft, onClose }: { draft: ModelEntry; onClose: () => voi
           <label>
             사용할 CLI
             <select value={d.adapter} onChange={(e) => setD({ ...d, adapter: e.target.value as ModelEntry['adapter'] })}>
-              {['claude', 'codex', 'gemini', 'agy', 'custom'].map((a) => (
+              {['claude', 'codex', 'agy', 'custom'].map((a) => (
                 <option key={a}>{a}</option>
               ))}
             </select>

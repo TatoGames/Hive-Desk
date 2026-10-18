@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import type {
   CompanySummary,
   Agent,
+  InstructionMode,
   AppConfig,
   AttachResult,
   EngineEvent,
@@ -27,6 +28,8 @@ import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Ru
 import { checkCli } from './setup'
 import { Committee } from './committee'
 import { Delegation } from './delegation'
+import { rootOf, subtree, cancelTargets, type CancelPreview } from '../shared/tree'
+import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, queuedOf } from './instructions'
 import { Collaboration } from './collaboration'
 import { CollabStore } from './collab'
 import type { ChannelInput } from './collaboration'
@@ -38,10 +41,10 @@ import { findSecrets } from './secrets'
 import { SHARED_DIRS } from './hive'
 import { loadConfig, makeAgent, saveConfig } from './config'
 import { diffSinceCheckpoint, rollback } from './checkpoint'
-import { enableTracking, isInsideGit, normPath } from './gitdiff'
+import { containsPath, enableTracking, isInsideGit, normPath } from './gitdiff'
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
-import { budgetProblem, resolveCwd, runTask } from './runner'
+import { budgetProblem, holdsAppData, resolveCwd, runTask } from './runner'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
   DEFAULT_RULES,
@@ -78,6 +81,9 @@ export const SCARCE_HOURS = 6
 
 export type Emit = (e: EngineEvent) => void
 
+/** Why a person stopped a run: pause the task, cancel it, or the emergency stop. */
+export type StopKind = 'hold' | 'cancel' | 'emergency'
+
 const STATUS_LABEL: Record<TaskStatus, string> = {
   todo: '할 일',
   awaiting_approval: '승인 대기',
@@ -87,7 +93,9 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   in_review: '교차 검토',
   delegated: '위임 진행',
   done: '완료',
-  failed: '실패'
+  failed: '실패',
+  held: '보류',
+  cancelled: '취소됨'
 }
 
 /** Owns config + hive, runs tasks (manually or via auto-run), and schedules git sync. */
@@ -108,6 +116,8 @@ export class Engine {
     return this.als.getStore() ?? this.hives.get(this.config.activeCompanyId ?? '') ?? [...this.hives.values()][0]
   }
   private running = new Map<string, AbortController>()
+  /** The promise of each run in progress (cancel waits for the process to end). */
+  private pendingRuns = new Map<string, Promise<unknown>>()
   private liveRuns = new Map<string, LiveRun>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
@@ -143,6 +153,7 @@ export class Engine {
       changed: () => self.changed(),
       notify: (title, body) => self.notify(title, body),
       escalate: (t, q) => self.escalateToCommittee(t, q),
+      cancelTree: (rootId) => void self.cancelTask(rootId, { scope: 'tree' }),
       aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d)
     })
     this.committee = new Committee({
@@ -533,7 +544,7 @@ export class Engine {
   }
 
   connectionViews(): ConnectionView[] {
-    const adapters = ['claude', 'codex', 'gemini', 'agy'] as Agent['adapter'][]
+    const adapters = ['claude', 'codex', 'agy'] as Agent['adapter'][]
     const checks = this.machine.connectionChecks()
     const mas = this.machine.modelAgents()
     return adapters
@@ -741,7 +752,15 @@ export class Engine {
     /** Hand it to the lead of this unit (implies delegate). */
     unitId?: string
   }): Task {
-    let t = this.hive.createTask({ ...input, createdBy: this.config.memberName || 'me' })
+    const by = this.config.memberName || 'me'
+    // a double click or Enter + click sends the same job twice within a moment: keep one
+    const dupe = this.hive.listTasks().find(
+      (x) =>
+        !x.hidden && !x.parentId && x.createdBy === by && Date.now() - new Date(x.createdAt).getTime() < 5000 &&
+        x.title === input.title.trim() && x.description === (input.description?.trim() ?? '') && x.assignee === (input.assignee ?? null)
+    )
+    if (dupe) return dupe
+    let t = this.hive.createTask({ ...input, createdBy: by })
     if (input.delegate || input.unitId) {
       try {
         t = this.delegation.begin(t, { unitId: input.unitId, delegate: true })
@@ -756,7 +775,8 @@ export class Engine {
 
   updateTask(id: string, patch: Partial<Task>): Task {
     const before = this.hive.getTask(id)
-    const t = this.hive.updateTask(id, patch)
+    // a person changing the status by hand takes over from an earlier stop
+    const t = this.hive.updateTask(id, patch.status ? { stoppedBy: undefined, ...patch } : patch)
     if (before && patch.status && patch.status !== before.status) {
       this.hive.addEvent(
         id,
@@ -855,7 +875,7 @@ export class Engine {
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
-    return resolveCwd(agent, this.hive.root, this.hive.projectDir(t?.projectId))
+    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId))
   }
 
   private folderBusy(agent: Agent, taskId: string): boolean {
@@ -864,7 +884,12 @@ export class Engine {
 
   /** Run a task; if the human added instructions while it ran, apply them right after (same session if possible). */
   runTask(id: string): Promise<string> {
-    return this.als.run(this.hive, () => this.runTaskImpl(id))
+    const p = this.als.run(this.hive, () => this.runTaskImpl(id))
+    this.pendingRuns.set(id, p)
+    void p.finally(() => {
+      if (this.pendingRuns.get(id) === p) this.pendingRuns.delete(id)
+    })
+    return p
   }
 
   private async runTaskImpl(id: string): Promise<string> {
@@ -881,17 +906,16 @@ export class Engine {
     let locked = false
     try {
       locked = await this.lockFolder(key, id, ac.signal)
-      if (!locked) return 'cancelled'
+      if (!locked) {
+        this.applyStop(id, typeof ac.signal.reason === 'string' ? (ac.signal.reason as StopKind) : 'hold')
+        return 'cancelled'
+      }
       let outcome = await this.runOnce(agent, id, ac)
-      for (let i = 0; i < 3 && outcome === 'done' && !ac.signal.aborted; i++) {
+      // instructions that arrived during (or after) the run: apply them in the same conversation, as many rounds as needed
+      for (let i = 0; i < 20 && outcome === 'done' && !ac.signal.aborted; i++) {
         const t = this.hive.getTask(id)
-        const extra = t?.followups ?? []
-        if (!t || !extra.length) break
-        this.hive.updateTask(id, {
-          status: 'todo',
-          followups: [],
-          reply: extra.map((x, k) => (extra.length > 1 ? `${k + 1}. ` : '') + x).join('\n')
-        })
+        if (!t || !queuedOf(t).length) break
+        this.hive.updateTask(id, { status: 'todo', reply: undefined })
         outcome = await this.runOnce(agent, id, ac)
       }
       // delegation: what a plan / review / work run produced decides what happens next
@@ -915,7 +939,7 @@ export class Engine {
       hive: this.hive,
       stripApiKeys: this.config.stripApiKeys,
       runner: this.runner,
-      defaultCwd: this.hive.root,
+      defaultCwd: this.hive.ensureWorkspace(),
       machine: this.config.memberName,
       signal: ac.signal,
       watchMs: this.watchMs,
@@ -941,8 +965,180 @@ export class Engine {
     return this.liveRuns.get(id)?.state() ?? null
   }
 
-  stopTask(id: string): void {
-    this.running.get(id)?.abort()
+  /**
+   * Stop what a person stops: the run ends, the task is held (or cancelled) and never starts again by itself.
+   * Not running yet (waiting, ready, asking)? Then it is held right away.
+   */
+  stopTask(id: string, kind: StopKind = 'hold'): void {
+    const ac = this.running.get(id)
+    if (ac) {
+      ac.abort(kind)
+      return
+    }
+    this.applyStop(id, kind)
+    this.changed()
+  }
+
+  private applyStop(id: string, kind: StopKind): void {
+    const t = this.hive.getTask(id)
+    if (!t || t.status === 'done' || t.status === 'cancelled' || (t.status === 'held' && kind !== 'cancel')) return
+    const by = this.config.memberName || 'me'
+    const cancel = kind === 'cancel'
+    this.hive.updateTask(id, {
+      status: cancel ? 'cancelled' : 'held',
+      stoppedBy: { by, at: new Date().toISOString(), kind },
+      error: cancel ? '취소했어요.' : '사용자가 중지했어요.',
+      finishedAt: new Date().toISOString()
+    })
+    if (cancel) {
+      for (const a of this.hive.listApprovals()) if (a.taskId === id && a.status === 'pending') this.hive.closeApproval(a.id, by, '업무를 취소해서 닫았어요.')
+    }
+    this.hive.addEvent(id, 'status', by, cancel ? '업무를 취소했어요.' : kind === 'emergency' ? '비상 정지로 보류했어요.' : '중지해서 보류했어요. 이어서 하기를 누르기 전에는 저절로 시작하지 않아요.')
+  }
+
+  /** What a cancel would touch, for the confirmation window. */
+  cancelPreview(id: string, scope: 'this' | 'tree' | 'pending'): CancelPreview & { files: number; additions: number; deletions: number } {
+    const all = this.hive.listTasks()
+    const { preview, cancel } = cancelTargets(all, id, scope, [...this.running.keys()])
+    let files = 0
+    let additions = 0
+    let deletions = 0
+    for (const t of cancel) {
+      const run = this.hive.listSharedRuns(t.id).slice(-1)[0]
+      if (run && (this.running.has(t.id) || t.status === 'held')) {
+        files += run.diffStat.files
+        additions += run.diffStat.additions
+        deletions += run.diffStat.deletions
+      }
+      const live = this.liveRuns.get(t.id)?.summary()
+      if (live) {
+        files += live.files
+        additions += live.add
+        deletions += live.del
+      }
+    }
+    return { ...preview, files, additions, deletions }
+  }
+
+  /**
+   * Cancel a task: this one, it and everything below it, or only what has not started.
+   * Done work stays as it is; every cancelled task keeps its record and can be reopened.
+   */
+  async cancelTask(id: string, opts: { scope: 'this' | 'tree' | 'pending'; files?: 'keep' | 'run' | 'task' }): Promise<number> {
+    const all = this.hive.listTasks()
+    const t0 = all.find((t) => t.id === id)
+    if (!t0) return 0
+    const { cancel } = cancelTargets(all, id, opts.scope, [...this.running.keys()])
+    const waiters: Promise<unknown>[] = []
+    for (const t of cancel) {
+      const p = this.pendingRuns.get(t.id)
+      this.stopTask(t.id, 'cancel')
+      if (p) waiters.push(p)
+    }
+    await Promise.allSettled(waiters)
+    if (opts.files && opts.files !== 'keep') await this.revertFiles(id, opts.files, cancel.map((t) => t.id))
+    if (t0.parentId) {
+      this.hive.addEvent(t0.parentId, 'delegation', this.config.memberName || 'me', `하위 작업 "${t0.title}"를 취소했어요.`)
+      this.delegation.childSettled(t0.parentId)
+    }
+    this.changed()
+    return cancel.length
+  }
+
+  /** Undo what a stopped task changed: its latest run, or every run of the cancelled tasks (newest first). */
+  private async revertFiles(rootId: string, mode: 'run' | 'task', ids: string[]): Promise<void> {
+    const targets = mode === 'run' ? [rootId] : ids
+    for (const tid of targets) {
+      const runs = this.hive.listSharedRuns(tid).filter((r) => r.outcome !== 'running').reverse()
+      for (const r of mode === 'run' ? runs.slice(0, 1) : runs) {
+        const rec = this.hive.getRun(tid, r.id)
+        if (!rec || rec.rolledBackAt || !rec.checkpoint) continue
+        const res = await this.rollbackRun(tid, r.id)
+        if (!res.ok) {
+          this.hive.addEvent(tid, 'rollback', this.config.memberName || 'me', `되돌리기를 멈췄어요: ${res.message}`)
+          return
+        }
+      }
+    }
+  }
+
+  /** The board's answer to a failed task of a bundle. */
+  resolveFailure(approvalId: string, choice: 'retry' | 'skip' | 'cancel-all'): void {
+    this.delegation.resolveFailure(approvalId, choice, this.config.memberName || 'me')
+    this.changed()
+  }
+
+  /** Bundles that reached the run cap the board approved ask for more (or are held when the board says no). */
+  private checkBundleCaps(h: Hive, all: Task[]): void {
+    for (const root of all) {
+      const cap = root.plan?.runCap
+      if (!cap || root.parentId || root.status === 'done' || root.status === 'cancelled' || root.status === 'held') continue
+      if (h.hasPendingApproval(root.id, 'bundle-cap')) continue
+      const ids = new Set(subtree(all, root.id).map((t) => t.id))
+      const used = h.listAptitude().filter((a) => ids.has(a.taskId.split('~')[0])).reduce((n, a) => n + a.runs, 0)
+      if (used >= cap) {
+        h.createApproval({ kind: 'bundle-cap', taskId: root.id, agentId: root.assignee ?? '', reason: `"${root.title}" 묶음이 정해 둔 실행 상한 ${cap}회에 도달했어요 (지금까지 ${used}회). 더 진행할까요?` })
+        this.notify('실행 상한에 도달했어요', root.title)
+      }
+    }
+  }
+
+  private bundleCapped(h: Hive, all: Task[], t: Task): boolean {
+    const root = rootOf(all, t)
+    return !!root.plan?.runCap && h.hasPendingApproval(root.id, 'bundle-cap')
+  }
+
+  /** Failed bundles nobody decided on for a while are held (nothing starts by itself). */
+  private holdStaleFailures(h: Hive, all: Task[]): void {
+    const hours = this.config.failureHoldHours ?? 3
+    for (const a of h.listApprovals()) {
+      if (a.kind !== 'failure' || a.status !== 'pending') continue
+      if (Date.now() - new Date(a.createdAt).getTime() < hours * 3600e3) continue
+      const t = all.find((x) => x.id === a.taskId)
+      const root = t ? rootOf(all, t) : undefined
+      h.closeApproval(a.id, 'system', `${hours}시간 동안 답이 없어서 묶음을 보류했어요.`)
+      if (!root) continue
+      for (const x of subtree(all, root.id)) {
+        if (x.status === 'todo' || x.status === 'awaiting_approval') this.applyStop(x.id, 'hold')
+      }
+      this.notify('묶음을 보류했어요', `${root.title}: 실패 결재에 ${hours}시간 동안 답이 없었어요.`)
+    }
+  }
+
+  /** Continue a held task (same conversation when the AI kept one), with an optional new instruction. */
+  resumeTask(id: string, instruction?: string): void {
+    const t = this.hive.getTask(id)
+    if (!t || t.status !== 'held') return
+    const by = this.config.memberName || 'me'
+    if (instruction?.trim()) addInstructionTo(this.hive, id, instruction, by, 'after')
+    this.hive.updateTask(id, {
+      status: 'todo',
+      stoppedBy: undefined,
+      error: undefined,
+      blocked: undefined,
+      ...(instruction?.trim() ? {} : { reply: '사람이 이어서 진행하라고 했어요. 하던 일을 계속하세요.' })
+    })
+    this.hive.addEvent(id, 'status', by, instruction?.trim() ? `이어서 하기 · 새 지시: ${instruction.trim()}` : '이어서 하기')
+    this.changed()
+    if (this.localAgent(t.assignee)) void this.runTask(id)
+  }
+
+  /** Stop everything on every company and switch both auto-run switches off. */
+  emergencyStop(): number {
+    let n = 0
+    for (const h of this.hives.values()) {
+      for (const t of h.listTasks()) {
+        if (this.running.has(t.id)) {
+          this.running.get(t.id)!.abort('emergency')
+          n++
+        }
+      }
+    }
+    this.config = { ...this.config, autoRun: false, autoRunOrg: false }
+    saveConfig(this.configFile, this.config)
+    this.notify('비상 정지', `실행 중이던 ${n}건을 멈추고 자동 실행을 모두 껐어요.`)
+    this.changed()
+    return n
   }
 
   // ---- before a run: what will be touched, what could go wrong ----
@@ -966,7 +1162,7 @@ export class Engine {
     let canRun = true
 
     // where it works
-    let cwd = this.hive.root
+    let cwd = this.hive.ensureWorkspace()
     const projDir = this.hive.projectDir(task.projectId)
     const proj = this.hive.getProject(task.projectId)
     if (proj && !projDir) {
@@ -984,7 +1180,12 @@ export class Engine {
         canRun = false
       }
     } else {
-      add('warn', `에이전트에 작업 폴더가 없어서 작업공간 폴더(${cwd})에서 실행해요. 프로젝트 폴더를 지정하면 그 안에서 일해요.`)
+      add('ok', `회사 기본 작업 폴더에서 실행해요: ${cwd}. 폴더나 파일을 따로 정하지 않은 결과물은 그 안의 results 폴더에 저장돼요.`)
+    }
+    // the app's own data (tasks, memory, run records) must never be inside what an AI may change
+    if (holdsAppData(this.hive, cwd)) {
+      add('error', `이 작업 폴더에는 HiveDesk의 회사 데이터가 들어 있어요 (${cwd}). AI가 업무·메모리 파일을 고칠 수 있어서 막았어요. 다른 폴더를 지정하세요.`)
+      canRun = false
     }
 
     // can we see what changed, and can it be undone?
@@ -1085,7 +1286,7 @@ export class Engine {
   private async enableTrackingImpl(id: string): Promise<{ ok: boolean; message: string }> {
     const task = this.hive.getTask(id)
     const agent = this.localAgent(task?.assignee ?? null)
-    const cwd = agent?.workDir && existsSync(agent.workDir) ? agent.workDir : this.hive.root
+    const cwd = agent?.workDir && existsSync(agent.workDir) ? agent.workDir : this.hive.ensureWorkspace()
     const r = await enableTracking(cwd)
     if (r.ok && task) this.hive.addEvent(id, 'status', this.config.memberName || 'me', r.message)
     this.changed()
@@ -1143,25 +1344,34 @@ export class Engine {
   replyToTask(id: string, text: string): void {
     const t = this.hive.getTask(id)
     if (!t || t.status !== 'needs_input' || !text.trim()) return
-    this.hive.updateTask(id, { status: 'todo', reply: text.trim() })
+    this.hive.updateTask(id, {
+      status: 'todo',
+      reply: text.trim(),
+      ...(t.question ? { answered: [...(t.answered ?? []), { q: t.question.slice(0, 500), a: text.trim().slice(0, 1000), at: new Date().toISOString() }] } : {})
+    })
     this.hive.addEvent(id, 'reply', this.config.memberName || 'me', `답변: ${text.trim()}`)
     this.changed()
     if (this.localAgent(t.assignee)) void this.runTask(id)
   }
 
-  /** Add an instruction. While the task runs it is applied when the current step ends. */
-  addInstruction(id: string, text: string): void {
+  /** Add an instruction: it is kept until an AI run has received it (whatever the earlier run ended with). */
+  addInstruction(id: string, text: string, mode: InstructionMode = 'after'): void {
     const t = this.hive.getTask(id)
-    const body = text.trim()
-    if (!t || !body) return
+    if (!t) return
     const by = this.config.memberName || 'me'
-    if (t.status === 'running') {
-      this.hive.updateTask(id, { followups: [...(t.followups ?? []), body] })
-      this.hive.addEvent(id, 'instruction', by, `추가 지시 (현재 단계가 끝나면 반영): ${body}`)
-    } else {
-      this.hive.updateTask(id, { notes: [...t.notes, `추가 지시: ${body}`] })
-      this.hive.addEvent(id, 'instruction', by, `추가 지시: ${body}`)
-    }
+    const i = addInstructionTo(this.hive, id, text, by, mode)
+    if (!i) return
+    this.hive.addEvent(
+      id,
+      'instruction',
+      by,
+      t.status === 'running' ? `추가 지시 (이번 실행이 끝난 뒤 반영): ${i.text}` : `추가 지시 (다음 실행의 첫 입력으로 전달): ${i.text}`
+    )
+    this.changed()
+  }
+
+  dropInstruction(id: string, instructionId: string): void {
+    dropInstructionOf(this.hive, id, instructionId)
     this.changed()
   }
 
@@ -1262,11 +1472,35 @@ export class Engine {
     return r
   }
 
-  decideApproval(id: string, decision: 'approved' | 'rejected', note?: string): void {
+  decideApproval(id: string, decision: 'approved' | 'rejected', note?: string, raisePermission?: PermissionLevel, runCap?: number): void {
     const by = this.config.memberName || 'me'
     const a = this.hive.listApprovals().find((x) => x.id === id)
     this.hive.decideApproval(id, decision, by, note)
+    if (a?.kind === 'agent-request' && a.status === 'pending' && decision === 'approved') {
+      const t = this.hive.getTask(a.taskId)
+      if (t && t.status === 'todo') {
+        // approving "let me write files" has to change the permission, or the same request comes back forever
+        const ag = this.localAgent(t.assignee)
+        this.hive.updateTask(t.id, {
+          ...(raisePermission ? { permission: raisePermission } : {}),
+          // continue the same conversation instead of starting over
+          reply: `사람이 승인했어요: ${a.reason}${raisePermission ? `\n이 업무의 권한을 "${raisePermission === 'exec' ? '명령 실행' : '파일 수정'}"으로 올렸어요. 이제 가능하니 이어서 진행하세요.` : '\n이어서 진행하세요.'}`
+        })
+        if (raisePermission) this.hive.addEvent(t.id, 'changed', by, `권한을 올렸어요: ${raisePermission === 'exec' ? '명령 실행' : '파일 수정'}${ag ? '' : ''}`)
+      }
+    }
+    if (a?.kind === 'bundle-cap' && a.status === 'pending') {
+      const root = this.hive.getTask(a.taskId)
+      if (root?.plan) {
+        if (decision === 'approved') this.hive.updateTask(root.id, { plan: { ...root.plan, runCap: Math.ceil((root.plan.runCap ?? 0) * 1.5) + 2 } })
+        else for (const x of subtree(this.hive.listTasks(), root.id)) if (x.status === 'todo') this.applyStop(x.id, 'hold')
+      }
+    }
     if (a?.kind === 'plan' && a.status === 'pending') {
+      if (decision === 'approved' && runCap && runCap > 0) {
+        const pt = this.hive.getTask(a.taskId)
+        if (pt?.plan) this.hive.updateTask(pt.id, { plan: { ...pt.plan, runCap } })
+      }
       if (decision === 'approved') this.delegation.approvePlan(a.taskId, by)
       else this.delegation.rejectPlan(a.taskId, note?.trim() || '이사회가 계획을 반려했어요.', by, true)
     }
@@ -1666,7 +1900,7 @@ export class Engine {
         for (const t of all) {
           const ag = this.localAgent(t.assignee)
           if (!ag) continue
-          if (this.running.has(t.id) || ((this.config.autoRun || t.auto) && h.isReady(t, all))) {
+          if (this.running.has(t.id) || (this.autoAllowed(t) && h.isReady(t, all))) {
             if (!demand.has(ag.adapter)) demand.set(ag.adapter, new Set())
             demand.get(ag.adapter)!.add(h.id)
           }
@@ -1680,9 +1914,12 @@ export class Engine {
       const order = [...this.hives.values()]
       for (const h of order) {
         const all = h.listTasks()
+        this.checkBundleCaps(h, all)
+        this.holdStaleFailures(h, all)
         for (const t of all) {
           if (this.running.size >= this.config.maxConcurrent) return
-          if (!this.config.autoRun && !t.auto) continue
+          if (!this.autoAllowed(t)) continue
+          if (this.bundleCapped(h, all, t)) continue
           const agent = this.localAgent(t.assignee)
           if (!agent || busyAgents.has(agent.id) || !h.isReady(t, all)) continue
           if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
@@ -1700,6 +1937,11 @@ export class Engine {
     } finally {
       this.ticking = false
     }
+  }
+
+  /** May the app start this task by itself? Two switches: the person's own tasks, and the organisation's own flow. */
+  private autoAllowed(t: Task): boolean {
+    return t.auto ? this.config.autoRunOrg !== false : !!this.config.autoRun
   }
 
   private applyTimers(): void {

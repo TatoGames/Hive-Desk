@@ -1,3 +1,4 @@
+import { classifyInput } from '../shared/manage'
 import { app, BrowserWindow, dialog, ipcMain, Notification, powerSaveBlocker, shell } from 'electron'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, Task } from '../shared/types'
@@ -79,7 +80,14 @@ function registerIpc(): void {
   )
   ipcMain.handle('task:detach', (_e, id: string, rel: string) => engine.removeAttachment(id, rel))
   ipcMain.handle('task:reply', (_e, id: string, text: string) => engine.replyToTask(id, text))
-  ipcMain.handle('task:instruct', (_e, id: string, text: string) => engine.addInstruction(id, text))
+  ipcMain.handle('task:instruct', (_e, id: string, text: string, mode?: 'live' | 'interrupt' | 'after') => engine.addInstruction(id, text, mode))
+  ipcMain.handle('task:instruct-drop', (_e, id: string, instructionId: string) => engine.dropInstruction(id, instructionId))
+  ipcMain.handle('task:cancel', (_e, id: string, opts: { scope: 'this' | 'tree' | 'pending'; files?: 'keep' | 'run' | 'task' }) => engine.cancelTask(id, opts))
+  ipcMain.handle('task:cancel-preview', (_e, id: string, scope: 'this' | 'tree' | 'pending') => engine.cancelPreview(id, scope))
+  ipcMain.handle('failure:resolve', (_e, id: string, choice: 'retry' | 'skip' | 'cancel-all') => engine.resolveFailure(id, choice))
+  ipcMain.handle('task:resume', (_e, id: string, instruction?: string) => engine.resumeTask(id, instruction))
+  ipcMain.handle('input:classify', (_e, text: string) => classifyInput(text))
+  ipcMain.handle('app:emergency-stop', () => engine.emergencyStop())
   ipcMain.handle('task:rollback', (_e, taskId: string, runId: string) => engine.rollbackRun(taskId, runId))
   ipcMain.handle('limit:clear', (_e, adapter: AdapterId) => engine.clearLimit(adapter))
   ipcMain.handle('dialog:files', async () => {
@@ -88,9 +96,9 @@ function registerIpc(): void {
     return r.canceled ? [] : r.filePaths
   })
   ipcMain.handle('task:run', (_e, id: string) => engine.runTask(id))
-  ipcMain.handle('task:stop', (_e, id: string) => engine.stopTask(id))
-  ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected', note?: string) =>
-    engine.decideApproval(id, d, note)
+  ipcMain.handle('task:stop', (_e, id: string, kind?: 'hold' | 'cancel') => engine.stopTask(id, kind))
+  ipcMain.handle('approval:decide', (_e, id: string, d: 'approved' | 'rejected', note?: string, raise?: 'edit' | 'exec', runCap?: number) =>
+    engine.decideApproval(id, d, note, raise, runCap)
   )
   ipcMain.handle('message:send', (_e, from: string, to: string, body: string) =>
     engine.sendMessage(from, to, body)

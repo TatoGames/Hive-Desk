@@ -7,7 +7,6 @@ import { ConfirmButton } from './Materials'
 const ADAPTER_LABEL: Record<AdapterId, string> = {
   claude: 'Claude Code',
   codex: 'OpenAI Codex',
-  gemini: 'Gemini CLI',
   agy: 'Antigravity (agy)',
   custom: '직접 지정'
 }
@@ -15,7 +14,6 @@ const ADAPTER_LABEL: Record<AdapterId, string> = {
 const DEFAULT_ARGS: Record<AdapterId, string> = {
   claude: '--permission-mode acceptEdits',
   codex: '--sandbox workspace-write',
-  gemini: '',
   agy: '',
   custom: ''
 }
@@ -25,7 +23,6 @@ type Draft = Partial<Agent> & { name: string; adapter: AdapterId }
 const SHORT_NAME: Record<AdapterId, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  gemini: 'Gemini',
   agy: 'Antigravity',
   custom: '에이전트'
 }
@@ -90,7 +87,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
               <div key={a.id} className="agent">
                 <div>
                   <div className="title">
-                    {a.name} <span className="tag">{ADAPTER_LABEL[a.adapter]}</span>
+                    {a.name} <span className="tag">{ADAPTER_LABEL[a.adapter] ?? '알 수 없는 AI (' + a.adapter + ')'}</span>
                     {a.requireApproval && <span className="tag warn">항상 승인</span>}
                   </div>
                   <div className="muted small">{a.role || '역할 미지정'}</div>
@@ -124,7 +121,7 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
             {others.map((r) => (
               <div key={r.id} className="agent compact">
                 <div className="title">
-                  {r.name} <span className="tag">{ADAPTER_LABEL[r.adapter]}</span>
+                  {r.name} <span className="tag">{ADAPTER_LABEL[r.adapter] ?? '알 수 없는 AI (' + r.adapter + ')'}</span>
                 </div>
                 <div className="muted small">
                   {r.owner} · {r.role || '역할 미지정'}

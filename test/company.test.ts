@@ -57,7 +57,7 @@ describe('model catalog', () => {
     const names = CATALOG.filter((m) => m.company === 'Anthropic').map((m) => m.family)
     expect(names).toEqual(['Fable', 'Opus', 'Sonnet', 'Haiku'])
     expect(CATALOG.some((m) => m.company === 'OpenAI' && m.adapter === 'codex')).toBe(true)
-    expect(CATALOG.some((m) => m.company === 'Google' && m.adapter === 'gemini')).toBe(true)
+    expect(CATALOG.some((m) => m.company === 'Google' && m.adapter === 'agy')).toBe(true)
     for (const tier of ['top', 'balanced', 'light'])
       expect(CATALOG.some((m) => m.tier === tier)).toBe(true)
   })

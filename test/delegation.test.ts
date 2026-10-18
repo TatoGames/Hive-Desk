@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner, RunResult } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
-import { LIMITS, estimateRuns, finalReportMarkdown, parsePlan, parseVerdict, validateAfter } from '../src/shared/delegation'
+import { LIMITS, estimateBreakdown, estimateRuns, finalReportMarkdown, parsePlan, parseVerdict, validateAfter } from '../src/shared/delegation'
 import type { Task } from '../src/shared/types'
 
 let dir: string
@@ -152,8 +152,12 @@ describe('plan / verdict parsing', () => {
   })
 
   it('estimate counts planning, work, review and integration', () => {
-    expect(estimateRuns([{ manager: false }, { manager: false }])).toBe(8)
-    expect(estimateRuns([{ manager: true }])).toBe(12)
+    // no fixed price per kind of employee: planner's guess → this company's history → small default
+    expect(estimateRuns([{ manager: false }, { manager: false }])).toBe(9)
+    expect(estimateRuns([{ manager: true }])).toBe(8)
+    expect(estimateBreakdown([{ manager: false, est: 1 }, { manager: false, quick: true }])).toMatchObject({ plan: 2, work: 2, review: 1, buffer: 1, total: 6 })
+    expect(estimateBreakdown([{ manager: false }], { worker: 4 }).work).toBe(4)
+    expect(estimateBreakdown([{ manager: false, reviewed: false }]).review).toBe(0)
   })
 })
 

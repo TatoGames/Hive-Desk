@@ -56,7 +56,9 @@ describe('F2: account model list', () => {
     expect(calls[0]).toEqual(['agy', 'models'])
     const cat = eng.catalog()
     expect(cat.find((m) => m.id === 'acct-agy-mystery-model-9')).toMatchObject({ adapter: 'agy', fromAccount: true })
-    expect(cat.find((m) => m.id === 'acct-agy-gemini-3.5-pro')!.adapter).toBe('agy')
+    const g35 = cat.find((m) => m.adapter === 'agy' && m.cliArg === 'gemini-3.5-pro')!
+    expect(g35.adapter).toBe('agy')
+    expect(eng.snapshot().company.availability[g35.id]?.ok).toBe(true)
     expect(eng.snapshot().company.availability['acct-agy-mystery-model-9'].ok).toBe(true)
     eng.shutdown()
   })

@@ -13,6 +13,7 @@ export function defaultConfig(home: string): AppConfig {
     agents: [],
     stripApiKeys: true,
     autoRun: false,
+    autoRunOrg: true,
     maxConcurrent: 2,
     syncIntervalMinutes: 0
   }
@@ -23,7 +24,10 @@ export function loadConfig(file: string, home: string): AppConfig {
   try {
     if (existsSync(file)) {
       const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<AppConfig>
-      return { ...base, ...raw, agents: raw.agents ?? [] }
+      const cfg = { ...base, ...raw, agents: raw.agents ?? [] }
+      // before v4 one switch looked like it controlled everything: keep what the person saw
+      if (raw.autoRunOrg === undefined && raw.autoRun !== undefined) cfg.autoRunOrg = !!raw.autoRun
+      return cfg
     }
   } catch {
     /* fall through to defaults */

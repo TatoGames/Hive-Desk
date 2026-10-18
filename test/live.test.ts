@@ -20,6 +20,7 @@ let dir: string
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hivedesk-live-'))
+  mkdirSync(join(dir, 'cwd'))
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
@@ -39,7 +40,7 @@ function fakeRunner(calls: BuiltCommand[] = []): Runner {
 }
 
 function deps(hive: Hive, over: Partial<RunnerDeps> = {}): RunnerDeps {
-  return { hive, stripApiKeys: true, runner: fakeRunner(), defaultCwd: dir, watchMs: 40, ...over }
+  return { hive, stripApiKeys: true, runner: fakeRunner(), defaultCwd: join(dir, 'cwd'), watchMs: 40, ...over }
 }
 
 function gitRepo(name = 'work'): string {
@@ -292,7 +293,7 @@ describe('a watched run', () => {
     const agent = makeAgent('alice', { name: 'p', adapter: 'custom', command: 'node', extraArgs: FAKE })
     const t = h.createTask({ title: 'Plain', assignee: agent.id, createdBy: 'alice' })
     let raw = ''
-    expect(await runTask(agent, t.id, { hive: h, stripApiKeys: true, runner: runCli, defaultCwd: dir, watchMs: 40, onOutput: (_i, c) => (raw += c) })).toBe('done')
+    expect(await runTask(agent, t.id, { hive: h, stripApiKeys: true, runner: runCli, defaultCwd: join(dir, 'cwd'), watchMs: 40, onOutput: (_i, c) => (raw += c) })).toBe('done')
     expect(raw).toContain('Done: Plain')
     const rec = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
     expect(rec.activity.some((e) => e.kind === 'message' && e.text.startsWith('Done: Plain'))).toBe(true)
@@ -362,13 +363,13 @@ describe('asking the human, answering, continuing', () => {
     const p = eng.runTask(t.id)
     await waitFor(() => eng.hive.getTask(t.id)!.status === 'running')
     eng.addInstruction(t.id, 'also add a README')
-    expect(eng.hive.getTask(t.id)!.followups).toEqual(['also add a README'])
+    expect(eng.hive.getTask(t.id)!.instructions?.map((i) => [i.text, i.state])).toEqual([['also add a README', 'queued']])
     expect(await p).toBe('done')
     expect(calls).toHaveLength(2)
     expect(calls[1].args).toContain('--resume')
     const final = eng.hive.getTask(t.id)!
     expect(final.result).toContain('also add a README')
-    expect(final.followups).toEqual([])
+    expect(final.instructions?.map((i) => i.state)).toEqual(['applied'])
     expect(eng.hive.listEvents(t.id).some((e) => e.kind === 'instruction')).toBe(true)
     eng.shutdown()
   })

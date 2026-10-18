@@ -47,17 +47,6 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
     login: '`codex login`을 실행하고 "Sign in with ChatGPT"를 고르세요.',
     note: 'ChatGPT 계정으로 로그인해요.'
   },
-  gemini: {
-    id: 'gemini',
-    label: 'Gemini CLI',
-    command: 'gemini',
-    baseArgs: ['-p', 'Follow the task given on stdin.'],
-    modelFlag: '-m',
-    defaultExtraArgs: '',
-    install: 'npm i -g @google/gemini-cli',
-    login: '`gemini`를 한 번 실행해 Google 계정으로 로그인하세요.',
-    note: '2026-06-18부터 무료·AI Pro·Ultra 개인 계정은 Antigravity(agy)로 옮겨졌어요. Gemini CLI는 Code Assist 라이선스·Vertex·API 키로만 계속 쓸 수 있어요.'
-  },
   agy: {
     id: 'agy',
     label: 'Antigravity CLI (agy)',
@@ -86,7 +75,7 @@ export const ADAPTERS: Record<AdapterId, AdapterSpec> = {
 }
 
 export function defaultExtraArgs(id: AdapterId): string {
-  return ADAPTERS[id].defaultExtraArgs
+  return ADAPTERS[id]?.defaultExtraArgs ?? ''
 }
 
 /** Minimal shell-like splitter: spaces separate args, quotes group. */
@@ -211,6 +200,8 @@ function dropFlag(args: string[], names: string[]): string[] {
 
 export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltCommand {
   const spec = ADAPTERS[agent.adapter]
+  // an old config may still name the removed Gemini CLI: say so instead of crashing
+  if (!spec) throw new Error(`"${agent.adapter}" 연결은 더 이상 지원하지 않아요. Google 모델은 Antigravity(agy) 연결로 쓰세요. 에이전트의 AI 프로그램을 바꿔 주세요.`)
   const command = agent.adapter === 'custom' ? (agent.command ?? '').trim() : spec.command
   if (!command) throw new Error('이 에이전트에 실행할 명령이 지정되지 않았어요.')
   const parts = agent.adapter === 'custom' ? splitArgs(agent.extraArgs) : [...spec.baseArgs]
@@ -507,6 +498,6 @@ export function detectAdapter(id: AdapterId, env: NodeJS.ProcessEnv = process.en
 }
 
 export function detectAll(env?: NodeJS.ProcessEnv): Promise<AdapterInfo[]> {
-  const ids: AdapterId[] = ['claude', 'codex', 'gemini', 'agy']
+  const ids: AdapterId[] = ['claude', 'codex', 'agy']
   return Promise.all(ids.map((i) => detectAdapter(i, env)))
 }

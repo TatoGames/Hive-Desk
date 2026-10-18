@@ -17,7 +17,9 @@ const STATUS: Record<TaskStatus, string> = {
   in_review: '교차 검토',
   delegated: '위임 진행',
   done: '완료',
-  failed: '실패'
+  failed: '실패',
+  held: '보류',
+  cancelled: '취소됨'
 }
 const KIND: Record<string, string> = { plan: '계획', review: '검토', integrate: '통합', work: '', committee: '위원회' }
 

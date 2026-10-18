@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import type { AptitudeRecord } from '../shared/aptitude'
 import type { ModelAgent } from '../shared/connections'
 import type { ExternalItem } from '../shared/collab'
@@ -38,7 +39,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda', 'external']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', '.sync/runs', '보고서', 'company', 'aptitude', 'finals', 'agenda', 'external']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -63,7 +64,25 @@ const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   'risky-task': '위험 작업',
   budget: '예산',
   'agent-request': '에이전트 요청',
-  plan: '분배 계획'
+  plan: '분배 계획',
+  failure: '작업 실패',
+  'bundle-cap': '실행 상한'
+}
+
+/** Tasks written before v4 kept pending instructions as plain strings in `followups`. */
+export function normalizeTask(t: Task): Task {
+  if (!t.followups?.length) return t
+  const at = t.updatedAt ?? new Date().toISOString()
+  const moved = t.followups.map((text, i) => ({
+    id: `old${i}-${Date.now().toString(36)}`,
+    text,
+    by: t.createdBy,
+    at,
+    mode: 'after' as const,
+    state: 'queued' as const
+  }))
+  const { followups: _old, ...rest } = t
+  return { ...rest, instructions: [...(t.instructions ?? []), ...moved] }
 }
 
 function now(): string {
@@ -124,8 +143,43 @@ export class Hive {
     for (const d of [...(shared ? SHARED_DIRS : []), '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
       mkdirSync(join(root, d), { recursive: true })
     }
+    // v4: run summaries moved from `reports/` (now a readable `보고서/` of documents) to `.sync/runs/`
+    const oldRuns = join(root, 'reports')
+    if (shared && existsSync(oldRuns)) {
+      try {
+        for (const e of readdirSync(oldRuns)) {
+          const to = join(root, '.sync', 'runs', e)
+          if (!existsSync(to)) renameSync(join(oldRuns, e), to)
+        }
+        rmSync(oldRuns, { recursive: true, force: true })
+      } catch {
+        /* leave the old folder: the next start tries again */
+      }
+    }
     const gi = join(root, '.gitignore')
-    if (shared && !existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\n', 'utf8')
+    if (shared && !existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\nworkspace/\n', 'utf8')
+    else if (shared && !readFileSync(gi, 'utf8').split(/\r?\n/).includes('workspace/')) writeFileSync(gi, readFileSync(gi, 'utf8').replace(/\n?$/, '\n') + 'workspace/\n', 'utf8')
+  }
+
+  /**
+   * The company's own work folder: where agents without a project or work folder of their own run.
+   * It sits next to (not inside) the company's data, has a `results` folder for deliverables, and is its own git repo.
+   */
+  workspaceDir(): string {
+    return join(this.root, 'workspace')
+  }
+
+  ensureWorkspace(): string {
+    const dir = this.workspaceDir()
+    mkdirSync(join(dir, 'results'), { recursive: true })
+    if (!existsSync(join(dir, '.git'))) {
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir, stdio: 'ignore', windowsHide: true, timeout: 15000 })
+      } catch {
+        /* no git on this computer: changes are still listed without line detail */
+      }
+    }
+    return dir
   }
 
   private p(...parts: string[]): string {
@@ -134,11 +188,14 @@ export class Hive {
 
   // ---- tasks ----
   listTasks(): Task[] {
-    return listJson<Task>(this.p('tasks')).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    return listJson<Task>(this.p('tasks'))
+      .map(normalizeTask)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
   getTask(id: string): Task | null {
-    return readJson<Task>(this.p('tasks', id + '.json'))
+    const t = readJson<Task>(this.p('tasks', id + '.json'))
+    return t ? normalizeTask(t) : null
   }
 
   createTask(input: {
@@ -183,6 +240,11 @@ export class Hive {
   updateTask(id: string, patch: Partial<Task>): Task {
     const cur = this.getTask(id)
     if (!cur) throw new Error('task not found: ' + id)
+    // What a person stopped stays stopped: only a patch that also clears `stoppedBy` (resume, reopen) may change the status.
+    if (cur.stoppedBy && patch.status && patch.status !== cur.status && !('stoppedBy' in patch)) {
+      const { status: _ignored, ...rest } = patch
+      patch = rest
+    }
     const next: Task = { ...cur, ...patch, id: cur.id, updatedAt: now() }
     writeJson(this.p('tasks', id + '.json'), next)
     return next
@@ -193,7 +255,7 @@ export class Hive {
     rmSync(this.p('events', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'runs', id), { recursive: true, force: true })
     rmSync(this.p('attachments', id), { recursive: true, force: true })
-    rmSync(this.p('reports', id), { recursive: true, force: true })
+    rmSync(this.p('.sync', 'runs', id), { recursive: true, force: true })
     rmSync(this.p('.local', 'attachments', id), { recursive: true, force: true })
   }
 
@@ -313,7 +375,7 @@ export class Hive {
 
   /** A task is ready when it is `todo` and every dependency is `done`. */
   isReady(t: Task, all: Task[]): boolean {
-    if (t.status !== 'todo') return false
+    if (t.status !== 'todo' || t.blocked) return false
     return t.dependsOn.every((d) => all.find((x) => x.id === d)?.status === 'done')
   }
 
@@ -334,6 +396,13 @@ export class Hive {
     writeJson(this.p('approvals', a.id + '.json'), a)
     this.addEvent(a.taskId, 'approval_requested', a.agentId, `결재 요청 (${APPROVAL_LABEL[a.kind]}): ${a.reason}`)
     return a
+  }
+
+  /** Close a pending approval without deciding it (the task was cancelled). */
+  closeApproval(id: string, by: string, note: string, status: 'approved' | 'rejected' = 'rejected'): void {
+    const a = readJson<Approval>(this.p('approvals', id + '.json'))
+    if (!a || a.status !== 'pending') return
+    writeJson(this.p('approvals', id + '.json'), { ...a, status, decidedAt: now(), decidedBy: by, note })
   }
 
   hasPendingApproval(taskId: string, kind: ApprovalKind): boolean {
@@ -358,7 +427,7 @@ export class Hive {
 
     const task = this.getTask(a.taskId)
     // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
-    if (task && a.kind !== 'plan') {
+    if (task && a.kind !== 'plan' && a.kind !== 'failure' && a.kind !== 'bundle-cap') {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'
@@ -514,13 +583,13 @@ export class Hive {
 
   // ---- shared run summaries (teammates see what ran on other computers) ----
   addSharedRun(r: RunShared): void {
-    const dir = this.p('reports', r.taskId)
+    const dir = this.p('.sync', 'runs', r.taskId)
     mkdirSync(dir, { recursive: true })
     writeJson(join(dir, r.id + '.json'), r)
   }
 
   listSharedRuns(taskId: string): RunShared[] {
-    return listJson<RunShared>(this.p('reports', taskId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    return listJson<RunShared>(this.p('.sync', 'runs', taskId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   }
 
   // ---- company model (shared: one file per unit / seat, so teammates' edits merge) ----

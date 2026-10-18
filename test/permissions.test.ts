@@ -12,6 +12,7 @@ const STREAM = join(__dirname, 'fake-claude-stream.cjs')
 let dir: string
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hivedesk-perm-'))
+  mkdirSync(join(dir, 'cwd'))
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
@@ -40,7 +41,7 @@ describe('A1: attachments the agent can really open', () => {
       }
       return runCli({ command: 'node', args: [STREAM, ...built.args], stream: built.stream }, opts)
     }
-    const out = await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: dir, watchMs: 40 })
+    const out = await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: join(dir, 'cwd'), watchMs: 40 })
     expect(out).toBe('done')
     expect(seen!.exists).toBe(true)
     expect(seen!.content).toBe('PDFDATA')
@@ -69,7 +70,7 @@ describe('A1: attachments the agent can really open', () => {
     hive.addAttachment(t.id, { path: src }, 'alice', 5)
     const runner: Runner = (built, opts) =>
       runCli({ command: 'node', args: [STREAM, ...built.args], stream: built.stream }, opts)
-    await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: dir, watchMs: 40 })
+    await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: join(dir, 'cwd'), watchMs: 40 })
     const rec = hive.getRun(t.id, hive.getTask(t.id)!.lastRunId!)!
     expect(rec.diff.files.some((f) => f.path.startsWith('.hivedesk'))).toBe(false)
     expect(g('status', '--porcelain')).not.toContain('.hivedesk')
@@ -132,10 +133,10 @@ describe('A3: the default level cannot delete or move', () => {
 })
 
 describe('A4: CLIs that cannot enforce permissions default to read-only', () => {
-  it('Claude and Codex keep the editing default, agy / gemini / custom start read-only', () => {
+  it('Claude and Codex keep the editing default, agy / custom start read-only', () => {
     expect(effectivePermission('claude', undefined)).toBe('edit')
     expect(effectivePermission('codex', undefined)).toBe('edit')
-    for (const id of ['agy', 'gemini', 'custom'] as const) expect(effectivePermission(id, undefined)).toBe('read')
+    for (const id of ['agy', 'custom'] as const) expect(effectivePermission(id, undefined)).toBe('read')
   })
   it('an explicit choice always wins', () => {
     expect(effectivePermission('agy', 'edit')).toBe('edit')
@@ -150,7 +151,7 @@ describe('A4: CLIs that cannot enforce permissions default to read-only', () => 
       calls.push(opts.prompt)
       return { code: 0, stdout: 'ok', stderr: '', timedOut: false, aborted: false }
     }
-    await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: dir })
+    await runTask(agent, t.id, { hive, stripApiKeys: true, runner, defaultCwd: join(dir, 'cwd') })
     expect(calls[0]).toContain('READ-ONLY')
     expect(hive.getRun(t.id, hive.getTask(t.id)!.lastRunId!)!.permission).toBe('read')
   })

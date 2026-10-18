@@ -258,11 +258,14 @@ describe('B2: one run per work folder', () => {
     await new Promise((r) => setTimeout(r, 30))
     eng.stopTask(t2.id)
     expect(await p2).toBe('cancelled')
-    expect(eng.hive.getTask(t2.id)!.status).toBe('todo')
+    // a stopped task is held: it never starts again by itself
+    expect(eng.hive.getTask(t2.id)!.status).toBe('held')
     expect(await p1).toBe('done')
     expect(eng.snapshot().waiting).toEqual({})
-    // the folder is free again afterwards
-    expect(await eng.runTask(t2.id)).toBe('done')
+    // the folder is free again afterwards, and a person can continue it
+    eng.resumeTask(t2.id)
+    await new Promise((r) => setTimeout(r, 200))
+    expect(eng.hive.getTask(t2.id)!.status).toBe('done')
     eng.shutdown()
   })
 })

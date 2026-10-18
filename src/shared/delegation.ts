@@ -55,7 +55,10 @@ export function parsePlan(text: string): ParsedPlan {
       .split(/[,\s]+/)
       .map((x) => Number(x))
       .filter((n) => Number.isInteger(n) && n > 0)
-    items.push({ title, assignee: kv.assignee, done: kv.done ?? '', after })
+    const access = ['read', 'edit', 'exec'].includes((kv.access ?? '').toLowerCase()) ? (kv.access.toLowerCase() as 'read' | 'edit' | 'exec') : undefined
+    const est = Number((kv.est ?? '').match(/\d+/)?.[0]) || undefined
+    const files = (kv.files ?? '').split(/[,;]/).map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== 'none')
+    items.push({ title, assignee: kv.assignee, done: kv.done ?? '', after, ...(access ? { access } : {}), ...(est ? { est } : {}), ...(files.length ? { files } : {}) })
   }
   const est = SINGLE('ESTIMATE').exec(text)?.[1]
   const estimate = est ? Number(est.match(/\d+/)?.[0]) || undefined : undefined
@@ -93,11 +96,71 @@ export function parseVerdict(text: string): Verdict | null {
   return null
 }
 
-/** Rough number of AI runs a plan needs: planning + per sub-task (work + review + a rework allowance) + integration. */
+/** Where an estimate comes from, shown to the board so the number can be argued with. */
+export interface Estimate {
+  total: number
+  /** The manager's own planning and the final integration. */
+  plan: number
+  work: number
+  review: number
+  /** Allowance for sending work back. */
+  buffer: number
+  /** How the work number was found: the planner's own guesses, this company's past bundles, a default. */
+  basis: ('planner' | 'history' | 'default' | 'quick')[]
+}
+
+export interface EstimateItem {
+  manager: boolean
+  /** The planner's own guess for this sub-task. */
+  est?: number
+  /** A small job that gets a quick single-employee run (1–2 runs, no plan). */
+  quick?: boolean
+  /** Does a different model check this sub-task's result? (read-only work is not reviewed) */
+  reviewed?: boolean
+}
+
+export interface EstimateHistory {
+  /** Average AI runs of a finished worker sub-task / manager sub-task in this company (needs a few samples). */
+  worker?: number
+  manager?: number
+}
+
+/**
+ * Expected number of AI runs of a plan: no fixed formula per kind of employee, but
+ * (1) what the planner expected for each sub-task, else (2) what similar sub-tasks really took in this company,
+ * else (3) a small default; quick jobs count 1–2.
+ */
+export function estimateBreakdown(items: EstimateItem[], history: EstimateHistory = {}): Estimate {
+  let work = 0
+  let review = 0
+  const basis = new Set<Estimate['basis'][number]>()
+  let workers = 0
+  for (const it of items) {
+    if (it.manager) {
+      const n = it.est ?? history.manager ?? 6
+      work += n
+      basis.add(it.est ? 'planner' : history.manager ? 'history' : 'default')
+      continue
+    }
+    workers++
+    if (it.quick) {
+      work += 1
+      basis.add('quick')
+    } else {
+      const n = it.est ?? history.worker ?? 2
+      work += n
+      basis.add(it.est ? 'planner' : history.worker ? 'history' : 'default')
+      if (it.reviewed !== false) review += 1
+    }
+  }
+  const plan = 2
+  const buffer = Math.ceil(workers * 0.3)
+  return { total: plan + work + review + buffer, plan, work, review, buffer, basis: [...basis] }
+}
+
+/** @deprecated kept for old callers: the fixed formula of v0.3.0. */
 export function estimateRuns(items: { manager: boolean }[]): number {
-  const MANAGER = 10
-  const WORKER = 3
-  return 2 + items.reduce((n, it) => n + (it.manager ? MANAGER : WORKER), 0)
+  return estimateBreakdown(items.map((i) => ({ manager: i.manager }))).total
 }
 
 // ---- final report as a document ----

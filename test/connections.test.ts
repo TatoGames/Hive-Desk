@@ -78,8 +78,11 @@ describe('connections and model agents', () => {
     eng.recordCheck('agy', { ok: true, message: 'ok' })
     const agy = eng.snapshot().connections.find((c) => c.adapter === 'agy')!
     expect(agy.canList).toBe(true)
-    expect(agy.models.map((m) => m.modelId).sort()).toEqual(['acct-agy-big-model-2', 'acct-agy-fast-model-1'])
-    expect(agy.models.every((m) => m.status === 'ok' && m.verified)).toBe(true)
+    const ok = agy.models.filter((m) => m.status === 'ok')
+    expect(ok.map((m) => m.modelId).sort()).toEqual(['acct-agy-big-model-2', 'acct-agy-fast-model-1'])
+    expect(ok.every((m) => m.verified)).toBe(true)
+    // the bundled Google models the account does not list are unavailable
+    expect(agy.models.filter((m) => m.status !== 'ok').every((m) => m.status === 'unavailable')).toBe(true)
     eng.shutdown()
   })
 })

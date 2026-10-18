@@ -1,7 +1,8 @@
 import type { AptitudeRecord } from './aptitude'
 import type { Company, ModelAvailability, ModelEntry, ModelRef, OrgUnit, Seat } from './company'
 
-export type AdapterId = 'claude' | 'codex' | 'gemini' | 'agy' | 'custom'
+/** (`gemini` was removed in v4: Google accounts use Antigravity. Old configs may still name it — shown as unknown.) */
+export type AdapterId = 'claude' | 'codex' | 'agy' | 'custom'
 
 /** An agent that runs on THIS machine, using the owner's own logged-in CLI. */
 export interface Agent {
@@ -114,6 +115,27 @@ export type TaskStatus =
   | 'delegated'
   | 'done'
   | 'failed'
+  /** A person stopped it. It never starts again by itself; a person resumes it. */
+  | 'held'
+  /** A person cancelled it. Kept with its record; can be reopened. */
+  | 'cancelled'
+
+/** One instruction a person gave to a task, tracked until the AI has applied it. */
+export type InstructionMode = 'live' | 'interrupt' | 'after'
+export type InstructionState = 'queued' | 'sent' | 'seen' | 'applied' | 'dropped'
+export interface Instruction {
+  id: string
+  text: string
+  by: string
+  at: string
+  mode: InstructionMode
+  state: InstructionState
+  runId?: string
+  /** The AI's one-line [[ACK: …]] when it applied the instruction. */
+  ack?: string
+  /** When the state last changed. */
+  stateAt?: string
+}
 
 /** What the agent may do in this task. `edit` is the default (the agent's own settings apply). */
 export type PermissionLevel = 'read' | 'edit' | 'exec'
@@ -148,6 +170,8 @@ export interface Task {
   result?: string
   /** Structured report from the latest run (the agent's own account). */
   report?: Report
+  /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
+  reportFile?: string
   attachments?: Attachment[]
   /** Extra folders (outside the work folder) the agent may read. Absolute paths on the runner's machine. */
   refDirs?: string[]
@@ -156,10 +180,18 @@ export interface Task {
   sessionId?: string
   /** What the agent is waiting for (status `needs_input`). */
   question?: string
+  /** Questions the agent asked and what the human answered: pinned so they are never asked again. */
+  answered?: { q: string; a: string; at: string }[]
   /** The human's answer, consumed by the next run. */
   reply?: string
-  /** Extra instructions added while a run was in progress; applied when the step ends. */
+  /** Old field (before v4): migrated into `instructions` when read. */
   followups?: string[]
+  /** What people told this task to do differently; queued ones go into the next run's first input. */
+  instructions?: Instruction[]
+  /** A person stopped / cancelled this task: nothing but a person may restart it. */
+  stoppedBy?: { by: string; at: string; kind: 'hold' | 'cancel' | 'emergency' }
+  /** Waits for a failed task it depends on (v4 failure propagation). */
+  blocked?: { by: string; reason: string }
   /** Id of the latest run record (kept on the machine that ran it). */
   lastRunId?: string
   /** The app closed during this run; some changes may be left in the work folder. */
@@ -221,6 +253,12 @@ export interface SubtaskSpec {
   done: string
   /** 1-based numbers of sub-tasks that must finish first. */
   after: number[]
+  /** What the worker may do: `read` for analysis, `edit` when the result is files (default), `exec` when commands are needed. */
+  access?: PermissionLevel
+  /** The planner's guess of AI runs this sub-task needs (see estimates). */
+  est?: number
+  /** Folders/files this sub-task works on (lets non-overlapping ones run at the same time). */
+  files?: string[]
 }
 
 export type PlanStatus = 'awaiting_board' | 'awaiting_superior' | 'approved' | 'rejected'
@@ -229,6 +267,10 @@ export interface Plan {
   items: SubtaskSpec[]
   /** Expected number of AI runs (work + reviews + planning). */
   estimateRuns: number
+  /** What the number is made of (shown on the approval screen). */
+  estimateParts?: { plan: number; work: number; review: number; buffer: number; basis: string[] }
+  /** The board approved "at most N runs": the bundle stops and asks when it reaches this. */
+  runCap?: number
   flags: string[]
   status: PlanStatus
   approver: 'board' | 'superior' | 'auto'
@@ -438,7 +480,7 @@ export interface TaskHistory {
   runs: RunSummary[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap'
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface Approval {
@@ -543,7 +585,12 @@ export interface AppConfig {
   agents: Agent[]
   /** Remove API-key env vars from CLI processes so the CLI uses your login, not paid API. */
   stripApiKeys: boolean
+  /** Start the tasks people gave to an agent by themselves. */
   autoRun: boolean
+  /** Let the organisation drive itself: planning, review, integration, committee (default on). */
+  autoRunOrg?: boolean
+  /** Hours a failed bundle waits for the board's decision before it is held (default 3). */
+  failureHoldHours?: number
   maxConcurrent: number
   syncIntervalMinutes: number
 }

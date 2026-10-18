@@ -1,4 +1,6 @@
+import { applyAcks, joinInstructions, markSent, queuedOf, requeue } from './instructions'
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type {
   ActivityEvent,
   Agent,
@@ -15,8 +17,9 @@ import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type Runner
 import { createCheckpoint } from './checkpoint'
 import { classifyFailure, failureMessage } from './failure'
 import { detectLimit, type LimitInfo } from './limits'
-import { diffStat, trackChanges, unavailable } from './gitdiff'
+import { containsPath, diffStat, trackChanges, unavailable } from './gitdiff'
 import { Hive, newId } from './hive'
+import { writeTaskReport } from './reportfile'
 import { stageAttachments } from './staging'
 
 export interface ParsedMarkers {
@@ -26,6 +29,8 @@ export interface ParsedMarkers {
   approvals: string[]
   /** What the agent needs from the human to continue (`[[NEED: …]]`). */
   needs: string[]
+  /** `[[ACK: …]]`: the AI says it applied a new instruction. */
+  acks: string[]
   /** Present when the agent used at least one report marker (DID/FILES/VERIFY/RISK/NEXT). */
   report?: Report
 }
@@ -44,9 +49,10 @@ export function parseMarkers(text: string): ParsedMarkers {
   const messages: { to: string; body: string }[] = []
   const approvals: string[] = []
   const needs: string[] = []
+  const acks: string[] = []
   const parts: Partial<Record<keyof Report, string[]>> = {}
   const re =
-    /^[ \t]*\[\[(MEMORY|MSG|APPROVAL|NEED|PLAN|STEP|DID|FILES|VERIFY|RISK|NEXT)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
+    /^[ \t]*\[\[(MEMORY|MSG|APPROVAL|NEED|PLAN|STEP|ACK|DID|FILES|VERIFY|RISK|NEXT)(?:[ \t]+to=([^\s:\]]+))?[ \t]*:[ \t]*([\s\S]*?)\]\][ \t]*$/gm
   const clean = text.replace(re, (_m, kind: string, to: string | undefined, body: string) => {
     const b = body.trim()
     if (!b) return ''
@@ -54,6 +60,7 @@ export function parseMarkers(text: string): ParsedMarkers {
     else if (kind === 'MSG' && to) messages.push({ to, body: b })
     else if (kind === 'APPROVAL') approvals.push(b)
     else if (kind === 'NEED') needs.push(b)
+    else if (kind === 'ACK') acks.push(b)
     else if (REPORT_KEYS[kind]) (parts[REPORT_KEYS[kind]] ??= []).push(b)
     // PLAN / STEP only drive the live progress bar; they are dropped from the result
     return ''
@@ -67,7 +74,7 @@ export function parseMarkers(text: string): ParsedMarkers {
         next: (parts.next ?? []).join('\n')
       }
     : undefined
-  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals, needs, report }
+  return { clean: clean.replace(/\n{3,}/g, '\n\n').trim(), memory, messages, approvals, needs, acks, report }
 }
 
 function fmtSize(n: number): string {
@@ -117,6 +124,10 @@ export function buildPrompt(opts: {
   staged?: Map<string, string>
   /** Extra instructions of a delegation step (planner / reviewer / integrator). */
   extras?: string[]
+  /** The folder the run happens in, told to the AI so it knows where to save. */
+  cwd?: string
+  /** The company's own `results` folder: deliverables go here when the person named no folder or file. */
+  resultsDir?: string
 }): string {
   const { agent, task, hive } = opts
   const mem = hive.memoryForPrompt(opts.maxMemory ?? 20)
@@ -141,8 +152,20 @@ export function buildPrompt(opts: {
     lines.push('', '## Team rules (fixed memory — always apply)')
     for (const m of mem.fixed) lines.push(`- ${m.text}`)
   }
+  if (task.answered?.length) {
+    lines.push('', '## Already answered by the human — do NOT ask these again')
+    for (const x of task.answered) lines.push(`Q: ${x.q}`, `A: ${delegatedAnswer(x.a) ? '(the human leaves this to you) Decide it yourself, and write your reasoning in DID / RISK.' : x.a}`)
+  }
   lines.push('', '## Your task', task.title)
   if (task.description) lines.push('', task.description)
+  if (opts.cwd) {
+    lines.push('', '## Where to save', `Your work folder is ${opts.cwd} — create and change files there.`)
+    if (opts.resultsDir) lines.push(`The human did not name a folder or file for the result, so put every deliverable (documents, exports, generated files) in ${opts.resultsDir} (create it if it does not exist). Do not scatter result files elsewhere.`)
+  }
+  const queued = queuedOf(task)
+  if (queued.length) {
+    lines.push('', '## New instructions from the human (they change what you do — apply them)', joinInstructions(queued))
+  }
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
   const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission ?? agent.permission)]
   if (perm) lines.push('', perm)
@@ -194,6 +217,8 @@ export function buildPrompt(opts: {
     '[[MSG to=<teammate-id>: a short message to a teammate]]',
     '[[NEED: the exact file, information or decision you need from the human]]',
     '[[APPROVAL: why a human must approve before you continue]]',
+    '[[ACK: one line — what you change because of a new human instruction]]',
+    'The human may send new instructions while you work. When you receive one: first write [[ACK: …]], then rewrite your remaining [[PLAN]], undo anything you already did that now conflicts (or list it under RISK if you cannot), and ask with [[NEED: …]] if the instruction conflicts with the task.',
     'Use NEED when you cannot continue without something only the human can give (a file, a path, an answer); then stop and wait.',
     'Use APPROVAL before anything destructive, irreversible, expensive, or outside the task scope, then stop and wait.'
   )
@@ -202,7 +227,10 @@ export function buildPrompt(opts: {
 
 /** The human's answer, sent into an existing CLI session (the CLI already remembers the rest). */
 export function buildFollowUp(task: Task, hive: Hive, staged?: Map<string, string>): string {
-  const lines: string[] = ['The human replied:', task.reply ?? '']
+  const lines: string[] = []
+  if (task.reply !== undefined) lines.push('The human replied:', task.reply)
+  const queued = queuedOf(task)
+  if (queued.length) lines.push('', 'New instructions from the human (apply them; start with [[ACK: …]]):', joinInstructions(queued))
   lines.push(...materialLines(task, hive, staged))
   lines.push('', 'Continue the task. Keep using the same [[PLAN]]/[[STEP]], report and NEED/APPROVAL markers.')
   return lines.join('\n')
@@ -282,6 +310,12 @@ export function shareRun(hive: Hive, rec: RunRecord, machine: string): void {
   })
 }
 
+/** Does this folder hold (or sit inside) the company's data? Only the company's own work folder may be inside it. */
+export function holdsAppData(hive: Hive, cwd: string): boolean {
+  if (containsPath(cwd, hive.root)) return true
+  return containsPath(hive.root, cwd) && !containsPath(hive.workspaceDir(), cwd)
+}
+
 /** The folder an agent's runs happen in. */
 export function resolveCwd(agent: Agent, defaultCwd: string, projectDir?: string | null): string {
   if (projectDir && existsSync(projectDir)) return projectDir
@@ -318,6 +352,14 @@ export function budgetProblem(hive: Hive, agent: Agent, d: Date): string | null 
 
 /** Run one task with its agent: approval gate → budget gate → CLI (watched) → parse → record. */
 export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): Promise<RunOutcome> {
+  const ctx = { runId: '' }
+  const out = await runTaskInner(agent, taskId, deps, ctx)
+  // an instruction the AI never got to apply (the run ended early) goes into the next run
+  if (out !== 'done' && ctx.runId) requeue(deps.hive, taskId, ctx.runId)
+  return out
+}
+
+async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx: { runId: string }): Promise<RunOutcome> {
   const { hive } = deps
   const nowFn = deps.now ?? (() => new Date())
   const task = hive.getTask(taskId)
@@ -354,9 +396,16 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
 
   const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId))
+  if (holdsAppData(hive, cwd)) {
+    const error = `작업 폴더(${cwd})에 회사 데이터가 들어 있어서 실행하지 않았어요. AI가 업무·메모리 파일을 고칠 수 있어요. 다른 작업 폴더를 지정하세요.`
+    hive.addEvent(task.id, 'run_finished', agent.id, '실행 안 함 · ' + error)
+    hive.updateTask(task.id, { status: 'failed', error, errorKind: 'permission', finishedAt: nowFn().toISOString() })
+    return 'failed'
+  }
   const started = nowFn()
   const runId = newId()
-  const answering = task.reply !== undefined
+  const queuedNow = queuedOf(task)
+  const answering = task.reply !== undefined || queuedNow.length > 0
   // Same conversation when the CLI can continue it; otherwise the prompt retells what happened.
   const resumeSession =
     answering && task.sessionId && adapterAccess(agent.adapter).resume === 'session'
@@ -382,7 +431,15 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const staged = stageAttachments(task, hive, cwd)
   const prompt = resumeSession
     ? buildFollowUp(task, hive, staged.paths)
-    : buildPrompt({ agent, task, hive, staged: staged.paths, extras: deps.promptExtras?.(task, agent) })
+    : buildPrompt({
+        agent,
+        task,
+        hive,
+        staged: staged.paths,
+        extras: deps.promptExtras?.(task, agent),
+        cwd,
+        resultsDir: cwd === deps.defaultCwd ? join(cwd, 'results') : undefined
+      })
   const unread = hive.listInbox(agent.id).filter((m) => !m.read)
 
   let built
@@ -429,6 +486,8 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     checkpointNote: cp.note
   })
   if (task.interruptedRun) hive.updateTask(task.id, { interruptedRun: undefined })
+  ctx.runId = runId
+  if (queuedNow.length) markSent(hive, task.id, runId)
   const live = new LiveRun(task.id, runId, cwd, started.toISOString())
   live.setTracking(tracker.mode)
   deps.onLive?.(live)
@@ -551,9 +610,13 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   const lastError = [...live.all()].reverse().find((e) => e.kind === 'error')?.text
 
   if (res.aborted) {
-    const error = '사용자가 중지했어요.'
+    // A person stopped it: it is held (or cancelled) and never starts again by itself.
+    const why = typeof deps.signal?.reason === 'string' ? deps.signal.reason : 'hold'
+    const cancel = why === 'cancel'
+    const error = cancel ? '취소했어요.' : '사용자가 중지했어요.'
     hive.updateTask(task.id, {
-      status: 'todo',
+      status: cancel ? 'cancelled' : 'held',
+      stoppedBy: { by: deps.machine || 'me', at: finishedAt, kind: why === 'emergency' ? 'emergency' : cancel ? 'cancel' : 'hold' },
       error,
       finishedAt,
       sessionId,
@@ -609,6 +672,7 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
 
   const parsed = parseMarkers(stdout)
+  applyAcks(hive, task.id, runId, parsed.acks)
   for (const m of unread) hive.markRead(agent.id, m.id)
   const known = new Set(hive.listMemory(1000).map((m) => m.text.trim().toLowerCase()))
   for (const text of parsed.memory) {
@@ -619,6 +683,15 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
   for (const m of parsed.messages) hive.sendMessage(agent.id, m.to, m.body)
 
+  if (parsed.approvals.length && repeatedApproval(hive, task.id, parsed.approvals.join(' / '))) {
+    // the same request again although it was approved: more runs would only repeat this
+    const reason = parsed.approvals.join(' / ')
+    const question = `같은 승인을 다시 요청했어요 (${reason}).\n이미 승인했는데도 같은 요청이 반복돼서 자동 재실행을 멈췄어요. 권한이나 지시를 바꾸지 않으면 같은 결과가 반복돼요. 권한 단계를 올리거나 지시를 바꿔 알려 주세요.`
+    const lastRunId = saveRun('needs_input', { report: parsed.report })
+    hive.addEvent(task.id, 'need', agent.id, `자료 요청: ${question}`, runId)
+    hive.updateTask(task.id, { status: 'needs_input', question, result: parsed.clean || undefined, report: parsed.report, finishedAt, sessionId, lastRunId })
+    return 'needs_input'
+  }
   if (parsed.approvals.length) {
     const reason = parsed.approvals.join(' / ')
     const lastRunId = saveRun('awaiting_approval', { report: parsed.report })
@@ -637,7 +710,12 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
   }
 
   if (parsed.needs.length) {
-    const question = parsed.needs.join('\n')
+    let question = parsed.needs.join('\n')
+    const before = (hive.getTask(task.id)?.answered ?? task.answered ?? []).find((x) => similar(x.q, question))
+    if (before) {
+      // the same question again: do not loop, show it to the human with what they already said
+      question = `(같은 질문을 또 했어요. 앞서 "${before.a.slice(0, 80)}"라고 답하셨어요. 자동 재실행을 멈췄어요.)\n${question}`
+    }
     const lastRunId = saveRun('needs_input', { report: parsed.report })
     hive.addEvent(task.id, 'need', agent.id, `자료 요청: ${question}`, runId)
     hive.updateTask(task.id, {
@@ -670,7 +748,38 @@ export async function runTask(agent: Agent, taskId: string, deps: RunnerDeps): P
     sessionId,
     lastRunId
   })
+  try {
+    writeTaskReport(hive, task, agent.name)
+  } catch {
+    /* the readable copy is a convenience: the report itself is already saved with the task */
+  }
   return 'done'
+}
+
+/** "You decide" style answers: the AI must not ask again, it decides. */
+export function delegatedAnswer(a: string): boolean {
+  return /(알아서|네가 정해|니가 정해|너가 정해|맡길게|맡긴다|상관없|아무거나|자유롭게|you decide|up to you|your call)/i.test(a)
+}
+
+export function similar(a: string, b: string): boolean {
+  const x = words(a)
+  const y = words(b)
+  if (!x.size || !y.size) return false
+  return [...x].filter((w) => y.has(w)).length / Math.max(x.size, y.size) >= 0.6
+}
+
+const words = (s: string): Set<string> => new Set(s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 1))
+
+/** Did a person already approve (nearly) this exact request for this task? */
+export function repeatedApproval(hive: Hive, taskId: string, reason: string): boolean {
+  const a = words(reason)
+  if (!a.size) return false
+  return hive.listApprovals().some((x) => {
+    if (x.taskId !== taskId || x.kind !== 'agent-request' || x.status !== 'approved') return false
+    const b = words(x.reason)
+    const common = [...a].filter((w) => b.has(w)).length
+    return common / Math.max(a.size, b.size) >= 0.6
+  })
 }
 
 /** Should a finished run wait for a human to look at it before it counts as done? */

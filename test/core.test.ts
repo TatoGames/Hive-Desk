@@ -17,6 +17,7 @@ let dir: string
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hivedesk-'))
+  mkdirSync(join(dir, 'cwd'))
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
@@ -34,7 +35,7 @@ function fakeAgent(over: Partial<Agent> = {}): Agent {
 }
 
 function deps(hive: Hive, over: Partial<RunnerDeps> = {}): RunnerDeps {
-  return { hive, stripApiKeys: true, runner: runCli, defaultCwd: dir, ...over }
+  return { hive, stripApiKeys: true, runner: runCli, defaultCwd: join(dir, 'cwd'), ...over }
 }
 
 describe('hive store', () => {
@@ -367,15 +368,17 @@ describe('transparency: change diff', () => {
     expect(run.diff.reason).toMatch(/git 저장소가 아니/)
   })
 
-  it('ignores the hive\'s own files when the hive folder is the work folder', async () => {
+  it('refuses to run in a folder that holds the company data (the AI could change tasks and memory)', async () => {
     const h = new Hive(join(dir, 'hive'))
-    await initSync(h.root, '')
     const agent = fakeAgent()
-    const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
-    await runTask(agent, t.id, deps(h, { defaultCwd: h.root }))
-    const run = h.getRun(t.id, h.getTask(t.id)!.lastRunId!)!
-    expect(run.diff.available).toBe(true)
-    expect(run.diff.files).toEqual([])
+    for (const cwd of [h.root, dir, join(h.root, 'tasks')]) {
+      const t = h.createTask({ title: 'x', assignee: agent.id, createdBy: 'alice' })
+      expect(await runTask(agent, t.id, deps(h, { defaultCwd: cwd }))).toBe('failed')
+      expect(h.getTask(t.id)!.error).toMatch(/회사 데이터/)
+    }
+    // the company's own work folder inside is fine
+    const t = h.createTask({ title: 'y', assignee: agent.id, createdBy: 'alice' })
+    expect(await runTask(agent, t.id, deps(h, { defaultCwd: h.ensureWorkspace() }))).toBe('done')
   })
 })
 

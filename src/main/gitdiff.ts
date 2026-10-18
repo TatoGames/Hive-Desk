@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import type { DiffFile, RunDiff, TrackMode } from '../shared/types'
 import { SHARED_DIRS } from './hive'
 import { STAGE_DIR } from './staging'
@@ -50,6 +50,13 @@ export function normPath(p: string): string {
     r = resolve(p)
   }
   return process.platform === 'win32' ? r.toLowerCase() : r
+}
+
+/** Is `child` the same folder as `parent` or inside it? */
+export function containsPath(parent: string, child: string): boolean {
+  const p = normPath(parent)
+  const c = normPath(child)
+  return c === p || c.startsWith(p.endsWith(sep) ? p : p + sep)
 }
 
 function samePath(a: string, b: string): boolean {

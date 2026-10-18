@@ -8,7 +8,9 @@ const KIND: Record<ApprovalKind, string> = {
   'risky-task': '위험 태스크',
   budget: '예산 초과',
   'agent-request': '에이전트 요청',
-  plan: '분배 계획'
+  plan: '분배 계획',
+  failure: '작업 실패',
+  'bundle-cap': '실행 상한'
 }
 
 export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
@@ -74,8 +76,20 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
               <>
                 {t?.result && <pre className="out">{t.result}</pre>}
                 <div className="row">
-                  <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
-                    승인
+                  {a.kind === 'agent-request' && t?.permission !== 'exec' && (
+                    <>
+                      {t?.permission !== 'edit' && (
+                        <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved', undefined, 'edit')}>
+                          권한을 &apos;파일 수정&apos;으로 올리고 이어서
+                        </button>
+                      )}
+                      <button onClick={() => void window.hive.decideApproval(a.id, 'approved', undefined, 'exec')}>
+                        &apos;명령 실행&apos;으로 올리고 이어서
+                      </button>
+                    </>
+                  )}
+                  <button className={a.kind === 'agent-request' ? '' : 'primary'} onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
+                    {a.kind === 'agent-request' ? '권한은 그대로 승인' : '승인'}
                   </button>
                   <button className="danger" onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>
                     거절

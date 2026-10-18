@@ -1,6 +1,6 @@
 import type { Approval, LiveSummary, Task } from './types'
 
-export type EmployeeState = 'idle' | 'working' | 'reviewing' | 'waiting-input' | 'waiting-approval' | 'limit' | 'error'
+export type EmployeeState = 'idle' | 'working' | 'reviewing' | 'waiting-input' | 'waiting-approval' | 'limit' | 'error' | 'held'
 
 export const STATE_LABEL: Record<EmployeeState, string> = {
   idle: '대기',
@@ -9,7 +9,8 @@ export const STATE_LABEL: Record<EmployeeState, string> = {
   'waiting-input': '자료 대기',
   'waiting-approval': '결재 대기',
   limit: '한도 대기',
-  error: '오류'
+  error: '오류',
+  held: '보류'
 }
 
 /** Colors of the state chips (CSS variables with fallbacks). */
@@ -20,7 +21,8 @@ export const STATE_COLOR: Record<EmployeeState, string> = {
   'waiting-input': '#e0a100',
   'waiting-approval': '#e0a100',
   limit: '#f97316',
-  error: '#ef4444'
+  error: '#ef4444',
+  held: '#6b7280'
 }
 
 export interface EmployeeView {
@@ -49,6 +51,8 @@ export function employeeState(
     (t) => t.status === 'awaiting_approval' || approvals.some((a) => a.status === 'pending' && a.taskId === t.id)
   )
   if (approval) return { state: 'waiting-approval', task: approval, queued }
+  const held = mine.find((t) => t.status === 'held')
+  if (held && !queued.length) return { state: 'held', task: held, queued }
   if (limited && queued.length) return { state: 'limit', task: queued[0], queued }
   const failed = mine.filter((t) => t.status === 'failed').sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))[0]
   if (failed) return { state: 'error', task: failed, queued }

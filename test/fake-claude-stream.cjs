@@ -16,6 +16,12 @@ process.stdin.on('end', async () => {
     process.stderr.write('boom')
     process.exit(3)
   }
+  if (input.includes('New instructions from the human')) {
+    const ins = (input.match(/New instructions from the human[^\n]*\n([^\n]*)/) || [])[1]
+    say('[[ACK: ' + ins + ']]')
+    result('Resumed with: ' + (argv.includes('--resume') ? 'SESSION' : 'REPLAY') + '\n' + ins + '\n[[ACK: ' + ins + ']]\n[[DID: continued]]')
+    return
+  }
   if (input.includes('The human replied')) {
     say('Thanks, continuing.')
     result('Resumed with: ' + (argv.includes('--resume') ? 'SESSION' : 'REPLAY') + '\n' + (input.match(/The human replied:\n([^\n]*)/) || [])[1] + '\n[[DID: continued]]')
