@@ -19,7 +19,9 @@ export async function canBranchFrom(dir: string): Promise<boolean> {
   const top = await git(dir, ['rev-parse', '--show-toplevel'])
   if (!top.ok) return false
   try {
-    if (realpathSync(top.out.trim()) !== realpathSync(dir)) return false
+    // native: Windows short names (C:\Users\RUNNER~1) and git's long, forward-slash path must compare equal
+    const same = (a: string, b: string): boolean => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
+    if (!same(realpathSync.native(top.out.trim()), realpathSync.native(dir))) return false
   } catch {
     return false
   }

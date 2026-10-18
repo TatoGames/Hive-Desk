@@ -18,6 +18,11 @@ afterEach(() => {
 const REPORT = '[[DID: 했어요]]\n[[FILES: none]]\n[[VERIFY: 확인]]\n[[RISK: none]]\n[[NEXT: none]]'
 const res = (o: Partial<RunResult> = {}): RunResult => ({ code: 0, stdout: REPORT, stderr: '', timedOut: false, aborted: false, ...o })
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+/** Slow CI machines (Windows) need longer than a fixed pause: wait until the condition holds, or give up after 8s. */
+async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
+  const t0 = Date.now()
+  while (!cond() && Date.now() - t0 < ms) await wait(20)
+}
 
 /** A runner that stays busy until it is told to stop, remembering every prompt it got. */
 function hanging() {
@@ -50,10 +55,10 @@ describe('6-0: a stopped task stays stopped', () => {
     const { eng, agent } = setup(h.runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     void eng.runTask(t.id)
-    await wait(150)
+    await waitFor(() => h.calls() === 1)
     expect(eng.hive.getTask(t.id)!.status).toBe('running')
     eng.stopTask(t.id, 'hold')
-    await wait(200)
+    await waitFor(() => eng.hive.getTask(t.id)!.status !== 'running')
     const held = eng.hive.getTask(t.id)!
     expect(held.status).toBe('held')
     expect(held.stoppedBy?.kind).toBe('hold')
@@ -63,7 +68,7 @@ describe('6-0: a stopped task stays stopped', () => {
     expect(h.calls()).toBe(1)
 
     eng.resumeTask(t.id, '표를 먼저 만들어줘')
-    await wait(500)
+    await waitFor(() => eng.hive.getTask(t.id)!.status === 'done')
     expect(h.calls()).toBe(2)
     expect(h.prompts[1]).toContain('표를 먼저 만들어줘')
     expect(eng.hive.getTask(t.id)!.status).toBe('done')
@@ -75,9 +80,9 @@ describe('6-0: a stopped task stays stopped', () => {
     const { eng, agent } = setup(h.runner)
     const t = eng.createTask({ title: '취소할 일', assignee: agent.id })
     void eng.runTask(t.id)
-    await wait(150)
+    await waitFor(() => h.calls() === 1)
     eng.stopTask(t.id, 'cancel')
-    await wait(200)
+    await waitFor(() => eng.hive.getTask(t.id)!.status !== 'running')
     expect(eng.hive.getTask(t.id)!.status).toBe('cancelled')
     eng.shutdown()
   })
@@ -87,9 +92,9 @@ describe('6-0: a stopped task stays stopped', () => {
     const { eng, agent } = setup(h.runner)
     const t = eng.createTask({ title: '급한 정지', assignee: agent.id })
     void eng.runTask(t.id)
-    await wait(150)
+    await waitFor(() => h.calls() === 1)
     expect(eng.emergencyStop()).toBe(1)
-    await wait(200)
+    await waitFor(() => eng.hive.getTask(t.id)!.status !== 'running')
     expect(eng.hive.getTask(t.id)!.status).toBe('held')
     expect(eng.snapshot().config.autoRun).toBe(false)
     expect(eng.snapshot().config.autoRunOrg).toBe(false)

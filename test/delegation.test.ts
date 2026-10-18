@@ -719,7 +719,9 @@ describe('6-0.7: work trees let sub-tasks of one git project run at the same tim
     ;(eng as unknown as { runner: Runner }).runner = async (b, o) => {
       const isWork = o.cwd.includes('.hive-worktrees') && !o.prompt.includes('CROSS REVIEWER')
       if (isWork) maxActive = Math.max(maxActive, ++active)
-      await new Promise((r) => setTimeout(r, isWork ? 150 : 0))
+      // hold each work run until the other one has started too (or 5s pass), so a slow machine
+      // that starts the second run late still shows they overlap; run one after another, they never do
+      for (let i = 0; isWork && i < 250 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
       try {
         return await inner(b, o)
       } finally {
@@ -820,6 +822,8 @@ describe('6-3: adjusting a running delegation', () => {
     const old = kids(eng, root.id).filter((k) => k.title === '둘째')
     expect(old.every((k) => k.status === 'cancelled' || k.status === 'todo' || k.status === 'delegated')).toBe(true)
     expect(task(eng, a.id).status).toBe('done')
+    // the new planning run is still going: let it finish, or its git process keeps the folder busy (Windows EBUSY)
+    for (let i = 0; i < 400 && eng.snapshot().running.length; i++) await new Promise((r) => setTimeout(r, 20))
     eng.shutdown()
   })
 })
