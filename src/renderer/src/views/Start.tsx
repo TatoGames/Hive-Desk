@@ -30,7 +30,7 @@ export default function Start({ snap, go }: { snap: Snapshot; go: (tab: 'board' 
   }, [])
   const s = startSteps(snap)
   const [text, setText] = useState('')
-  const [sent, setSent] = useState<{ dir: string } | null>(null)
+  const [sent, setSent] = useState<{ dir: string; preset?: string } | null>(null)
   const [folder, setFolder] = useState('')
   const [git, setGit] = useState<'ok' | 'none' | 'not-top' | 'no-commit' | null>(null)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
@@ -45,7 +45,7 @@ export default function Start({ snap, go }: { snap: Snapshot; go: (tab: 'board' 
     if (!text.trim()) return
     const r = await window.hive.startFirstTask(text, folder || undefined)
     if (!r.ok) return setNote({ ok: false, text: r.warning ?? '업무를 만들지 못했어요.' })
-    setSent({ dir: r.dir })
+    setSent({ dir: r.dir, preset: r.preset })
     setText('')
   }
   const mark = (ok: boolean, n: number): string => (ok ? '✓' : String(n))
@@ -133,6 +133,7 @@ export default function Start({ snap, go }: { snap: Snapshot; go: (tab: 'board' 
           <button className="primary" disabled={!text.trim()} onClick={() => void give()}>
             맡기기
           </button>
+          {sent?.preset && <span className="ok-text small">{sent.preset}이라서 시작 규칙(보안 기본값·스크립트 등)을 프로젝트 브리핑에 넣었어요.</span>}
           {sent && (
             <>
               <button className="ghost" onClick={() => go('board')}>

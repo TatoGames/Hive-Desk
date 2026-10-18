@@ -89,7 +89,8 @@ import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
-import { runChecks } from './checks'
+import { isElectronApp, runChecks } from './checks'
+import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
 import { taskCost, type TaskCost } from '../shared/cost'
 import { freeName, summarize, type TeamMember, type TeamSummary, type TeamTemplate } from '../shared/team'
@@ -1395,9 +1396,10 @@ export class Engine {
    * The first task from the start screen: in the folder the person picked (a project is made for it, or the
    * existing project of that folder is used), or in the company folder when none is picked.
    */
-  startFirstTask(text: string, folder?: string): { ok: boolean; id?: string; dir: string; warning?: string } {
+  startFirstTask(text: string, folder?: string): { ok: boolean; id?: string; dir: string; warning?: string; preset?: string } {
     const clean = text.trim()
     let projectId: string | undefined
+    let preset: string | undefined
     let dir = this.hive.ensureWorkspace()
     if (folder && existsSync(folder)) {
       const want = normPath(folder)
@@ -1405,7 +1407,15 @@ export class Engine {
       const known = this.hive.listProjects().find((p) => paths[p.id] && normPath(paths[p.id]) === want)
       if (known) projectId = known.id
       else {
-        const p = this.hive.saveProject({ name: basename(folder) || '내 프로젝트', folderName: basename(folder), createdBy: this.config.memberName || 'me' })
+        // an Electron app gets the Electron starting rules in its briefing (visible and editable in 프로젝트)
+        const electron = isElectronApp(folder)
+        const p = this.hive.saveProject({
+          name: basename(folder) || '내 프로젝트',
+          folderName: basename(folder),
+          ...(electron ? { briefing: presetById('electron')!.briefing } : {}),
+          createdBy: this.config.memberName || 'me'
+        })
+        if (electron) preset = 'Electron 데스크톱 앱'
         const r = this.setProjectPath(p.id, folder)
         if (!r.ok) {
           this.hive.deleteProject(p.id)
@@ -1416,7 +1426,7 @@ export class Engine {
       dir = folder
     }
     const t = this.createTask({ title: clean.split(/[.\n]/)[0].slice(0, 60), description: clean, ...(projectId ? { projectId } : {}) })
-    return { ok: true, id: t.id, dir }
+    return { ok: true, id: t.id, dir, ...(preset ? { preset } : {}) }
   }
 
   /** Why this task cannot run next to others in its folder, and what the person can do about it. */

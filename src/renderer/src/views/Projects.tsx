@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { PROJECT_PRESETS, presetById } from '@shared/presets'
 import type { Project, Snapshot } from '@shared/types'
 import { ConfirmButton } from './Materials'
 
@@ -84,6 +85,25 @@ export default function Projects({ snap }: { snap: Snapshot }): JSX.Element {
             <label className="full">
               한 줄 설명
               <input value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+            </label>
+            <label className="full">
+              시작 규칙 불러오기
+              <select
+                value=""
+                onChange={(e) => {
+                  const p = presetById(e.target.value)
+                  if (!p) return
+                  // the text is only filled in; the person can change it, and nothing already written is thrown away
+                  setDraft({ ...draft, briefing: draft.briefing.trim() ? draft.briefing.trim() + '\n\n' + p.briefing : p.briefing })
+                }}
+              >
+                <option value="">종류를 고르면 브리핑에 규칙이 채워져요…</option>
+                {PROJECT_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} — {p.description}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className="full">
               고정 브리핑 (목표, 규칙, 코드 스타일 …)
