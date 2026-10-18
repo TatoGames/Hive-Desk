@@ -354,6 +354,8 @@ export interface ReviewState {
   round: number
   /** After repeated rejections the task moved up to the unit's lead. */
   escalations: number
+  /** Left to the review of the whole bundle after integration (v0.6.1). */
+  deferred?: boolean
   by?: string
   note?: string
 }
@@ -732,6 +734,9 @@ export interface CheckRun {
 
 export type ReviewPolicy = 'risk' | 'always'
 
+/** Sub-tasks of a bundle: `once` (default) = reviewed together after integration; `each` = every one on its own. Only with policy `risk`. */
+export type BundleReview = 'once' | 'each'
+
 export interface ReviewSettings {
   /** Run the project's own checks before an AI looks at the work (default on). */
   checks: boolean
@@ -741,9 +746,11 @@ export interface ReviewSettings {
   policy: ReviewPolicy
   /** How many times work goes back to the same worker before it moves up (1–3, default 2). */
   maxRounds: number
+  /** Bundles: one review of the whole after integration instead of one per sub-task (risky sub-tasks are still reviewed on their own). */
+  bundle: BundleReview
 }
 
-export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2 }
+export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2, bundle: 'once' }
 
 export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
 
@@ -793,7 +800,7 @@ export interface AppConfig {
   /** v5: when a connection runs out of usage, another connection's employee carries the task on. */
   handoff?: HandoffSettings
   /** v5.1: the app's own checks and when an AI review is needed. */
-  review?: ReviewSettings
+  review?: Partial<ReviewSettings>
   /** v0.6.1: put a snapshot of the work folder (structure, scripts, README, recent work) at the top of each prompt (default on). */
   projectSnapshot?: boolean
   /** v0.6: `basic` shows the everyday menus only; `advanced` (default for configs from before v0.6) shows everything. */

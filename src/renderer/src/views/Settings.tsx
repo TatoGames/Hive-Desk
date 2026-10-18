@@ -207,6 +207,13 @@ export default function Settings({
             </select>
           </label>
           <label>
+            큰 일(묶음)의 하위 작업 검토
+            <select value={rv.bundle} disabled={rv.policy === 'always'} onChange={(e) => setRv({ ...rv, bundle: e.target.value as ReviewSettings['bundle'] })}>
+              <option value="once">통합한 뒤 한 번에 — 하위 작업마다 하지 않아요 (추천)</option>
+              <option value="each">하위 작업마다 따로</option>
+            </select>
+          </label>
+          <label>
             같은 담당자에게 돌려보내는 횟수 (넘으면 윗 직책에게 올려요)
             <select value={rv.maxRounds} onChange={(e) => setRv({ ...rv, maxRounds: Number(e.target.value) })}>
               <option value={1}>1번</option>

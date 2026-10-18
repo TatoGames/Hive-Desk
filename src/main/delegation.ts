@@ -295,6 +295,42 @@ export class Delegation {
     return runs[runs.length - 1]
   }
 
+  /** One review for everything the bundle's sub-tasks did (they were left for this). */
+  private bundleReviewPrompt(target: Task): string[] {
+    const kids = this.children(target.id).filter((k) => k.reviewState?.deferred && k.status === 'done')
+    const lines = [
+      '',
+      '## Your role in this task: CROSS REVIEWER (the whole bundle at once)',
+      `The sub-tasks of "${target.title}" are finished and were not reviewed one by one. Check all of them together with one verdict — the results fit each other, each meets its completion criteria, nothing important is missing.`,
+      `Task description: ${target.description || target.title}`,
+      ''
+    ]
+    let budget = 12000
+    for (const k of kids) {
+      lines.push(`### ${k.title} — ${this.rosterOf(k.assignee)?.name ?? k.assignee} (${this.modelName(k.assignee)})`)
+      lines.push(`criteria: ${k.criteria || '-'}`)
+      if (k.report) lines.push(`did: ${k.report.did}`, `files: ${k.report.files}`, `verify: ${k.report.verify}`, `risks: ${k.report.risks}`)
+      else lines.push((k.result ?? '').slice(0, 1200))
+      lines.push(...checksForReviewer(k.checks).map((l) => l.trimEnd()))
+      const run = this.lastRun(k.id)
+      if (run) {
+        lines.push(`Changes (${run.diffStat.files} files, +${run.diffStat.additions} −${run.diffStat.deletions}):`)
+        lines.push(...run.files.slice(0, 20).map((f) => `- ${f.status} ${f.path}`))
+        const patch = (run.patch ?? '').slice(0, Math.max(0, Math.min(3000, budget)))
+        if (patch) {
+          lines.push('```diff', patch, '```')
+          budget -= patch.length
+        }
+      }
+      lines.push('')
+    }
+    lines.push(
+      'Judge from the reports and diffs above; open files in the work folder only where they are not enough (read only — do not change anything). Be strict but fair.',
+      'Answer with exactly one verdict line: [[VERDICT: pass]] or [[VERDICT: changes: the concrete things to fix, naming the sub-task]].'
+    )
+    return lines
+  }
+
   private reviewPrompt(task: Task): string[] {
     const target = task.reviewOf ? this.c.hive.getTask(task.reviewOf) : null
     if (!target) return ['', '## Your role: REVIEWER', 'The task you should review no longer exists. Answer [[VERDICT: pass]].']
@@ -311,6 +347,7 @@ export class Delegation {
         'Answer with exactly one verdict line: [[VERDICT: approve]] or [[VERDICT: reject: what must change]].'
       ]
     }
+    if (target.kind === 'integrate') return this.bundleReviewPrompt(target)
     const run = this.lastRun(target.id)
     const r = target.report
     const lines = [
@@ -842,6 +879,12 @@ export class Delegation {
       this.c.aptitude(w.assignee, w.id, { approved: 1 })
       return void this.rollUp(w)
     }
+    // a bundle is reviewed once after integration; a risky sub-task, or one a reviewer already sent back, still is on its own
+    if (w.parentId && !reviewerAsked && !sameAgain && s.policy === 'risk' && s.bundle === 'once' && risk.risk !== 'high') {
+      h.updateTask(w.id, { reviewState: { status: 'skipped', deferred: true, round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, note: `묶음 전체를 통합한 뒤 한 번에 검토해요 (${risk.why})` } })
+      this.event(w.id, `이 하위 작업은 따로 검토하지 않고, 묶음이 끝난 뒤 한 번에 검토해요 (${risk.why}).`)
+      return void this.rollUp(w)
+    }
     const reviewer = this.pickReviewer(w.assignee)
     if (!reviewer) {
       h.updateTask(w.id, { reviewState: { status: 'skipped', round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, note: '다른 모델의 검토자가 없어서 검토 없이 끝냈어요.' } })
@@ -887,6 +930,15 @@ export class Delegation {
         this.rejectPlan(target.id, v.note, reviewerName)
       }
       return
+    }
+    if (target.kind === 'integrate') {
+      const by = r.assignee ?? undefined
+      h.updateTask(target.id, { status: 'done', reviewState: { status: v.pass ? 'passed' : 'changes', round: 0, escalations: 0, by, note: v.note || undefined } })
+      this.event(target.id, v.pass ? `묶음 검토 통과 (${reviewerName}).${v.note ? ' ' + v.note : ''}` : `묶음 검토에서 의견이 나왔어요 (${reviewerName}): ${v.note} — 최종 보고서의 남은 위험에 적었어요.`)
+      for (const k of this.children(target.id).filter((x) => x.reviewState?.deferred && x.status === 'done')) {
+        this.c.aptitude(k.assignee, k.id, v.pass ? { approved: 1 } : { changes: 1 })
+      }
+      return void this.finishIntegration(h.getTask(target.id)!)
     }
     // a work task
     const st = target.reviewState
@@ -974,6 +1026,23 @@ export class Delegation {
 
   private afterIntegrate(t: Task): void {
     const h = this.c.hive
+    // sub-tasks that were left for a review of the whole: one cross review of everything now
+    const deferred = this.children(t.id).filter((k) => k.reviewState?.deferred && k.status === 'done')
+    if (deferred.length) {
+      const reviewer = this.pickReviewer(t.assignee)
+      if (reviewer) {
+        this.makeReviewTask(t, reviewer, `[묶음 검토] ${t.title}`)
+        h.updateTask(t.id, { status: 'in_review', reviewState: { status: 'pending', round: 0, escalations: 0, by: reviewer } })
+        this.event(t.id, `${this.rosterOf(reviewer)?.name ?? reviewer}(${this.modelName(reviewer)})가 하위 작업 ${deferred.length}건을 한 번에 교차 검토해요.`)
+        return
+      }
+      this.event(t.id, '다른 모델의 검토자를 찾지 못해 묶음 검토를 건너뛰었어요.')
+    }
+    this.finishIntegration(t)
+  }
+
+  private finishIntegration(t: Task): void {
+    const h = this.c.hive
     if (t.parentId) {
       this.event(t.id, '통합을 마쳤어요. 상위로 보고해요.')
       return void this.checkParent(t.parentId)
@@ -1040,6 +1109,7 @@ export class Delegation {
       if (t.report?.verify && t.report.verify.toLowerCase() !== 'none') verification.push(`${t.title}: ${t.report.verify.replace(/\n/g, ' ')}`)
       if (t.report?.risks && t.report.risks.toLowerCase() !== 'none') risks.push(`${t.title}: ${t.report.risks.replace(/\n/g, ' ')}`)
       const rs = t.reviewState
+      if (t.kind === 'integrate' && rs?.status === 'changes' && rs.note) risks.push(`${t.title} — 묶음 검토 의견: ${rs.note.replace(/\n/g, ' ')}`)
       const review = rs
         ? rs.status === 'passed'
           ? `통과${rs.round ? ` (수정 ${rs.round}회)` : ''}`
