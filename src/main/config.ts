@@ -38,11 +38,14 @@ export function saveConfig(file: string, cfg: AppConfig): void {
 
 export function makeAgent(
   member: string,
-  input: Partial<Agent> & { name: string; adapter: Agent['adapter'] }
+  input: Partial<Agent> & { name: string; adapter: Agent['adapter'] },
+  /** Company tag for ids of agents outside the first company (`c1a2b-`). */
+  idTag = ''
 ): Agent {
   const owner = member || 'me'
   return {
-    id: input.id ?? `${slug(owner)}-${slug(input.name)}`,
+    id: input.id ?? `${slug(owner)}-${idTag}${slug(input.name)}`,
+    ...(input.companyId ? { companyId: input.companyId } : {}),
     name: input.name.trim(),
     owner,
     adapter: input.adapter,

@@ -7,6 +7,8 @@ export type AdapterId = 'claude' | 'codex' | 'gemini' | 'agy' | 'custom'
 export interface Agent {
   /** Globally unique: `<member>-<name>` (slugged). Used as task assignee. */
   id: string
+  /** The company this employee works for (absent = the first company). */
+  companyId?: string
   name: string
   owner: string
   adapter: AdapterId
@@ -169,6 +171,8 @@ export interface Task {
   /** Let the agent read secret-looking files (.env, keys). Off by default. */
   allowSecrets?: boolean
   projectId?: string
+  /** This task is a work request from another company (v3 stage 5-4). */
+  external?: { channelId: string; fromCompanyId: string; fromCompanyName: string; returned?: boolean }
   // ---- delegation (stage 3) ----
   /** What this task is in the delegation flow. Missing = a plain task. */
   kind?: TaskKind
@@ -506,7 +510,28 @@ export interface Agenda {
   note?: string
 }
 
+/** One company as the switcher and the board dashboard show it. */
+export interface CompanySummary {
+  id: string
+  name: string
+  active: boolean
+  /** Tasks that are not done yet. */
+  open: number
+  running: number
+  /** Approvals, questions and results that wait for the board. */
+  waiting: number
+  members: number
+  runsToday: number
+  minutesToday: number
+}
+
 export interface AppConfig {
+  /** Company priority for shared usage limits (highest first); companies not listed follow in creation order. */
+  companyOrder?: string[]
+  /** The same per connection (CLI), overriding `companyOrder`. */
+  connectionOrder?: Record<string, string[]>
+  /** The company shown on screen. */
+  activeCompanyId?: string
   /** Desktop notifications for approvals, reports and failures (default on). */
   notifications?: boolean
   /** `changes` (default): check results that changed files. */
@@ -543,6 +568,12 @@ export interface SyncResult {
 
 export interface Snapshot {
   config: AppConfig
+  companies: CompanySummary[]
+  /** Folder of the company being viewed — where runs happen when no project/agent folder is set. */
+  companyRoot: string
+  collab: import('./collab').CollabView
+  external: import('./collab').ExternalItem[]
+  connections: import('./connections').ConnectionView[]
   tasks: Task[]
   approvals: Approval[]
   roster: RosterEntry[]

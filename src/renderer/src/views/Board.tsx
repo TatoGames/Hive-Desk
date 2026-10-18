@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatus } from '@shared/types'
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
+import Office from './Office'
 import {
   ConfirmButton,
   DropMessages,
@@ -28,12 +29,14 @@ const COLUMNS: { id: TaskStatus; label: string }[] = [
   { id: 'failed', label: '실패' }
 ]
 
-export default function Board({
+function ListBoard({
   snap,
   output,
   live,
-  onGoAgents
+  onGoAgents,
+  onSwitchView
 }: {
+  onSwitchView?: () => void
   onGoAgents?: () => void
   snap: Snapshot
   output: Record<string, string>
@@ -42,10 +45,15 @@ export default function Board({
   const [open, setOpen] = useState<string | null>(null)
   const [detail, setDetail] = useState<string | null>(null)
   const [pre, setPre] = useState<string | null>(null)
+  const [fProject, setFProject] = useState('')
+  const [fPerson, setFPerson] = useState('')
+  const [fText, setFText] = useState('')
   /** The folder a task's agent works in (shown on the card, so it is clear where work happens). */
   const workDirOf = (t: Task): string => {
+    const pd = t.projectId ? snap.projectPaths?.[t.projectId] : undefined
+    if (pd) return pd
     const a = snap.config.agents.find((x) => x.id === t.assignee)
-    return a?.workDir || snap.config.workspace
+    return a?.workDir || snap.companyRoot || snap.config.workspace
   }
   const localIds = new Set(snap.config.agents.map((a) => a.id))
   const nameOf = (id: string | null): string => {
@@ -57,7 +65,11 @@ export default function Board({
   return (
     <div className="page">
       <header className="page-head">
-        <h1>태스크 보드</h1>
+        <h1>태스크 목록</h1>
+        <div className="seg">
+          <button onClick={onSwitchView}>오피스</button>
+          <button className="on">목록</button>
+        </div>
         <label className="toggle">
           <input
             type="checkbox"
@@ -70,13 +82,40 @@ export default function Board({
 
       <NewTask snap={snap} />
 
+      <div className="row filters">
+        <input className="grow" placeholder="제목 검색" value={fText} onChange={(e) => setFText(e.target.value)} />
+        {!!snap.projects.length && (
+          <select value={fProject} onChange={(e) => setFProject(e.target.value)}>
+            <option value="">모든 프로젝트</option>
+            {snap.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <select value={fPerson} onChange={(e) => setFPerson(e.target.value)}>
+          <option value="">모든 사람</option>
+          {snap.roster.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="board">
         {COLUMNS.map((col) => {
           const items = snap.tasks.filter(
-            (t) => !t.hidden && (t.status === col.id || (col.id === 'running' && (t.status === 'in_review' || t.status === 'delegated')))
+            (t) =>
+              !t.hidden &&
+              (!fProject || t.projectId === fProject) &&
+              (!fPerson || t.assignee === fPerson) &&
+              (!fText.trim() || t.title.toLowerCase().includes(fText.trim().toLowerCase())) &&
+              (t.status === col.id || (col.id === 'running' && (t.status === 'in_review' || t.status === 'delegated')))
           )
           return (
-            <section key={col.id} className={'col col-' + col.id}>
+            <section key={col.id} className={'col col-' + col.id + (items.length ? '' : ' collapsed')}>
               <h2>
                 {col.label} <span className="count">{items.length}</span>
               </h2>
@@ -102,7 +141,7 @@ export default function Board({
                   onDetail={() => setDetail(t.id)}
                 />
               ))}
-              {!items.length && <div className="empty">없음</div>}
+              {!items.length && <div className="empty small">없음</div>}
             </section>
           )
         })}
@@ -405,5 +444,34 @@ function Card(props: {
         {!props.running && <ConfirmButton label="삭제" onConfirm={() => window.hive.deleteTask(t.id)} />}
       </div>
     </article>
+  )
+}
+
+/** The task area: the office floor (default) or the classic list. */
+export default function Board(props: {
+  snap: Snapshot
+  output: Record<string, string>
+  live: Record<string, LiveSummary>
+  onGoAgents?: () => void
+}): JSX.Element {
+  const [view, setViewState] = useState<'office' | 'list'>(() => {
+    try {
+      return localStorage.getItem('hive.view') === 'list' ? 'list' : 'office'
+    } catch {
+      return 'office'
+    }
+  })
+  const setView = (v: 'office' | 'list'): void => {
+    setViewState(v)
+    try {
+      localStorage.setItem('hive.view', v)
+    } catch {
+      /* ignore */
+    }
+  }
+  return view === 'office' ? (
+    <Office snap={props.snap} live={props.live} onGoAgents={props.onGoAgents} view={view} setView={setView} />
+  ) : (
+    <ListBoard {...props} onSwitchView={() => setView('office')} />
   )
 }

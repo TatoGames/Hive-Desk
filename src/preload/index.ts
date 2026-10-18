@@ -1,10 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { AutoRow } from '../shared/connections'
 import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
   AdapterId,
   Agent,
   AppConfig,
   AdapterInfo,
+  CompanySummary,
   AttachResult,
   EngineEvent,
   LiveState,
@@ -79,6 +81,17 @@ const api = {
     ipcRenderer.invoke('agenda:decide', id, choice, note),
   applyReassignment: (domain: string, from: string, to: string): Promise<number> =>
     ipcRenderer.invoke('reassign:apply', domain, from, to),
+  refreshAccountModels: (adapter: Agent['adapter']): Promise<{ ok: boolean; count: number; message: string }> =>
+    ipcRenderer.invoke('model:refresh', adapter),
+  verifyAllModels: (adapter: Agent['adapter']): Promise<{ checked: number; ok: number }> => ipcRenderer.invoke('conn:verify-all', adapter),
+  hire: (input: { modelAgentId: string; name?: string; seatId?: string; role?: string; workDir?: string }): Promise<Agent> =>
+    ipcRenderer.invoke('conn:hire', input),
+  hireToSeat: (seatId: string, modelAgentId: string): Promise<Agent> => ipcRenderer.invoke('conn:hire-seat', seatId, modelAgentId),
+  autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
+  autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
+  setCompanyOrder: (order: string[], adapter?: string): Promise<void> => ipcRenderer.invoke('conn:order', order, adapter),
+  reassignTask: (id: string, agentId: string): Promise<Task> => ipcRenderer.invoke('office:reassign', id, agentId),
+  officeFeed: (): Promise<{ at: string; taskId: string; taskTitle: string; actor: string; text: string }[]> => ipcRenderer.invoke('office:feed'),
   decideApproval: (id: string, d: 'approved' | 'rejected', note?: string): Promise<void> =>
     ipcRenderer.invoke('approval:decide', id, d, note),
   sendMessage: (from: string, to: string, body: string): Promise<void> =>
@@ -100,7 +113,19 @@ const api = {
   verifyModel: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('model:verify', id),
   saveProject: (p: Partial<Project> & { name: string }): Promise<Project> => ipcRenderer.invoke('project:save', p),
   deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('project:delete', id),
-  setProjectPath: (id: string, path: string): Promise<void> => ipcRenderer.invoke('project:path', id, path),
+  collabCreate: (input: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('collab:create', input),
+  collabClose: (id: string): Promise<number> => ipcRenderer.invoke('collab:close', id),
+  collabShareable: (companyId: string): Promise<import('../shared/collab').ShareableRef[]> => ipcRenderer.invoke('collab:shareable', companyId),
+  collabSendMaterial: (channelId: string, sender: string, ref: string): Promise<void> => ipcRenderer.invoke('collab:send-material', channelId, sender, ref),
+  collabSendMessage: (channelId: string, sender: string, text: string): Promise<void> => ipcRenderer.invoke('collab:send-message', channelId, sender, text),
+  collabRequestWork: (channelId: string, sender: string, title: string, body: string): Promise<void> => ipcRenderer.invoke('collab:request-work', channelId, sender, title, body),
+  collabDecide: (id: string, decision: 'approved' | 'rejected', scope?: Record<string, unknown>): Promise<void> => ipcRenderer.invoke('collab:decide', id, decision, scope),
+  createCompany: (name: string, templateId?: string, place?: boolean): Promise<CompanySummary> =>
+    ipcRenderer.invoke('company:create', name, templateId, place),
+  switchCompany: (id: string): Promise<void> => ipcRenderer.invoke('company:switch', id),
+  renameCompany: (id: string, name: string): Promise<void> => ipcRenderer.invoke('company:rename', id, name),
+  setProjectPath: (id: string, path: string, force?: boolean): Promise<{ ok: boolean; warning?: string }> =>
+    ipcRenderer.invoke('project:path', id, path, force),
   sharedRuns: (id: string): Promise<RunShared[]> => ipcRenderer.invoke('task:shared-runs', id),
   deleteMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
   detectAdapters: (): Promise<AdapterInfo[]> => ipcRenderer.invoke('adapters:detect'),

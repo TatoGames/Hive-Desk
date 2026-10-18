@@ -12,6 +12,8 @@ import {
 import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { AptitudeRecord } from '../shared/aptitude'
+import type { ModelAgent } from '../shared/connections'
+import type { ExternalItem } from '../shared/collab'
 import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
@@ -36,7 +38,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', 'reports', 'company', 'aptitude', 'finals', 'agenda', 'external']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -66,6 +68,17 @@ const APPROVAL_LABEL: Record<ApprovalKind, string> = {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+let lastCreated = 0
+/**
+ * Creation time that never repeats within this process. Lists are ordered by `createdAt`, so two
+ * items made in the same millisecond (e.g. the sub-tasks of one plan) would otherwise come back
+ * in random order.
+ */
+function createdNow(): string {
+  lastCreated = Math.max(Date.now(), lastCreated + 1)
+  return new Date(lastCreated).toISOString()
 }
 
 function writeJson(file: string, data: unknown): void {
@@ -99,12 +112,20 @@ function listJson<T>(dir: string): T[] {
  * (budget usage) is per-machine and never synced.
  */
 export class Hive {
-  constructor(public readonly root: string) {
-    for (const d of [...SHARED_DIRS, '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
+  /**
+   * `id` is the company this hive belongs to ('' for the computer-wide store, which has no shared folders).
+   */
+  constructor(
+    public readonly root: string,
+    public readonly id = '',
+    opts: { shared?: boolean } = {}
+  ) {
+    const shared = opts.shared !== false
+    for (const d of [...(shared ? SHARED_DIRS : []), '.local/usage', '.local/runs', '.local/attachments', '.local/checkpoints']) {
       mkdirSync(join(root, d), { recursive: true })
     }
     const gi = join(root, '.gitignore')
-    if (!existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\n', 'utf8')
+    if (shared && !existsSync(gi)) writeFileSync(gi, '.local/\n*.tmp\n', 'utf8')
   }
 
   private p(...parts: string[]): string {
@@ -140,7 +161,7 @@ export class Hive {
       risky: !!input.risky,
       dependsOn: input.dependsOn ?? [],
       createdBy: input.createdBy,
-      createdAt: now(),
+      createdAt: createdNow(),
       updatedAt: now(),
       cleared: [],
       notes: [],
@@ -564,6 +585,31 @@ export class Hive {
   saveAgenda(a: Agenda): void {
     writeJson(this.p('agenda', a.id + '.json'), a)
   }
+  // ---- external box: copies that came from other companies (with their source) ----
+  listExternal(): ExternalItem[] {
+    return listJson<ExternalItem>(this.p('external')).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+  }
+  addExternal(i: Omit<ExternalItem, 'id' | 'receivedAt'>): ExternalItem {
+    const item: ExternalItem = { ...i, id: newId(), receivedAt: now() }
+    writeJson(this.p('external', item.id + '.json'), item)
+    return item
+  }
+  /** Mark the copies of a channel as recalled: kept for the record, never given to an AI again. */
+  recallExternal(channelId: string): number {
+    let n = 0
+    for (const i of this.listExternal()) {
+      if (i.channelId === channelId && !i.recalledAt) {
+        writeJson(this.p('external', i.id + '.json'), { ...i, recalledAt: now() })
+        n++
+      }
+    }
+    return n
+  }
+  /** What an AI may see: copies not recalled. */
+  externalForPrompt(): ExternalItem[] {
+    return this.listExternal().filter((i) => !i.recalledAt && i.kind !== 'request')
+  }
+
   listAgendas(): Agenda[] {
     return listJson<Agenda>(this.p('agenda')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
@@ -584,6 +630,37 @@ export class Hive {
   // ---- model availability on this computer ----
   availability(): Record<string, ModelAvailability> {
     return readJson<Record<string, ModelAvailability>>(this.p('.local', 'model-availability.json')) ?? {}
+  }
+
+  // ---- this computer's AI connections (login + CLI), shared by every agent on that connection ----
+  connectionChecks(): Record<string, ConnectionCheck> {
+    return readJson<Record<string, ConnectionCheck>>(this.p('.local', 'connection-checks.json')) ?? {}
+  }
+  setConnectionCheck(adapter: string, c: ConnectionCheck): void {
+    writeJson(this.p('.local', 'connection-checks.json'), { ...this.connectionChecks(), [adapter]: c })
+  }
+
+  /** Models each CLI login reported (`agy models` …), per machine. */
+  accountModels(): Record<string, { at: string; models: { slug: string; label: string }[] }> {
+    return readJson(this.p('.local', 'account-models.json')) ?? {}
+  }
+  setAccountModels(adapter: string, models: { slug: string; label: string }[]): void {
+    writeJson(this.p('.local', 'account-models.json'), { ...this.accountModels(), [adapter]: { at: now(), models } })
+  }
+
+  modelAgents(): ModelAgent[] {
+    return readJson<ModelAgent[]>(this.p('connections', 'model-agents.json')) ?? []
+  }
+  saveModelAgents(list: ModelAgent[]): void {
+    mkdirSync(this.p('connections'), { recursive: true })
+    writeJson(this.p('connections', 'model-agents.json'), list)
+  }
+  /** When each CLI last ran into its usage limit (the sharing rule gets stricter for a while after that). */
+  limitHistory(): Record<string, string> {
+    return readJson<Record<string, string>>(this.p('.local', 'limit-history.json')) ?? {}
+  }
+  noteLimitHit(adapter: string): void {
+    writeJson(this.p('.local', 'limit-history.json'), { ...this.limitHistory(), [adapter]: now() })
   }
 
   setAvailability(id: string, a: ModelAvailability): void {

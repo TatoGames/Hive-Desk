@@ -112,6 +112,7 @@ function registerIpc(): void {
     fixPath()
     const r = await checkCli(id)
     engine.recordCheck(id, r)
+    if (r.ok) void engine.refreshAccountModels(id) // the account's own model list, when the CLI has one
     return r
   })
   ipcMain.handle('company:template', (_e, id: string, name: string, place?: boolean) => engine.applyTemplate(id, name, place))
@@ -124,10 +125,11 @@ function registerIpc(): void {
   ipcMain.handle('company:place', (_e, onlyEmpty?: boolean) => engine.placeModels(onlyEmpty))
   ipcMain.handle('model:save', (_e, m) => engine.saveModel(m))
   ipcMain.handle('model:delete', (_e, id: string) => engine.deleteModel(id))
+  ipcMain.handle('model:refresh', (_e, adapter: AdapterId) => engine.refreshAccountModels(adapter))
   ipcMain.handle('model:verify', (_e, id: string) => engine.verifyModel(id))
   ipcMain.handle('project:save', (_e, p: Partial<Project> & { name: string }) => engine.saveProject(p))
   ipcMain.handle('project:delete', (_e, id: string) => engine.deleteProject(id))
-  ipcMain.handle('project:path', (_e, id: string, path: string) => engine.setProjectPath(id, path))
+  ipcMain.handle('project:path', (_e, id: string, path: string, force?: boolean) => engine.setProjectPath(id, path, force))
   ipcMain.handle('memory:kind', (_e, id: string, kind: 'fixed' | 'recent') => engine.setMemoryKind(id, kind))
   ipcMain.handle('task:shared-runs', (_e, id: string) => engine.sharedRuns(id))
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
@@ -140,6 +142,29 @@ function registerIpc(): void {
   ipcMain.handle('task:review', (_e, id: string, decision: 'approve' | 'changes', text?: string) =>
     engine.reviewTask(id, decision, text)
   )
+  ipcMain.handle('company:create', (_e, name: string, templateId?: string, place?: boolean) => engine.createCompany(name, templateId, place))
+  ipcMain.handle('company:switch', (_e, id: string) => engine.switchCompany(id))
+  ipcMain.handle('company:rename', (_e, id: string, name: string) => engine.renameCompany(id, name))
+  const me = (): string => engine.snapshot().config.memberName || '나'
+  ipcMain.handle('collab:create', (_e, input) => engine.collab.createChannel(input, me()))
+  ipcMain.handle('collab:close', (_e, id: string) => engine.collab.closeChannel(id, me()))
+  ipcMain.handle('collab:shareable', (_e, companyId: string) => engine.collab.listShareable(companyId))
+  ipcMain.handle('collab:send-material', (_e, channelId: string, sender: string, ref: string) => engine.collab.sendMaterial(channelId, sender, { ref }))
+  ipcMain.handle('collab:send-message', (_e, channelId: string, sender: string, text: string) => engine.collab.sendMessage(channelId, sender, text))
+  ipcMain.handle('collab:request-work', (_e, channelId: string, sender: string, title: string, body: string) => {
+    engine.collab.requestWork(channelId, sender, title, body)
+  })
+  ipcMain.handle('collab:decide', (_e, id: string, decision: 'approved' | 'rejected', scope) => {
+    engine.collab.decideRequest(id, decision, me(), scope)
+  })
+  ipcMain.handle('conn:verify-all', (_e, adapter: AdapterId) => engine.verifyAllModels(adapter))
+  ipcMain.handle('conn:hire', (_e, input) => engine.hire(input))
+  ipcMain.handle('conn:hire-seat', (_e, seatId: string, modelAgentId: string) => engine.hireToSeat(seatId, modelAgentId))
+  ipcMain.handle('conn:auto-preview', () => engine.autoConnectPreview())
+  ipcMain.handle('conn:auto-apply', (_e, rows) => engine.autoConnectApply(rows))
+  ipcMain.handle('conn:order', (_e, order: string[], adapter?: string) => engine.setCompanyOrder(order, adapter))
+  ipcMain.handle('office:reassign', (_e, id: string, agentId: string) => engine.reassignTask(id, agentId))
+  ipcMain.handle('office:feed', () => engine.officeFeed())
   ipcMain.handle('agenda:open', (_e, title: string, body: string) => engine.openAgenda(title, body))
   ipcMain.handle('agenda:decide', (_e, id: string, choice: number, note?: string) => engine.decideAgenda(id, choice, note))
   ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))
@@ -152,7 +177,13 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   fixPath()
-  engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+  try {
+    engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+  } catch (e) {
+    dialog.showErrorBox('HiveDesk를 시작하지 못했어요', (e as Error).message)
+    app.quit()
+    return
+  }
   registerIpc()
   createWindow()
   app.on('activate', () => {
