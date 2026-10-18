@@ -108,6 +108,7 @@ const api = {
   hireToSeat: (seatId: string, modelAgentId: string): Promise<Agent> => ipcRenderer.invoke('conn:hire-seat', seatId, modelAgentId),
   autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
   autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
+  taskCost: (id: string): Promise<import('../shared/cost').TaskCost> => ipcRenderer.invoke('task:cost', id),
   folderGit: (dir: string): Promise<'ok' | 'none' | 'not-top' | 'no-commit'> => ipcRenderer.invoke('folder:git-state', dir),
   initFolderGit: (dir: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('folder:git-init', dir),
   startFirstTask: (text: string, folder?: string): Promise<{ ok: boolean; id?: string; dir: string; warning?: string }> => ipcRenderer.invoke('task:start-first', text, folder),

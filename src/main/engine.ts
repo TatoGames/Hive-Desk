@@ -91,6 +91,7 @@ import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
 import { runChecks } from './checks'
 import { checksLine } from '../shared/review'
+import { taskCost, type TaskCost } from '../shared/cost'
 import { freeName, summarize, type TeamMember, type TeamSummary, type TeamTemplate } from '../shared/team'
 import { domainOf, type ExtAccess, type ExtConnection, type ExtKind } from '../shared/external'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, movedPath, readMeta, recordFolderMove, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
@@ -1373,6 +1374,11 @@ export class Engine {
       if (locked) this.unlockFolder(key)
       this.changed()
     }
+  }
+
+  /** v0.6.1: where the AI runs and time of a job went, by stage. */
+  taskCost(taskId: string): TaskCost {
+    return taskCost(this.hive.listTasks(), taskId, this.hive.listAptitude())
   }
 
   /** v0.6.1: what git state a folder is in (for the start screen). */
