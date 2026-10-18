@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AutoApprove, HandoffSettings, HumanReview, ReviewSettings, Snapshot, SyncResult } from '@shared/types'
 import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF, DEFAULT_REVIEW } from '@shared/types'
+import { Glossary, resetHints } from './Help'
 
 export default function Settings({
   snap,
@@ -209,6 +210,21 @@ export default function Settings({
           </label>
           <p className="muted small">민감한 파일(로그인·토큰·결제·설정·배포), 많이 지우는 변경, 큰 변경은 "필요할 때만"이어도 언제나 검토해요.</p>
         </fieldset>
+        {!firstRun && (
+          <fieldset className="full">
+            <legend>도움말</legend>
+            <p className="muted small">처음 쓰는 말은 화면의 작은 <b>?</b>를 누르면 설명이 나와요. 화면마다 처음 한 번 뜨는 안내는 아래 버튼으로 다시 볼 수 있어요.</p>
+            <div className="row">
+              <button type="button" className="sm" onClick={() => (resetHints(), setMsg({ ok: true, message: '화면 안내를 다시 보여 줄게요.' }))}>
+                화면 안내 다시 보기
+              </button>
+            </div>
+            <details>
+              <summary className="small">용어 풀이</summary>
+              <Glossary />
+            </details>
+          </fieldset>
+        )}
         <label>
           손대지 않은 묶음은 이 시간(시간) 뒤 다시 시작하기 전에 물어요 (0 = 안 물어봄)
           <input type="number" min={0} value={stale} onChange={(e) => setStale(Number(e.target.value) || 0)} />

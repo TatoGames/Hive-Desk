@@ -45,7 +45,7 @@ describe('UI safety net: the core flow renders', () => {
         checks: { at: new Date().toISOString(), ok: true, items: [{ name: 'test', cmd: 'npm test', ok: true, ms: 1200, tail: 'ok' }] }
       })
     })
-    fireEvent.click(screen.getByText('목록'))
+    fireEvent.click(screen.getByRole('button', { name: '목록' }))
     await ui.refresh()
     fireEvent.click(screen.getAllByText('기록·변경')[0])
     await ui.refresh()

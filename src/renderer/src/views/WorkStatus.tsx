@@ -1,3 +1,4 @@
+import { Hint } from './Help'
 import { useMemo, useRef, useState } from 'react'
 import type { LiveSummary, Snapshot, Task } from '@shared/types'
 import { BubbleHold, bubbleFor, type Bubble } from '@shared/bubble'
@@ -132,6 +133,7 @@ export default function WorkStatus({
         <h1>작업 현황</h1>
         <ViewSwitch view={view} setView={setView} />
       </header>
+      <Hint id="board">맡긴 일은 여기서 봐요. <b>오피스</b>는 직원들의 모습, <b>작업 현황</b>은 지금 하는 일과 진행 막대, <b>목록</b>은 상태별 카드예요. 새 일은 입력칸에 평소 말하듯 적으면 누구에게 맡길지 앱이 정해요.</Hint>
       <div className="ws-grid">
         <section className="ws-floor">
           {!shown.length && <div className="ws-empty">{emptyLine()}</div>}

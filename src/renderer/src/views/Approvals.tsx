@@ -1,3 +1,4 @@
+import { Hint, Term } from './Help'
 import { useState } from 'react'
 import type { Approval, ApprovalKind, Snapshot, SubtaskSpec } from '@shared/types'
 import { moveItem, removeItem } from '@shared/planedit'
@@ -54,6 +55,7 @@ export default function Approvals({ snap, go }: { snap: Snapshot; go?: (tab: Els
       <header className="page-head">
         <h1>내가 할 일</h1>
       </header>
+      <Hint id="todo">AI가 <Term k="결재" />를 구하거나, 자료를 기다리거나, 결과 확인이 필요할 때 여기 모여요. 다른 화면에서 기다리는 일도 위에 모아 보여 줘요. 비어 있으면 할 일이 없는 거예요.</Hint>
       {!!others.length && (
         <section className="panel elsewhere">
           <h2>다른 화면에서 기다리는 일</h2>

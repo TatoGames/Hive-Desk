@@ -1,3 +1,4 @@
+import { Hint, Term } from './Help'
 import { useEffect, useState } from 'react'
 import type { AdapterInfo, Snapshot } from '@shared/types'
 import type { ConnectionView, ModelAgentView } from '@shared/connections'
@@ -135,6 +136,7 @@ export default function Connections({ snap }: { snap: Snapshot }): JSX.Element {
       <header className="page-head">
         <h1>AI 연결</h1>
       </header>
+      <Hint id="connections"><Term k="연결" />은 구독 계정마다 한 번만 하면 돼요. 연결 하나로 여러 <Term k="직원" />을 둘 수 있어요. 둘 이상 연결하면 서로 검토하고, <Term k="한도" />가 차면 <Term k="이어받기" />를 해요.</Hint>
       <p className="muted small">
         연결 = AI 프로그램 + 내 계정이에요. 연결이 확인되면 쓸 수 있는 모델마다 <b>모델 에이전트</b>가 하나씩 만들어져요. 모델 에이전트를
         <b> 채용</b>하면 지금 보고 있는 회사의 직원이 되고(회사마다 따로, 역할·메모리·대화가 분리돼요), 회사 탭에서 자리에 끌어다 놓을 수도 있어요.

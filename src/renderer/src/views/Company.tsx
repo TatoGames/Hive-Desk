@@ -1,3 +1,4 @@
+import { Hint, Term } from './Help'
 import { useEffect, useMemo, useState } from 'react'
 import type { Snapshot } from '@shared/types'
 import {
@@ -40,6 +41,7 @@ export default function Company({ snap }: { snap: Snapshot }): JSX.Element {
           ))}
         </div>
       </header>
+      <Hint id="company">조직도는 <Term k="자리" />의 모음이에요. <b>팀 꾸리기</b>를 누르면 연결된 AI로 자리를 모두 채워요. 만든 팀은 <b>지금 팀 저장</b>으로 저장해 두면 다른 회사에서 그대로 꾸릴 수 있어요.</Hint>
       {section === 'org' && <Org snap={snap} />}
       {section === 'models' && <Models snap={snap} />}
       {section === 'perf' && <Perf snap={snap} />}
