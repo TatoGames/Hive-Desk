@@ -1,5 +1,5 @@
 import { classifyInput } from '../shared/manage'
-import { app, BrowserWindow, dialog, ipcMain, Notification, powerSaveBlocker, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, SubtaskSpec, Task } from '../shared/types'
 import { detectAll } from './adapters'
@@ -187,6 +187,34 @@ function registerIpc(): void {
   ipcMain.handle('open:path', (_e, p: string) => shell.openPath(p))
 }
 
+let tray: Tray | undefined
+const TRAY_ICON =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGklEQVR4nGP4ukz5PyWYYdSAUQNGDRguBgAAcgC9H4bIsBIAAAAASUVORK5CYII='
+
+/** A tray menu so everything can be stopped even when the window is hidden. */
+function makeTray(): void {
+  try {
+    tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON))
+    tray.setToolTip('HiveDesk')
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: 'HiveDesk 열기', click: () => (BrowserWindow.getAllWindows()[0] ?? (createWindow(), undefined))?.show() },
+        {
+          label: '모든 회사 긴급 중지',
+          click: () => {
+            const n = engine.emergencyStop()
+            new Notification({ title: 'HiveDesk', body: n ? `실행 중이던 업무 ${n}개를 모두 멈췄어요.` : '멈출 업무가 없어요.' }).show()
+          }
+        },
+        { type: 'separator' },
+        { label: '끝내기', click: () => app.quit() }
+      ])
+    )
+  } catch {
+    /* a missing tray (some Linux desktops) must not stop the app */
+  }
+}
+
 app.whenReady().then(() => {
   fixPath()
   try {
@@ -198,6 +226,7 @@ app.whenReady().then(() => {
   }
   registerIpc()
   createWindow()
+  makeTray()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

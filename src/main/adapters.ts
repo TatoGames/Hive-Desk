@@ -332,6 +332,9 @@ export interface RunResult {
 
 const WIN_NOT_FOUND = /is not recognized as an internal or external command|내부 또는 외부 명령/i
 
+/** How long a stopped CLI gets to exit on its own before it is killed. */
+export const KILL_GRACE_MS = 5000
+
 export type Runner = (built: BuiltCommand, opts: RunOptions) => Promise<RunResult>
 
 /** Real process runner. npm-installed CLIs are .cmd shims on Windows, hence shell there. */
@@ -345,12 +348,14 @@ export const runCli: Runner = (built, opts) =>
     let aborted = false
     let settled = false
     let idleTimer: NodeJS.Timeout | undefined
+    let killTimer: NodeJS.Timeout | undefined
 
     const done = (r: Partial<RunResult>): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       if (idleTimer) clearTimeout(idleTimer)
+      if (killTimer) clearTimeout(killTimer)
       opts.signal?.removeEventListener('abort', onAbort)
       resolve({ code: null, stdout, stderr, timedOut, timeoutKind, aborted, ...r })
     }
@@ -390,14 +395,16 @@ export const runCli: Runner = (built, opts) =>
         return
       }
       try {
+        // Polite first (SIGTERM); a process that ignores it is killed 5 seconds later.
         child.kill('SIGTERM')
-        setTimeout(() => {
+        killTimer = setTimeout(() => {
           try {
             child.kill('SIGKILL')
           } catch {
             /* already gone */
           }
-        }, 3000).unref()
+        }, KILL_GRACE_MS)
+        killTimer.unref()
       } catch {
         /* already gone */
       }
