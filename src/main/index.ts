@@ -7,7 +7,7 @@ import { cleanEnv } from './adapters'
 import { Engine } from './engine'
 import { checkForUpdate } from './updates'
 import { fixPath } from './shellPath'
-import { checkCli, installCli, installCommand, openLogin } from './setup'
+import { checkCli, installCli, installCommand, installGh, openGhLogin, openLogin } from './setup'
 
 let win: BrowserWindow | null = null
 let engine: Engine
@@ -200,7 +200,18 @@ function registerIpc(): void {
   ipcMain.handle('ext:mcp-tool-write', (_e, id: string, tool: string, write: boolean) => engine.setMcpToolWrite(id, tool, write))
   ipcMain.handle('ext:decide', (_e, id: string, d: 'approved' | 'rejected', opts) => engine.decideExternal(id, d, opts))
   ipcMain.handle('gh:decide', (_e, id: string, d: 'approved' | 'rejected', body?: string) => engine.decideGithub(id, d, body))
-  ipcMain.handle('gh:check', () => engine.checkGithub())
+  ipcMain.handle('gh:check', () => {
+    fixPath() // see a gh installed while the app was open
+    return engine.checkGithub()
+  })
+  ipcMain.handle('gh:install', async () => {
+    let log = ''
+    const r = await installGh((chunk) => (log = (log + chunk).slice(-4000)))
+    fixPath()
+    if (r.ok) await engine.checkGithub()
+    return { ...r, log }
+  })
+  ipcMain.handle('gh:login', () => openGhLogin())
   ipcMain.handle('gh:poll', () => engine.githubPoll())
   ipcMain.handle('gh:merge', (_e, id: string) => engine.mergeTaskPr(id))
   ipcMain.handle('gh:open-pr', (_e, id: string) => engine.openTaskPr(id))

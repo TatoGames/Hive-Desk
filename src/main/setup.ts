@@ -52,7 +52,45 @@ export function installCli(
   id: AdapterId,
   onOutput: (chunk: string) => void
 ): Promise<{ ok: boolean; message: string }> {
-  const cmd = installCommand(id)
+  return runInstall(installCommand(id), onOutput, !!SETUP[id]?.needsNode)
+}
+
+/**
+ * GitHub CLI (gh), used by the app itself for GitHub work (stage 6-6). Windows: winget.
+ * macOS / Linux: the official release archive, unpacked into ~/.local/bin (no admin rights, no Homebrew needed).
+ */
+const GH_UNIX = [
+  'set -e',
+  // the latest release page redirects to .../tag/vX.Y.Z (no API call, so no API rate limit)
+  'V=$(curl -fsSLI -o /dev/null -w "%{url_effective}" https://github.com/cli/cli/releases/latest | sed -n \'s#.*/tag/v##p\')',
+  '[ -n "$V" ] || { echo "최신 버전을 알아내지 못했어요"; exit 1; }',
+  'case "$(uname -m)" in x86_64|amd64) A=amd64;; arm64|aarch64) A=arm64;; *) echo "지원하지 않는 CPU: $(uname -m)"; exit 1;; esac',
+  'T=$(mktemp -d); mkdir -p "$HOME/.local/bin"',
+  'if [ "$(uname -s)" = Darwin ]; then N=gh_${V}_macOS_$A; curl -fsSL -o "$T/gh.zip" "https://github.com/cli/cli/releases/download/v$V/$N.zip"; (cd "$T" && unzip -q gh.zip);',
+  'else N=gh_${V}_linux_$A; curl -fsSL "https://github.com/cli/cli/releases/download/v$V/$N.tar.gz" | tar -xz -C "$T"; fi',
+  'cp "$T/$N/bin/gh" "$HOME/.local/bin/gh"; chmod +x "$HOME/.local/bin/gh"; rm -rf "$T"',
+  '"$HOME/.local/bin/gh" --version'
+].join('\n')
+const GH_WIN = 'winget install --id GitHub.cli -e --source winget --accept-source-agreements --accept-package-agreements'
+
+export function ghInstallCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? GH_WIN : GH_UNIX
+}
+
+export async function installGh(onOutput: (chunk: string) => void): Promise<{ ok: boolean; message: string }> {
+  const r = await runInstall(ghInstallCommand(), onOutput, false)
+  if (!r.ok && process.platform === 'win32') {
+    return { ok: false, message: r.message + ' winget이 없는 Windows라면 https://cli.github.com 에서 설치 파일을 받아 주세요.' }
+  }
+  return r.ok ? { ok: true, message: 'GitHub CLI를 설치했어요. 이제 [GitHub 로그인]을 눌러 주세요.' } : r
+}
+
+/** Open a terminal with gh's own browser login. */
+export function openGhLogin(): { ok: boolean; message: string } {
+  return openTerminal('gh auth login --hostname github.com --git-protocol https --web')
+}
+
+function runInstall(cmd: string | undefined, onOutput: (chunk: string) => void, needsNode: boolean): Promise<{ ok: boolean; message: string }> {
   if (!cmd) {
     return Promise.resolve({
       ok: false,
@@ -79,7 +117,7 @@ export function installCli(
     child.on('close', (code) => {
       clearTimeout(timer)
       if (code === 0) return resolve({ ok: true, message: '설치를 마쳤어요.' })
-      const noNode = SETUP[id]?.needsNode && /npm: (command )?not found|'npm'/i.test(tail)
+      const noNode = needsNode && /npm: (command )?not found|'npm'/i.test(tail)
       resolve({
         ok: false,
         message: noNode
@@ -98,6 +136,11 @@ function appleScriptString(s: string): string {
 export function openLogin(id: AdapterId): { ok: boolean; message: string } {
   const spec = SETUP[id]
   if (!spec) return { ok: false, message: '로그인 안내가 없는 CLI예요.' }
+  return openTerminal(spec.login)
+}
+
+function openTerminal(login: string): { ok: boolean; message: string } {
+  const spec = { login }
   const path = process.env.PATH ?? ''
   try {
     if (process.platform === 'darwin') {

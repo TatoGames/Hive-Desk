@@ -153,6 +153,7 @@ function GithubCard({ snap, c }: { snap: Snapshot; c?: Conn }): JSX.Element {
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [label, setLabel] = useState(c?.github?.issueLabel ?? '')
+  const [log, setLog] = useState('')
   const run = async (key: string, fn: () => Promise<string>): Promise<void> => {
     setBusy(key)
     try {
@@ -171,6 +172,26 @@ function GithubCard({ snap, c }: { snap: Snapshot; c?: Conn }): JSX.Element {
       </div>
       <div className="muted small">{gh ? `${gh.message} (확인: ${fmtTime(gh.at)})` : '각자 `gh auth login`으로 로그인해요. 무료 계정으로 충분해요.'}</div>
       <div className="row">
+        {gh && !gh.found && (
+          <button
+            className="primary"
+            disabled={busy === 'install'}
+            onClick={() =>
+              void run('install', async () => {
+                const r = await window.hive.installGh()
+                setLog(r.ok ? '' : r.log)
+                return r.message
+              })
+            }
+          >
+            {busy === 'install' ? '설치 중… (1~2분)' : 'GitHub CLI 설치'}
+          </button>
+        )}
+        {gh?.found && !gh.loggedIn && (
+          <button className="primary" onClick={() => void run('login', async () => (await window.hive.ghLogin()).message)}>
+            GitHub 로그인
+          </button>
+        )}
         <button disabled={busy === 'check'} onClick={() => void run('check', async () => (await window.hive.checkGithub()).message)}>
           {busy === 'check' ? '확인 중…' : '로그인 확인'}
         </button>
@@ -186,6 +207,7 @@ function GithubCard({ snap, c }: { snap: Snapshot; c?: Conn }): JSX.Element {
         )}
       </div>
       {msg && <div className="small">{msg}</div>}
+      {log && <pre className="out small-log">{log}</pre>}
       {c && (
         <>
           <p className="muted small">

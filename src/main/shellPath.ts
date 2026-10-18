@@ -13,7 +13,9 @@ export function candidateDirs(home: string, platform: NodeJS.Platform): string[]
   const join = platform === 'win32' ? win32.join : posix.join
   if (platform === 'win32') {
     const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming')
-    return [join(appData, 'npm'), join(home, '.local', 'bin'), join(home, '.npm-global')]
+    const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files'
+    // winget puts the GitHub CLI here
+    return [join(appData, 'npm'), join(home, '.local', 'bin'), join(home, '.npm-global'), join(programFiles, 'GitHub CLI')]
   }
   const dirs = [
     join(home, '.local', 'bin'), // Claude Code & Antigravity native installers
