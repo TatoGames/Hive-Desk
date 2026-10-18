@@ -973,9 +973,11 @@ export class Engine {
   runTask(id: string): Promise<string> {
     const p = this.als.run(this.hive, () => this.runTaskImpl(id))
     this.pendingRuns.set(id, p)
-    void p.finally(() => {
+    // fire-and-forget callers (`void this.runTask`) must not turn a failed run into an unhandled rejection
+    const done = (): void => {
       if (this.pendingRuns.get(id) === p) this.pendingRuns.delete(id)
-    })
+    }
+    p.then(done, done)
     return p
   }
 
