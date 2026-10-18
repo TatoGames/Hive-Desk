@@ -14,7 +14,8 @@ const KIND: Record<ApprovalKind, string> = {
   'bundle-cap': '실행 상한',
   'stale-bundle': '오래된 묶음',
   external: '외부 연결 · 실시간 결재',
-  github: 'GitHub'
+  github: 'GitHub',
+  handoff: '한도 이어받기'
 }
 
 const ACCESS = { read: '읽기만', edit: '파일 수정', exec: '명령 실행' } as const
@@ -78,6 +79,13 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
             <p>{a.reason}</p>
             {a.kind === 'external' && a.external ? (
               <ExternalBox approval={a} />
+            ) : a.kind === 'handoff' ? (
+              <div className="row">
+                <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
+                  넘겨서 계속하기
+                </button>
+                <button onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>한도가 풀릴 때까지 기다리기</button>
+              </div>
             ) : a.kind === 'github' && a.github ? (
               <GithubBox approval={a} />
             ) : a.kind === 'plan' && t?.plan ? (

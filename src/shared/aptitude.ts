@@ -19,6 +19,8 @@ export interface AptitudeRecord {
   changes: number
   failed: number
   updatedAt: string
+  /** The model finished a task another employee had started (hand-over): kept apart from first-pass numbers. */
+  handedOver?: boolean
 }
 
 /** Fewer finished tasks than this and the number is only a hint. */

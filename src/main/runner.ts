@@ -2,6 +2,7 @@ import { applyAcks, joinInstructions, markSeen, markSent, queuedOf, requeue } fr
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
+  StepSave,
   ActivityEvent,
   Agent,
   HumanReview,
@@ -14,7 +15,7 @@ import type {
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
 import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type RunHandle, type Runner } from './adapters'
-import { createCheckpoint } from './checkpoint'
+import { createCheckpoint, stepCheckpoint } from './checkpoint'
 import { classifyFailure, failureMessage } from './failure'
 import { detectLimit, type LimitInfo } from './limits'
 import { containsPath, diffStat, trackChanges, unavailable } from './gitdiff'
@@ -259,7 +260,7 @@ export interface RunnerDeps {
   /** Extra prompt lines for delegation steps (see delegation.ts). */
   promptExtras?: (task: Task, agent: Agent) => string[]
   /** A run ended: feeds the aptitude record. `pending` = waits for a human check. */
-  onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'other' }) => void
+  onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'limit' | 'other' }) => void
   /** Name of this computer's member, shown on shared run summaries. */
   machine?: string
   signal?: AbortSignal
@@ -271,6 +272,8 @@ export interface RunnerDeps {
   onHandle?: (taskId: string, handle: RunHandle | undefined, runId: string) => void
   /** Send a [[MSG]] the agent wrote (the engine also hands it to the receiver right away when it is running). */
   sendMessage?: (from: string, to: string, body: string) => void
+  /** A failure that looked like a usage limit but no rule recognised it (kept to fix the rules). */
+  onLimitSample?: (adapter: Agent['adapter'], text: string) => void
   /** External connections (web, MCP apps) this run may use, and how its tool requests are answered. */
   external?: (task: Task, agent: Agent, runId: string, live: boolean) => import('./external').ExtRun | null
 }
@@ -535,9 +538,38 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   live.setTracking(tracker.mode)
   deps.onLive?.(live)
   const parser = createParser(built.stream ?? 'text', nowFn)
+  // v5: every finished [[STEP]] leaves a saving point another employee can carry on from (made by the app: no tokens)
+  let stepsDone = 0
+  let saving: Promise<void> = Promise.resolve()
+  const lastWords = (): string => {
+    const m = [...live.all()].reverse().find((e) => e.kind === 'message')
+    return m ? m.text.slice(0, 300) : ''
+  }
+  const saveStep = (done: number, plan: string[]): void => {
+    saving = saving.then(async () => {
+      const d = await tracker.finish().catch(() => undefined)
+      const checkpoint = await stepCheckpoint(tracker.source, runId, done)
+      const save: StepSave = {
+        runId,
+        plan,
+        done,
+        files: (d?.files ?? []).slice(0, 30).map((f) => f.path),
+        last: lastWords(),
+        at: nowFn().toISOString(),
+        ...(checkpoint ? { checkpoint } : {})
+      }
+      if (hive.getTask(task.id)) hive.updateTask(task.id, { stepSave: save })
+    })
+  }
   const push = (evs: ActivityEvent[]): void => {
     live.add(evs)
-    live.setPlan(parser.plan())
+    const plan = parser.plan()
+    live.setPlan(plan)
+    const done = plan.filter((p) => p.done).length
+    if (done > stepsDone) {
+      stepsDone = done
+      saveStep(done, plan.map((p) => p.text))
+    }
     deps.onActivity?.(task.id, evs, live)
   }
 
@@ -591,6 +623,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     staged.cleanup()
   }
   push(parser.end())
+  await saving.catch(() => undefined)
   const extUse = ext?.finish(parser.toolUses()) ?? { sources: [], writes: [] }
 
   const stdout = parser.finalText(res.stdout)
@@ -653,7 +686,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     shareRun(hive, rec, deps.machine ?? '')
     hive.addEvent(task.id, 'run_finished', agent.id, runLine(outcome, elapsed, diff), runId)
     if (outcome !== 'done') {
-      deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: outcome === 'failed' ? 'failed' : 'other' })
+      deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: outcome === 'failed' ? 'failed' : outcome === 'limit' ? 'limit' : 'other' })
     }
     return runId
   }
@@ -729,6 +762,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   }
   if (res.code !== 0) {
     const detail = (res.stderr.trim() || stdout.trim() || lastError || '').slice(-1500)
+    if (/(limit|quota|rate|429|too many|usage|exhaust|한도)/i.test(detail)) deps.onLimitSample?.(agent.adapter, detail)
     const f = classifyFailure([res.stderr, stdout.slice(-3000), lastError ?? ''].join('\n'))
     const error = failureMessage(f, `(오류 코드 ${res.code})${detail ? '\n' + detail : ''}`)
     hive.updateTask(task.id, { status: 'failed', error, errorKind: f.kind, finishedAt, lastRunId: saveRun('failed', { error }) })

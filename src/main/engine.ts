@@ -82,6 +82,9 @@ import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
 import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './worktree'
 import { External, type Cipher } from './external'
+import { Handoffs, type HandoffOption } from './handoffs'
+import { nearLimit } from '../shared/handoff'
+import { DEFAULT_HANDOFF } from '../shared/types'
 import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
@@ -156,6 +159,10 @@ export class Engine {
   /** External connections (web, MCP apps) and live approval of what an AI wants to do outside. */
   readonly external: External
   readonly github: GithubFlow
+  /** v5: another connection's employee carries a task on when its connection runs out of usage. */
+  readonly handoffs: Handoffs
+  /** Tasks whose hand-over is being worked out right now (the tick must not start a second one). */
+  private handing = new Set<string>()
   /** OS secure storage for tokens (set by the Electron main process; tests set a fake one). */
   cipher: Cipher | null = null
   /** Runs `gh` and `git` for the GitHub steps (tests replace it). */
@@ -197,6 +204,24 @@ export class Engine {
       cipher: () => self.cipher,
       changed: () => self.changed()
     })
+    this.handoffs = new Handoffs({
+      get hive(): Hive {
+        return self.hive
+      },
+      agents: () => self.agentsOf(self.hive.id),
+      catalog: () => self.catalog(),
+      settings: () => ({ ...DEFAULT_HANDOFF, ...(self.config.handoff ?? {}) }),
+      limitFor: (ad) => self.limitFor(ad),
+      budgetGone: (a) => !!budgetProblem(self.hive, a, new Date()),
+      nearLimit: (ad) => nearLimit(self.machine.limitRuns()[ad]),
+      isManager: (id) => self.delegation.isManager(id),
+      usesExternal: (task, a) => self.external.grants(task, a).length > 0,
+      isRunning: (id) => self.running.has(id),
+      excludesFor: (root) => self.excludesFor(root),
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body),
+      me: () => self.config.memberName || 'me'
+    })
     this.github = new GithubFlow({
       get hive(): Hive {
         return self.hive
@@ -232,6 +257,7 @@ export class Engine {
       catalog: () => self.catalog(),
       isManager: (id) => self.delegation.isManager(id),
       limited: (ad) => !!self.limitFor(ad as Agent['adapter']),
+      nearLimit: (ad) => nearLimit(self.machine.limitRuns()[ad]),
       trialRate: () => self.config.quickTrialRate ?? 0.1,
       toOrganisation: (t) => {
         self.hive.updateTask(t.id, { assignee: null, permission: 'read' })
@@ -373,6 +399,7 @@ export class Engine {
   private noteLimit(adapter: Agent['adapter'], info: LimitInfo): void {
     this.limits[adapter] = info
     this.machine.noteLimitHit(adapter)
+    this.machine.noteLimitRuns(adapter)
     try {
       writeFileSync(this.limitFile(), JSON.stringify(this.limits, null, 2), 'utf8')
     } catch {
@@ -1060,6 +1087,7 @@ export class Engine {
     // Two agents editing the same folder would overwrite each other and mix up their diffs.
     const key = normPath(this.cwdFor(agent, id))
     let locked = false
+    let handedTo: string | null = null
     try {
       if (task.kind === 'integrate' && !(await this.mergeBundle(id))) return 'needs_input'
       const waitFrom = Date.now()
@@ -1084,6 +1112,8 @@ export class Engine {
         this.hive.updateTask(id, { status: 'todo', reply: undefined })
         outcome = await this.runOnce(agent, id, ac)
       }
+      // v5: the connection ran out of usage — another connection's employee carries on from the last step
+      if (outcome === 'limited' && !ac.signal.aborted) handedTo = await this.handoffs.onLimit(id).catch(() => null)
       // what a work-tree task changed is saved on its branch (it is merged when the bundle is integrated)
       const finished = this.hive.getTask(id)
       if (finished?.kind === 'work' && finished.worktree && !finished.worktree.merged) await commitWorktree(finished.worktree, finished.title).catch(() => false)
@@ -1102,6 +1132,11 @@ export class Engine {
       this.running.delete(id)
       this.liveRuns.delete(id)
       this.changed()
+      // the new employee starts right away (once this run has let go of the task)
+      if (handedTo && this.localAgent(handedTo)) {
+        const h = this.hive
+        queueMicrotask(() => void this.inCompany(h, () => this.runTask(id)))
+      }
     }
   }
 
@@ -1152,6 +1187,7 @@ export class Engine {
   }
 
   private runOnce(agent: Agent, id: string, ac: AbortController): Promise<string> {
+    this.machine.countRun(agent.adapter)
     return runTask(agent, id, {
       hive: this.hive,
       stripApiKeys: this.config.stripApiKeys,
@@ -1174,8 +1210,11 @@ export class Engine {
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
+      onLimitSample: (adapter, text) => this.machine.addLimitSample(adapter, text),
       promptExtras: (task, a) => [...this.delegation.promptExtras(task, a), ...this.committee.promptExtras(task, a), ...this.quick.promptExtras(task)],
+      // a run cut by the usage limit says nothing about how well the model works: not counted
       onRunEnd: ({ agent: a, taskId, ms, result }) =>
+        result !== 'limit' &&
         this.noteAptitude(a, taskId, {
           runs: 1,
           ms,
@@ -1917,6 +1956,13 @@ export class Engine {
       this.changed()
       return
     }
+    if (a?.kind === 'handoff' && a.status === 'pending') {
+      this.hive.decideApproval(id, decision, by, note)
+      const h = this.hive
+      void this.handoffs.decide(id, decision === 'approved').then((to) => to && this.localAgent(to) && this.inCompany(h, () => this.runTask(a.taskId)))
+      this.changed()
+      return
+    }
     if (a?.kind === 'github' && a.status === 'pending') {
       this.hive.decideApproval(id, decision, by, note)
       void this.github.decide(a, decision === 'approved')
@@ -2283,7 +2329,21 @@ export class Engine {
     const base: AptitudeRecord =
       cur && cur.modelKey === key
         ? cur
-        : { taskId, modelKey: key, modelLabel: label, domain: agent.job || 'general', jobKind: this.hive.getTask(taskId.split('~')[0])?.jobKind, runs: 0, ms: 0, approved: 0, changes: 0, failed: 0, updatedAt: '' }
+        : {
+            taskId,
+            modelKey: key,
+            modelLabel: label,
+            domain: agent.job || 'general',
+            jobKind: this.hive.getTask(taskId.split('~')[0])?.jobKind,
+            runs: 0,
+            ms: 0,
+            approved: 0,
+            changes: 0,
+            failed: 0,
+            updatedAt: '',
+            // finishing work someone else started is no first-pass record of this model
+            ...((this.hive.getTask(taskId.split('~')[0])?.handoffs ?? []).some((x) => x.to === agent.id) ? { handedOver: true } : {})
+          }
     if (cur && cur.modelKey !== key) {
       this.hive.saveAptitude({ ...cur, taskId: `${taskId}~${cur.modelKey}` })
     }
@@ -2507,6 +2567,38 @@ export class Engine {
     this.addMemory(`출처: ${url}${note.trim() ? ` — ${note.trim()}` : ''}`)
   }
 
+  // ---- v5: hand-over when a connection runs out of usage ----
+  /** Tasks that wait for their connection's limit: look again (somebody may be free now, or the limit is over). */
+  private retryHandoffs(h: Hive, all: Task[]): void {
+    for (const t of all) {
+      if (!t.limitWait || t.status !== 'todo' || this.running.has(t.id) || this.handing.has(t.id)) continue
+      const a = this.localAgent(t.assignee)
+      if (!a) continue
+      this.handing.add(t.id)
+      void this.inCompany(h, () => this.handoffs.onLimit(t.id))
+        .then((to) => to && this.localAgent(to) && this.inCompany(h, () => this.runTask(t.id)))
+        .catch(() => null)
+        .finally(() => this.handing.delete(t.id))
+    }
+  }
+
+  handoffOptions(id: string): HandoffOption[] {
+    return this.handoffs.options(id)
+  }
+
+  /** [다른 직원에게 넘기기]: a person moves a task (not running) to another employee with the hand-over note. */
+  async handOver(id: string, toId: string): Promise<void> {
+    const h = this.hive
+    await this.handoffs.manual(id, toId)
+    if (this.localAgent(toId) && (this.config.autoRun || h.getTask(id)?.auto)) void this.inCompany(h, () => this.runTask(id))
+    this.changed()
+  }
+
+  /** Failed runs that looked like a usage limit but were not recognised (to fix the rules with real CLI words). */
+  limitSamples(): { at: string; adapter: string; text: string }[] {
+    return this.machine.limitSamples()
+  }
+
   // ---- auto-run ----
   /** Start ready tasks assigned to local agents, up to maxConcurrent. */
   async tick(): Promise<void> {
@@ -2543,6 +2635,7 @@ export class Engine {
         this.checkStaleBundles(h, all)
         this.inCompany(h, () => this.autoApprovals(h, all))
         this.inCompany(h, () => this.expireApprovals(h, all))
+        this.retryHandoffs(h, all)
         this.external.closeOrphans(h, (id) => !!this.localAgent(id))
         this.holdStaleFailures(h, all)
         for (const t of all) {

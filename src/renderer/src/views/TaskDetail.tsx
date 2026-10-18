@@ -1,4 +1,4 @@
-import { RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
+import { HandoffPanel, RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
 import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
 import { InstructionList, PlanAdjust, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
@@ -254,6 +254,7 @@ export default function TaskDetail({
         <MaterialsPanel task={task} adapter={adapter} />
         <UrlAttach task={task} />
         {snap && <TaskExternal snap={snap} task={task} />}
+        <HandoffPanel snap={snap} task={task} />
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>

@@ -173,6 +173,9 @@ const api = {
   setProjectGithub: (id: string, repo: string, base?: string): Promise<Project> => ipcRenderer.invoke('project:github', id, repo, base),
   attachUrl: (id: string, url: string): Promise<AttachResult> => ipcRenderer.invoke('task:attach-url', id, url),
   saveSource: (url: string, note?: string): Promise<void> => ipcRenderer.invoke('memory:source', url, note),
+  handoffOptions: (id: string): Promise<import('../main/handoffs').HandoffOption[]> => ipcRenderer.invoke('task:handoff-options', id),
+  handOver: (id: string, to: string): Promise<void> => ipcRenderer.invoke('task:handover', id, to),
+  limitSamples: (): Promise<{ at: string; adapter: string; text: string }[]> => ipcRenderer.invoke('limit:samples'),
   openPath: (p: string): Promise<string> => ipcRenderer.invoke('open:path', p),
   onEvent: (cb: (e: EngineEvent) => void): (() => void) => {
     const h = (_: unknown, e: EngineEvent): void => cb(e)

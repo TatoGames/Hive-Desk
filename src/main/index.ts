@@ -218,6 +218,9 @@ function registerIpc(): void {
   ipcMain.handle('gh:fix-ci', (_e, id: string) => engine.fixCi(id))
   ipcMain.handle('project:github', (_e, id: string, repo: string, base?: string) => engine.setProjectGithub(id, repo, base))
   ipcMain.handle('task:attach-url', (_e, id: string, url: string) => engine.attachUrl(id, url))
+  ipcMain.handle('task:handoff-options', (_e, id: string) => engine.handoffOptions(id))
+  ipcMain.handle('task:handover', (_e, id: string, to: string) => engine.handOver(id, to))
+  ipcMain.handle('limit:samples', () => engine.limitSamples())
   ipcMain.handle('memory:source', (_e, url: string, note?: string) => engine.saveSource(url, note))
 }
 

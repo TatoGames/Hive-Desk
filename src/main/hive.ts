@@ -70,7 +70,8 @@ const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   'bundle-cap': '실행 상한',
   'stale-bundle': '오래된 묶음',
   external: '외부 연결',
-  github: 'GitHub'
+  github: 'GitHub',
+  handoff: '이어받기'
 }
 
 /** Tasks written before v4 kept pending instructions as plain strings in `followups`. */
@@ -437,7 +438,7 @@ export class Hive {
     const task = this.getTask(a.taskId)
     // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
     // live tool requests (external) and GitHub actions are answered by the engine; the task itself keeps its state
-    if (task && !['plan', 'failure', 'bundle-cap', 'stale-bundle', 'external', 'github'].includes(a.kind)) {
+    if (task && !['plan', 'failure', 'bundle-cap', 'stale-bundle', 'external', 'github', 'handoff'].includes(a.kind)) {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'
@@ -778,6 +779,31 @@ export class Hive {
   }
   noteLimitHit(adapter: string): void {
     writeJson(this.p('.local', 'limit-history.json'), { ...this.limitHistory(), [adapter]: now() })
+  }
+
+  /** Runs started per connection since its last usage limit, and how many it took to reach the limit before (latest 5). */
+  limitRuns(): Record<string, { since: number; hits: number[] }> {
+    return readJson(this.p('.local', 'limit-runs.json')) ?? {}
+  }
+  countRun(adapter: string): void {
+    const all = this.limitRuns()
+    const cur = all[adapter] ?? { since: 0, hits: [] }
+    writeJson(this.p('.local', 'limit-runs.json'), { ...all, [adapter]: { ...cur, since: cur.since + 1 } })
+  }
+  noteLimitRuns(adapter: string): void {
+    const all = this.limitRuns()
+    const cur = all[adapter] ?? { since: 0, hits: [] }
+    // a limit hit right after the last one (nothing ran in between) says nothing new
+    const hits = cur.since > 0 ? [...cur.hits, cur.since].slice(-5) : cur.hits
+    writeJson(this.p('.local', 'limit-runs.json'), { ...all, [adapter]: { since: 0, hits } })
+  }
+
+  /** Failed runs whose output looked like a usage limit but no rule recognised (latest 20), to fix the rules. */
+  limitSamples(): { at: string; adapter: string; text: string }[] {
+    return readJson(this.p('.local', 'limit-samples.json')) ?? []
+  }
+  addLimitSample(adapter: string, text: string): void {
+    writeJson(this.p('.local', 'limit-samples.json'), [...this.limitSamples(), { at: now(), adapter, text: text.slice(-1500) }].slice(-20))
   }
 
   setAvailability(id: string, a: ModelAvailability): void {

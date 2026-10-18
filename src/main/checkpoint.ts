@@ -103,6 +103,26 @@ function prune(hive: Hive, keep: string): void {
 }
 
 /** What changed in the folder since the checkpoint (used for runs that were cut off). */
+/**
+ * git only: save the work folder as it is right now (a finished step of a run), so that a hand-over can put a
+ * half-done next step back. Folders that are not git repos get none (a full copy at every step would cost too much).
+ */
+export async function stepCheckpoint(source: TrackSource | undefined, runId: string, step: number): Promise<Checkpoint | undefined> {
+  if (source?.kind !== 'git') return undefined
+  try {
+    const tree = await snapshotTree(source.toplevel, source.exclude)
+    if (typeof tree !== 'string') return undefined
+    const c = await git(source.toplevel, ['commit-tree', tree, '-m', `HiveDesk step ${step} of run ${runId}`], IDENT)
+    const sha = c.out.trim()
+    if (!c.ok || !sha) return undefined
+    const ref = `refs/hivedesk/${runId}-s${step}`
+    if (!(await git(source.toplevel, ['update-ref', ref, sha])).ok) return undefined
+    return { kind: 'git', ref, tree, root: source.toplevel }
+  } catch {
+    return undefined
+  }
+}
+
 export async function diffSinceCheckpoint(hive: Hive, cp: Checkpoint, exclude: string[] = []): Promise<RunDiff> {
   try {
     if (cp.kind === 'git') {
