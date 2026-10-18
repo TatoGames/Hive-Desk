@@ -10,6 +10,8 @@ export interface QuickCtx {
   catalog: () => ModelEntry[]
   isManager: (agentId: string) => boolean
   limited: (adapter: string) => boolean
+  /** The connection is close to where it ran out of usage the last times. */
+  nearLimit?: (adapter: string) => boolean
   trialRate: () => number
   /** Hand a task to the organisation (a manager plans it). */
   toOrganisation: (task: Task) => Task
@@ -62,14 +64,15 @@ export class QuickAssign {
         weight: m?.weight ?? (tier === 'top' ? 6 : tier === 'balanced' ? 3 : 1),
         idle: !busy.has(r.id),
         thinking: /thinking/i.test(arg + ' ' + (m?.family ?? '') + ' ' + (m?.cliArg ?? '')),
-        limitRoom: this.c.limited(r.adapter) ? 0 : 1
+        limitRoom: this.c.limited(r.adapter) ? 0 : this.c.nearLimit?.(r.adapter) ? 0.3 : 1
       })
     }
     return out
   }
 
   private records(): RecordLite[] {
-    return this.c.hive.listAptitude().map((a) => ({ modelKey: a.modelKey, jobKind: a.jobKind, approved: a.approved, changes: a.changes, failed: a.failed, runs: a.runs }))
+    // work finished after a hand-over is no first-pass record of the model that finished it
+    return this.c.hive.listAptitude().filter((a) => !a.handedOver).map((a) => ({ modelKey: a.modelKey, jobKind: a.jobKind, approved: a.approved, changes: a.changes, failed: a.failed, runs: a.runs }))
   }
 
   private option(job: JobRead, p: Pick): QuickOption {

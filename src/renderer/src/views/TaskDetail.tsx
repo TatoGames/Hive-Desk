@@ -1,4 +1,4 @@
-import { RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
+import { HandoffPanel, RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
 import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
 import { InstructionList, PlanAdjust, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
@@ -89,8 +89,11 @@ export default function TaskDetail({
   adapter,
   onGoAgents,
   onClose,
-  snap
+  snap,
+  embedded
 }: {
+  /** Shown inside a sidebar instead of as a window. */
+  embedded?: boolean
   snap?: Snapshot
   onGoAgents?: () => void
   task: Task
@@ -147,9 +150,8 @@ export default function TaskDetail({
   }, [task.id, focus, task.updatedAt])
 
   const cwd = live?.cwd ?? record?.cwd ?? workDir
-  return (
-    <div className="overlay" onClick={onClose}>
-      <div className="dialog wide" onClick={(e) => e.stopPropagation()}>
+  const content = (
+    <>
         <div className="row between">
           <div>
             <h1>{task.title}</h1>
@@ -163,7 +165,7 @@ export default function TaskDetail({
               </button>
             </div>
           </div>
-          <button onClick={onClose}>닫기</button>
+          <button onClick={onClose}>{embedded ? '← 목록' : '닫기'}</button>
         </div>
         <div className="sticky-bar">
           <TaskControls task={task} />
@@ -254,6 +256,7 @@ export default function TaskDetail({
         <MaterialsPanel task={task} adapter={adapter} />
         <UrlAttach task={task} />
         {snap && <TaskExternal snap={snap} task={task} />}
+        <HandoffPanel snap={snap} task={task} />
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>
@@ -343,6 +346,14 @@ export default function TaskDetail({
         {record && <UndoBar task={task} record={record} />}
         {record && <RunExternal record={record} />}
         {record && <RunBody record={record} />}
+    </>
+  )
+  // inside the work-status sidebar: no window around it, "close" goes back to the list
+  if (embedded) return <div className="side-detail">{content}</div>
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="dialog wide" onClick={(e) => e.stopPropagation()}>
+        {content}
       </div>
     </div>
   )

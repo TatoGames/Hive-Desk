@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import type { AutoApprove, HumanReview, Snapshot, SyncResult } from '@shared/types'
-import { DEFAULT_AUTO_APPROVE } from '@shared/types'
+import { useEffect, useState } from 'react'
+import type { AutoApprove, HandoffSettings, HumanReview, Snapshot, SyncResult } from '@shared/types'
+import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF } from '@shared/types'
 
 export default function Settings({
   snap,
@@ -22,6 +22,11 @@ export default function Settings({
   const [liveIn, setLiveIn] = useState(c.liveInstructions !== false)
   const [worktrees, setWorktrees] = useState(!!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
+  const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
+  const [samples, setSamples] = useState<{ at: string; adapter: string; text: string }[]>([])
+  useEffect(() => {
+    if (!firstRun) void window.hive.limitSamples().then(setSamples)
+  }, [firstRun])
   const [stale, setStale] = useState(c.staleBundleHours ?? 24)
   const [timeout, setTimeoutH] = useState(c.approvalTimeoutHours ?? 0)
   const [discord, setDiscord] = useState(c.discordWebhook ?? '')
@@ -46,6 +51,7 @@ export default function Settings({
       parallelWorktrees: worktrees,
       liveInstructions: liveIn,
       autoApprove: auto,
+      handoff: hand,
       staleBundleHours: Math.max(0, stale),
       approvalTimeoutHours: Math.max(0, timeout),
       discordWebhook: discord.trim() || undefined,
@@ -132,6 +138,45 @@ export default function Settings({
             <input type="checkbox" checked={auto.planSmaller} onChange={(e) => setAuto({ ...auto, planSmaller: e.target.checked })} />
             반려한 계획이 더 적은 실행 수로 다시 오면 승인
           </label>
+        </fieldset>
+        <fieldset className="full">
+          <legend>한도 이어받기 — 연결(계정)의 사용 한도가 차면 다른 연결의 직원이 마지막 단계부터 이어서 해요</legend>
+          <label className="toggle">
+            <input type="checkbox" checked={hand.auto} onChange={(e) => setHand({ ...hand, auto: e.target.checked })} />
+            한도가 차면 자동으로 이어받기 (끄면 한도가 풀릴 때까지 기다려요)
+          </label>
+          <label className="toggle">
+            <input type="checkbox" checked={hand.up} onChange={(e) => setHand({ ...hand, up: e.target.checked })} />
+            같은 체급이 없으면 위 체급 직원에게도 넘기기
+          </label>
+          <label>
+            사용량 가중치가 이 배수 이상 오르면 넘기기 전에 결재함에 물어요 (0 = 묻지 않음)
+            <input type="number" min={0} step={0.5} value={hand.confirmAtCostX} onChange={(e) => setHand({ ...hand, confirmAtCostX: Math.max(0, Number(e.target.value) || 0) })} />
+          </label>
+          <label>
+            한도가 이 시간(분) 안에 풀리면 넘기지 않고 기다려요 (풀리는 시각을 알 때만)
+            <input type="number" min={0} value={hand.waitMinutes} onChange={(e) => setHand({ ...hand, waitMinutes: Math.max(0, Number(e.target.value) || 0) })} />
+          </label>
+          <label className="toggle">
+            <input type="checkbox" checked={hand.rollbackStep} onChange={(e) => setHand({ ...hand, rollbackStep: e.target.checked })} />
+            진행 중이던 단계는 그 단계 시작 상태로 되돌리고 넘기기 (git 폴더)
+          </label>
+          <p className="muted small">같은 연결의 직원은 같은 한도를 쓰기 때문에 언제나 제외해요. 이미 거쳐 간 연결로는 되돌아가지 않아요.</p>
+          {!!samples.length && (
+            <details>
+              <summary className="small">한도처럼 보였지만 알아보지 못한 실패 {samples.length}건 (감지 규칙을 고치는 데 써요)</summary>
+              {samples
+                .slice()
+                .reverse()
+                .map((x, i) => (
+                  <pre key={i} className="out small-log">
+                    {x.at.slice(0, 16).replace('T', ' ')} · {x.adapter}
+                    {'\n'}
+                    {x.text}
+                  </pre>
+                ))}
+            </details>
+          )}
         </fieldset>
         <label>
           손대지 않은 묶음은 이 시간(시간) 뒤 다시 시작하기 전에 물어요 (0 = 안 물어봄)

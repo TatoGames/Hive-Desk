@@ -1,5 +1,6 @@
 import Bundles, { useBundles } from './Bundles'
 import { AutoSwitches, TaskControls } from './Controls'
+import { ViewSwitch, type BoardView } from './WorkStatus'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { LiveSummary, RosterEntry, Snapshot, Task, TaskStatus } from '@shared/types'
 import type { OrgUnit, Seat } from '@shared/company'
@@ -59,7 +60,7 @@ export default function Office({
   live: Record<string, LiveSummary>
   onGoAgents?: () => void
   view: 'office' | 'list'
-  setView: (v: 'office' | 'list') => void
+  setView: (v: BoardView) => void
 }): JSX.Element {
   const [zoom, setZoom] = useState<Zoom>('person')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -366,10 +367,7 @@ export default function Office({
       <header className="page-head">
         <h1>오피스</h1>
         <div className="row">
-          <div className="seg">
-            <button className="on">오피스</button>
-            <button onClick={() => setView('list')}>목록</button>
-          </div>
+          <ViewSwitch view="office" setView={setView} />
           <select value={zoom} onChange={(e) => setZoom(e.target.value as Zoom)} title="확대 단계">
             <option value="summary">회사 요약</option>
             <option value="unit">부서</option>

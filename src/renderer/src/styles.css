@@ -309,3 +309,45 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .warn-box { border-color: var(--warn); background: var(--warn-bg); }
 .ext-req { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 textarea.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+/* v5 work-status view: who works, what they say, progress on the right */
+.ws-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .ws-grid { grid-template-columns: 1fr; } }
+.ws-floor { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; min-height: 360px; }
+.ws-empty { color: var(--muted); text-align: center; padding: 120px 20px; font-size: 15px; }
+.ws-people { display: flex; flex-wrap: wrap; gap: 28px 22px; align-items: flex-end; }
+.ws-person { all: unset; cursor: pointer; display: flex; flex-direction: column; align-items: center; width: 170px; gap: 8px; }
+.ws-person:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 10px; }
+.ws-bubble { position: relative; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 7px 10px; font-size: 12.5px; line-height: 1.35; text-align: center; min-height: 34px; max-width: 170px; display: flex; align-items: center; justify-content: center; animation: ws-in 0.25s ease-out; word-break: keep-all; }
+.ws-bubble::after { content: ''; position: absolute; left: 50%; bottom: -7px; width: 12px; height: 12px; background: inherit; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); transform: translateX(-50%) rotate(45deg); }
+.ws-bubble.tone-wait { border-color: #e0a100; }
+.ws-bubble.tone-limit { border-color: #f97316; }
+.ws-bubble.tone-error { border-color: #ef4444; color: #ef4444; }
+.ws-bubble.tone-info { color: var(--muted); }
+.ws-avatar { position: relative; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15); }
+.ws-face { font-size: 34px; line-height: 1; }
+.ws-prop { position: absolute; right: -6px; bottom: -4px; font-size: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0 5px; font-weight: 700; color: var(--muted); }
+.ws-name { font-weight: 650; font-size: 13px; text-align: center; }
+.st-working .ws-face { animation: ws-type 0.9s ease-in-out infinite; }
+.st-reviewing .ws-prop { animation: ws-look 1.6s ease-in-out infinite; }
+.st-waiting-approval .ws-prop, .st-waiting-input .ws-prop { animation: ws-hand 1.2s ease-in-out infinite; }
+.st-limit .ws-prop { animation: ws-zz 2s ease-in-out infinite; color: #f97316; }
+.st-error .ws-prop { color: #ef4444; animation: ws-hand 0.8s ease-in-out infinite; }
+.st-limit .ws-avatar, .st-error .ws-avatar { filter: saturate(0.5); }
+@keyframes ws-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes ws-type { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-4deg); } 75% { transform: rotate(4deg); } }
+@keyframes ws-look { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-6px); } }
+@keyframes ws-hand { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@keyframes ws-zz { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .ws-bubble, .ws-face, .ws-prop { animation: none !important; }
+}
+.ws-rest { margin-top: 26px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.ws-side { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; max-height: calc(100vh - 140px); overflow: auto; position: sticky; top: 10px; }
+.ws-row { all: unset; cursor: pointer; display: block; width: 100%; box-sizing: border-box; padding: 9px 8px; border-bottom: 1px solid var(--line); }
+.ws-row:hover { background: var(--panel-2); }
+.ws-row.faded { opacity: 0.55; }
+.ws-row-top { display: flex; justify-content: space-between; gap: 8px; }
+.ws-bar { height: 5px; background: var(--panel-2); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+.ws-bar i { display: block; height: 100%; background: var(--accent); }
+.side-detail h1 { font-size: 17px; }
+.side-detail .row.between { flex-wrap: wrap; }

@@ -227,6 +227,12 @@ export interface Task {
   followups?: string[]
   /** What people told this task to do differently; queued ones go into the next run's first input. */
   instructions?: Instruction[]
+  /** Who it went from and to when a connection ran out of usage (v5). */
+  handoffs?: Handoff[]
+  /** The last step saving point of the running (or last) run. */
+  stepSave?: StepSave
+  /** Waits for its connection's usage limit (set when the run hit it; cleared when it runs again). */
+  limitWait?: { adapter: AdapterId; since: string }
   /** External connections this task may use (ids). Absent = whatever the employee may use. */
   connections?: string[]
   /** The running AI waits for this approval (a live tool request): shown as "결재 대기" on its card. */
@@ -459,6 +465,8 @@ export interface LiveSummary {
   tracking: TrackMode
   /** Last thing the agent did, for the card. */
   last?: string
+  /** What kind of thing that was (the speech bubble of the work-status view is made from it). */
+  lastKind?: ActivityKind
 }
 
 /** Everything the detail panel shows for a running task. */
@@ -543,7 +551,34 @@ export interface TaskHistory {
   approvals: Approval[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle' | 'external' | 'github'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle' | 'external' | 'github' | 'handoff'
+
+/** One time a task changed hands because its employee's connection ran out of usage (or a person moved it on). */
+export interface Handoff {
+  from: string
+  to: string
+  fromAdapter: AdapterId
+  toAdapter: AdapterId
+  reason: 'limit' | 'manual'
+  at: string
+  /** Usage weight of the new model ÷ the old one (2 = about twice as expensive per run). */
+  costX: number
+}
+
+/** Where a run stood at its last finished step, kept so another employee can carry on from there. */
+export interface StepSave {
+  runId: string
+  plan: string[]
+  /** Steps finished (the step in progress is `done + 1`). */
+  done: number
+  /** Files changed so far (relative paths, at most 30). */
+  files: string[]
+  /** The AI's last words, a line or two. */
+  last: string
+  at: string
+  /** git only: the work folder exactly as it was when this step ended. */
+  checkpoint?: Checkpoint
+}
 
 /** A GitHub step the app does for a task once a person says yes (pushing, opening a PR, merging, commenting on the issue). */
 export interface GithubAction {
@@ -573,6 +608,8 @@ export interface Approval {
   /** A live tool request of a running AI (external connection): the run waits for this answer. */
   external?: import('./external').ExtRequest
   github?: GithubAction
+  /** A hand-over that waits for a yes because the new model costs much more. */
+  handoff?: { to: string; costX: number; reason: 'limit' | 'manual' }
 }
 
 export interface Message {
@@ -656,6 +693,21 @@ export interface AutoApprove {
   planSmaller: boolean
 }
 
+export interface HandoffSettings {
+  /** Hand over when the limit is hit (default on). */
+  auto: boolean
+  /** Also to a stronger (usually more expensive) tier when nobody of the same tier can (default on). */
+  up: boolean
+  /** Ask first when the usage weight goes up by this factor or more (0 = never ask; default 2). */
+  confirmAtCostX: number
+  /** Wait instead when the limit resets within this many minutes (only when the reset time is known; default 20). */
+  waitMinutes: number
+  /** Put the step that was in progress back to how it was when it started (git folders; default on). */
+  rollbackStep: boolean
+}
+
+export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
+
 export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
 
 export interface AppConfig {
@@ -699,6 +751,8 @@ export interface AppConfig {
   parallelWorktrees?: boolean
   /** Minutes a running AI waits for a person to answer a live tool request before it is declined (default 30). */
   externalApprovalMinutes?: number
+  /** v5: when a connection runs out of usage, another connection's employee carries the task on. */
+  handoff?: HandoffSettings
   maxConcurrent: number
   syncIntervalMinutes: number
 }

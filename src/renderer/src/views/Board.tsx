@@ -5,6 +5,7 @@ import TaskDetail, { ReportView } from './TaskDetail'
 import Office from './Office'
 import Bundles from './Bundles'
 import { AutoSwitches, TaskControls } from './Controls'
+import WorkStatus, { ViewSwitch, type BoardView } from './WorkStatus'
 import {
   ConfirmButton,
   DropMessages,
@@ -38,9 +39,9 @@ function ListBoard({
   output,
   live,
   onGoAgents,
-  onSwitchView
+  setView
 }: {
-  onSwitchView?: () => void
+  setView: (v: BoardView) => void
   onGoAgents?: () => void
   snap: Snapshot
   output: Record<string, string>
@@ -70,10 +71,7 @@ function ListBoard({
     <div className="page">
       <header className="page-head">
         <h1>태스크 목록</h1>
-        <div className="seg">
-          <button onClick={onSwitchView}>오피스</button>
-          <button className="on">목록</button>
-        </div>
+        <ViewSwitch view="list" setView={setView} />
         <AutoSwitches snap={snap} />
       </header>
 
@@ -487,14 +485,15 @@ export default function Board(props: {
   live: Record<string, LiveSummary>
   onGoAgents?: () => void
 }): JSX.Element {
-  const [view, setViewState] = useState<'office' | 'list'>(() => {
+  const [view, setViewState] = useState<BoardView>(() => {
     try {
-      return localStorage.getItem('hive.view') === 'list' ? 'list' : 'office'
+      const v = localStorage.getItem('hive.view')
+      return v === 'list' || v === 'status' ? v : 'office'
     } catch {
       return 'office'
     }
   })
-  const setView = (v: 'office' | 'list'): void => {
+  const setView = (v: BoardView): void => {
     setViewState(v)
     try {
       localStorage.setItem('hive.view', v)
@@ -502,9 +501,10 @@ export default function Board(props: {
       /* ignore */
     }
   }
+  if (view === 'status') return <WorkStatus snap={props.snap} live={props.live} onGoAgents={props.onGoAgents} view={view} setView={setView} />
   return view === 'office' ? (
     <Office snap={props.snap} live={props.live} onGoAgents={props.onGoAgents} view={view} setView={setView} />
   ) : (
-    <ListBoard {...props} onSwitchView={() => setView('office')} />
+    <ListBoard {...props} setView={setView} />
   )
 }

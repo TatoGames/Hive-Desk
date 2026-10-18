@@ -192,3 +192,76 @@ export function RunExternal({ record }: { record: RunRecord }): JSX.Element | nu
     </div>
   )
 }
+
+/** v5: who the task went through when connections ran out, and [다른 직원에게 넘기기] for a person. */
+export function HandoffPanel({ snap, task }: { snap?: Snapshot; task: Task }): JSX.Element | null {
+  const [opts, setOpts] = useState<Awaited<ReturnType<typeof window.hive.handoffOptions>> | null>(null)
+  const [msg, setMsg] = useState('')
+  const name = (id: string): string => snap?.roster.find((r) => r.id === id)?.name ?? id
+  const movable = !['running', 'done', 'cancelled', 'delegated', 'in_review'].includes(task.status)
+  const lim = task.limitWait && snap?.limits[task.limitWait.adapter]
+  if (!task.handoffs?.length && !movable && !lim) return null
+  return (
+    <>
+      <h2 className="sec">담당 넘기기</h2>
+      {lim && (
+        <div className="warn-text small">
+          한도 대기 — {task.limitWait!.adapter} 연결이 {new Date(lim.until).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}
+          {lim.guessed ? '쯤(추정)' : ''}에 풀려요. 이어받을 다른 연결의 직원이 생기면 넘겨요.
+        </div>
+      )}
+      {!!task.handoffs?.length && (
+        <ul className="mat-list">
+          {task.handoffs.map((h, i) => (
+            <li key={i}>
+              <span>
+                {name(h.from)} → {name(h.to)} ({h.reason === 'limit' ? '한도' : '사람이 넘김'})
+              </span>
+              <span className="muted small">
+                {new Date(h.at).toLocaleString('ko-KR', { hour12: false })}
+                {Math.abs(h.costX - 1) >= 0.15 ? ` · 사용량 약 ${h.costX}배` : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {movable && (
+        <div className="row">
+          {!opts ? (
+            <button onClick={() => void window.hive.handoffOptions(task.id).then(setOpts)}>다른 직원에게 넘기기</button>
+          ) : (
+            <>
+              {opts.map((o) => (
+                <button
+                  key={o.agentId}
+                  className="sm"
+                  disabled={!!o.why}
+                  title={o.why ?? ''}
+                  onClick={async () => {
+                    setMsg('')
+                    try {
+                      await window.hive.handOver(task.id, o.agentId)
+                      setOpts(null)
+                      setMsg(`${o.name}에게 넘겼어요. 지금까지 한 것을 요약해 넘겨요.`)
+                    } catch (e) {
+                      setMsg((e as Error).message)
+                    }
+                  }}
+                >
+                  {o.name} · {o.label}
+                  {Math.abs(o.costX - 1) >= 0.15 ? ` · 약 ${Math.round(o.costX * 10) / 10}배` : ''}
+                  {o.why ? ` (${o.why})` : ''}
+                </button>
+              ))}
+              {!opts.length && <span className="muted small">넘길 수 있는 직원이 없어요.</span>}
+              <button className="sm ghost" onClick={() => setOpts(null)}>
+                닫기
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {msg && <div className="small">{msg}</div>}
+    </>
+  )
+}
