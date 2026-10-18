@@ -57,7 +57,8 @@ export interface AutoRow {
 
 export const modelAgentId = (adapter: AdapterId, modelId: string): string => `ma-${adapter}-${modelId}`
 
-/** Same tier first, then stronger, then weaker: the closest usable stand-in for a model. */
+/** Same tier first, then stronger, then weaker: the closest usable stand-in for a model.
+ *  Within a tier the lighter model (smaller usage weight) wins, so a stand-in never burns more of the limit than needed. */
 export function substituteFor(wanted: ModelEntry | undefined, usable: ModelEntry[]): ModelEntry | undefined {
   if (!usable.length) return undefined
   if (!wanted) return usable[0]
@@ -67,5 +68,5 @@ export function substituteFor(wanted: ModelEntry | undefined, usable: ModelEntry
     const t = rank[m.tier]
     return t === w ? 0 : t > w ? 10 * (t - w) : 100 * (w - t)
   }
-  return [...usable].sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0]
+  return [...usable].sort((a, b) => score(a) - score(b) || (a.weight ?? 0) - (b.weight ?? 0) || a.id.localeCompare(b.id))[0]
 }

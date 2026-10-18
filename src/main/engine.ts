@@ -45,6 +45,7 @@ import { budgetProblem, resolveCwd, runTask } from './runner'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
   DEFAULT_RULES,
+  TIER_LABEL,
   accountEntries,
   isModelEntry,
   mergeCatalog,
@@ -54,7 +55,8 @@ import {
   type Company,
   type ModelEntry,
   type OrgUnit,
-  type Seat
+  type Seat,
+  type Tier
 } from '../shared/company'
 import DEFAULT_MODELS from '../shared/models.default.json'
 import { autoPlace } from '../shared/placement'
@@ -611,6 +613,7 @@ export class Engine {
     // what the design would pick from every model, and what is possible with the connections we really have
     const wished = autoPlace({ units, seats, agents, catalog: full }, company.rules, {}, false)
     const possible = autoPlace({ units, seats, agents, catalog: usable }, company.rules, {}, false)
+    const tierOf = (id: string | null | undefined): string => (id ? full.find((x) => x.id === id)?.tier ?? '' : '')
     const label = (id: string | null | undefined): string => {
       const m = id ? full.find((x) => x.id === id) : undefined
       return m ? `${m.family} ${m.version}`.trim() : '—'
@@ -620,9 +623,10 @@ export class Engine {
       .map((st) => {
         const rec = wished[st.id] ?? null
         const recOk = !!rec && usableIds.has(rec)
-        let chosen: string | null = possible[st.id] ?? null
-        if (rec && recOk) chosen = rec
-        else if (!chosen) chosen = substituteFor(rec ? full.find((m) => m.id === rec) : undefined, usable)?.id ?? null
+        // `possible` already applies the company rules to the models we really have (e.g. a reviewer must differ
+        // from the workers' stand-ins), so it wins; the wish is only the fallback
+        let chosen: string | null = possible[st.id] ?? (recOk ? rec : null)
+        if (!chosen) chosen = substituteFor(rec ? full.find((m) => m.id === rec) : undefined, usable)?.id ?? null
         const ma = chosen ? usableMas.find((x) => x.modelId === chosen) : undefined
         const substituted = !!chosen && chosen !== rec
         return {
@@ -641,8 +645,12 @@ export class Engine {
             ? '연결된 AI가 없어요. 연결 탭에서 AI를 연결하세요.'
             : substituted
               ? recOk
-                ? '규칙에 맞춰 바꿨어요.'
-                : `${label(rec)}은(는) 쓸 수 없어서 같은 체급의 다른 모델로 대체했어요.`
+                ? st.job === 'review' || st.job === 'qa'
+                  ? '검토자는 작업자와 다른 모델이면서 같거나 높은 체급이어야 해서 바꿨어요.'
+                  : '팀 규칙(모델 섞기)에 맞춰 바꿨어요.'
+                : tierOf(rec) === tierOf(chosen)
+                  ? `${label(rec)}은(는) 쓸 수 없어서 같은 체급의 다른 모델로 대체했어요.`
+                  : `${label(rec)}은(는) 쓸 수 없고 같은 체급에 팀 규칙(모델 섞기·검토자 다르게)에 맞는 모델이 없어서 ${TIER_LABEL[tierOf(chosen) as Tier] ?? ''} 체급 모델로 대체했어요.`
               : ''
         }
       })

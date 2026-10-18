@@ -132,6 +132,25 @@ describe('auto connect', () => {
     eng.shutdown()
   })
 
+  it('stand-ins still follow the team rules: a reviewer never ends up on a worker stand-in, ties go to the lighter model', async () => {
+    const all = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']
+    const eng = engine(all)
+    eng.applyTemplate('team-project', '졸작', false)
+    eng.recordCheck('claude', { ok: true, message: 'ok' })
+    await eng.verifyAllModels('claude')
+    const rows = eng.autoConnectPreview()
+    const seats = eng.snapshot().company.seats
+    const unitOf = (id: string) => seats.find((s) => s.id === id)!.unitId
+    for (const r of rows.filter((x) => x.job === 'review' || x.job === 'qa')) {
+      const workers = rows.filter((w) => unitOf(w.seatId) === unitOf(r.seatId) && ['plan', 'build', 'docs', 'research', 'ops'].includes(w.job))
+      expect(workers.map((w) => w.chosen)).not.toContain(r.chosen)
+    }
+    // Opus and Fable are the same tier; Opus is lighter, so a worker stand-in never picks Fable over it
+    // (a reviewer may: it must be at least the workers' tier and differ from all of them)
+    expect(rows.filter((r) => r.job !== 'review' && r.job !== 'qa').map((r) => r.chosenLabel)).not.toContain('Fable 5.1')
+    eng.shutdown()
+  })
+
   it('without any connection every row says so; the person can apply an edited choice', () => {
     const eng = engine()
     eng.applyTemplate('startup', '스타트업', false)
@@ -152,6 +171,12 @@ describe('auto connect', () => {
     expect(substituteFor(m('x', 'balanced'), [m('a', 'top'), m('c', 'light')])?.id).toBe('a')
     expect(substituteFor(m('x', 'top'), [m('c', 'light')])?.id).toBe('c')
     expect(substituteFor(m('x', 'top'), [])).toBeUndefined()
+  })
+
+  it('substituteFor: within a tier the lighter model stands in (Opus over Fable)', () => {
+    const m = (id: string, tier: 'top' | 'balanced' | 'light', weight: number) => ({ id, tier, weight }) as never
+    const usable = [m('claude-fable-5-1', 'top', 10), m('claude-opus-5-5', 'top', 6), m('claude-sonnet-5-5', 'balanced', 3)]
+    expect(substituteFor(m('openai-gpt-6-astra', 'top', 8), usable)?.id).toBe('claude-opus-5-5')
   })
 })
 

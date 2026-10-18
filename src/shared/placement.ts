@@ -207,7 +207,8 @@ export function autoPlace(
       const base = t === minTier ? 0 : t > minTier ? 10 * (t - minTier) : 100 * (minTier - t)
       return base - (m.domains.includes(s.job) ? 1 : 0)
     }
-    let cands = [...pool].sort((a, b) => rankScore(a) - rankScore(b))
+    // still tied → the lighter model (smaller usage weight), so a stand-in never burns more of the limit than needed
+    let cands = [...pool].sort((a, b) => rankScore(a) - rankScore(b) || (a.weight ?? 0) - (b.weight ?? 0))
     if (!cands.length) continue
 
     if (s.job === 'ceo' && rules.ceoTrioDiffers) {
