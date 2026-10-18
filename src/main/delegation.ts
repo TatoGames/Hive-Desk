@@ -638,6 +638,61 @@ export class Delegation {
     this.event(t.id, `${by}가 계획을 직접 고쳤어요 (하위 작업 ${list.length}개 · 예상 실행 ${est.total}회).`)
   }
 
+  /** The board takes one step of a running plan out: it counts as done so what waits on it can go on. */
+  skipStep(childId: string, by: string): boolean {
+    const h = this.c.hive
+    const c = h.getTask(childId)
+    if (!c?.parentId || c.status === 'done' || c.status === 'cancelled' || c.status === 'running') return false
+    h.updateTask(c.id, { status: 'done', result: '사람이 이 단계를 건너뛰었어요.', error: undefined, finishedAt: new Date().toISOString(), reviewState: { status: 'skipped', round: 0, escalations: 0, note: '사람이 건너뜀' } })
+    h.addEvent(c.id, 'status', by, '이 단계를 건너뛰었어요.')
+    h.addEvent(c.parentId, 'delegation', by, `하위 작업 "${c.title}"를 건너뛰었어요.`)
+    this.checkParent(c.parentId)
+    return true
+  }
+
+  /** The board adds a step to a running plan (it must finish before the bundle is integrated). */
+  addStep(parentId: string, spec: { title: string; assignee: string; done?: string; after?: string[] }, by: string): Task {
+    const h = this.c.hive
+    const p = h.getTask(parentId)
+    if (!p || p.status !== 'delegated' || !p.plan) throw new Error('진행 중인 분배 계획에만 단계를 더할 수 있어요.')
+    if (!spec.title.trim()) throw new Error('작업 제목을 적어 주세요.')
+    const ids = new Set(this.teamOf(p.assignee ?? '').map((x) => x.agent.id))
+    if (!ids.has(spec.assignee)) throw new Error('이 계획을 맡은 팀에 없는 담당자예요.')
+    const manager = this.isManager(spec.assignee)
+    const c = h.createTask({
+      title: spec.title.trim(),
+      description: `${spec.title.trim()}\n\n상위 업무: ${p.title}\n완료 조건: ${spec.done || '(정해지지 않음)'}\n(사람이 진행 중에 더한 단계예요)`,
+      assignee: spec.assignee,
+      dependsOn: spec.after ?? [],
+      projectId: p.projectId,
+      permission: manager ? ('read' as const) : 'edit',
+      createdBy: by
+    })
+    h.updateTask(c.id, { kind: manager ? 'plan' : 'work', parentId: p.id, depth: (p.depth ?? 0) + 1, auto: true, criteria: spec.done, projectId: p.projectId })
+    h.updateTask(p.id, { plan: { ...p.plan, childIds: [...(p.plan.childIds ?? []), c.id] } })
+    h.addEvent(p.id, 'delegation', by, `단계를 더했어요: "${c.title}"`)
+    return h.getTask(c.id)!
+  }
+
+  /**
+   * The board changed its mind about the whole plan: every unfinished sub-task is dropped by the caller,
+   * and the planner writes a new plan that takes the new instruction (and the finished work) into account.
+   */
+  replan(taskId: string, instruction: string, by: string): boolean {
+    const h = this.c.hive
+    const t = h.getTask(taskId)
+    if (!t?.plan || t.status !== 'delegated') return false
+    const done = this.children(t.id).filter((k) => k.status === 'done').map((k) => `- ${k.title}`)
+    h.updateTask(t.id, {
+      plan: { ...t.plan, status: 'rejected', note: instruction, rejections: t.plan.rejections },
+      status: 'todo',
+      auto: true,
+      reply: `사람이 방향을 바꿨어요 (${by}): ${instruction}\n이 지시를 반영해서 분배 계획을 처음부터 다시 써 주세요.${done.length ? `\n이미 끝난 하위 작업이에요. 다시 만들지 말고 필요하면 결과를 재사용하세요:\n${done.join('\n')}` : ''}`
+    })
+    this.event(t.id, `${by}가 새 지시로 계획을 다시 세우라고 했어요: ${instruction}`)
+    return true
+  }
+
   /** What finished sub-tasks of this company really cost in AI runs (needs a few samples to count). */
   private runHistory(): { worker?: number; manager?: number } {
     const h = this.c.hive

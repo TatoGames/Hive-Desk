@@ -520,6 +520,7 @@ export default function Office({
       {assign && <AssignDialog snap={snap} target={assign} onClose={() => setAssign(null)} />}
       {detailTask && (
         <TaskDetail
+          snap={snap}
           task={detailTask}
           assigneeName={nameOf(detailTask.assignee)}
           workDir={snap.config.agents.find((a) => a.id === detailTask.assignee)?.workDir || ''}

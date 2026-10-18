@@ -202,3 +202,69 @@ export function AutoSwitches({ snap }: { snap: Snapshot }): JSX.Element {
   )
 }
 
+
+/** A running delegation: instruct the whole tree, skip a step, add a step, or have the planner start over. */
+export function PlanAdjust({ snap, task }: { snap: Snapshot; task: Task }): JSX.Element | null {
+  const [text, setText] = useState('')
+  const [down, setDown] = useState(true)
+  const [replan, setReplan] = useState(false)
+  const [stepTitle, setStepTitle] = useState('')
+  const [stepWho, setStepWho] = useState('')
+  const [msg, setMsg] = useState('')
+  if (task.status !== 'delegated' || !task.plan) return null
+  const kids = snap.tasks.filter((t) => t.parentId === task.id && t.kind !== 'review')
+  const who = snap.roster
+  const nameOf = (id: string | null): string => snap.roster.find((r) => r.id === id)?.name ?? '미배정'
+  return (
+    <>
+      <h2 className="sec">진행 중인 계획 조정</h2>
+      <div className="row">
+        <input className="grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="이 일 전체에 대한 새 지시" />
+        <button
+          className="primary"
+          disabled={!text.trim()}
+          onClick={() => {
+            if (replan && !window.confirm('끝나지 않은 하위 작업을 모두 취소하고 계획을 처음부터 다시 세워요. 이미 끝난 작업은 그대로 둬요. 계속할까요?')) return
+            void window.hive.instructTree(task.id, text, { down, replan }).then(() => setMsg(replan ? '계획을 다시 세우는 중이에요.' : '전달했어요.'))
+            setText('')
+          }}
+        >
+          보내기
+        </button>
+      </div>
+      <div className="row small">
+        <label className="toggle"><input type="checkbox" checked={down} disabled={replan} onChange={(e) => setDown(e.target.checked)} /> 아래 업무에도 전달</label>
+        <label className="toggle"><input type="checkbox" checked={replan} onChange={(e) => setReplan(e.target.checked)} /> 다시 계획 (끝나지 않은 하위 작업은 취소해요)</label>
+      </div>
+      {msg && <div className="muted small">{msg}</div>}
+      <div className="steps">
+        {kids.map((k) => (
+          <div key={k.id} className="row small">
+            <span className="grow">{k.title} <span className="muted">· {nameOf(k.assignee)} · {k.status}</span></span>
+            {k.status !== 'done' && k.status !== 'cancelled' && k.status !== 'running' && (
+              <button className="sm" onClick={() => void window.hive.skipStep(k.id)} title="이 단계를 건너뛰어요. 이 단계를 기다리던 작업은 계속 진행해요">
+                건너뛰기
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="row">
+        <input className="grow" value={stepTitle} onChange={(e) => setStepTitle(e.target.value)} placeholder="단계 더하기: 할 일" />
+        <select value={stepWho} onChange={(e) => setStepWho(e.target.value)}>
+          <option value="">담당자</option>
+          {who.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </select>
+        <button
+          disabled={!stepTitle.trim() || !stepWho}
+          onClick={() => {
+            void window.hive.addStep(task.id, { title: stepTitle, assignee: stepWho }).then(() => setMsg('단계를 더했어요.')).catch((e: Error) => setMsg(e.message))
+            setStepTitle('')
+          }}
+        >
+          더하기
+        </button>
+      </div>
+    </>
+  )
+}

@@ -1,5 +1,5 @@
 import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
-import { InstructionList, TaskControls } from './Controls'
+import { InstructionList, PlanAdjust, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
 import type {
   AdapterId,
@@ -8,6 +8,7 @@ import type {
   RunResultKind,
   RunSummary,
   LiveState,
+  Snapshot,
   Task,
   TaskEvent,
   TaskEventKind,
@@ -86,8 +87,10 @@ export default function TaskDetail({
   workDir,
   adapter,
   onGoAgents,
-  onClose
+  onClose,
+  snap
 }: {
+  snap?: Snapshot
   onGoAgents?: () => void
   task: Task
   assigneeName: string
@@ -287,6 +290,8 @@ export default function TaskDetail({
             <InstructionList task={task} />
           </>
         )}
+
+        {snap && <PlanAdjust snap={snap} task={task} />}
 
         <h2 className="sec">보고서</h2>
         {task.report ? (

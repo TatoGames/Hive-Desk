@@ -166,6 +166,7 @@ export function buildPrompt(opts: {
   if (queued.length) {
     lines.push('', '## New instructions from the human (they change what you do — apply them)', joinInstructions(queued))
   }
+  if (task.restartNote) lines.push('', '## Where the interrupted run stopped', task.restartNote)
   if (task.notes.length) lines.push('', 'Notes on this task:', ...task.notes.map((n) => `- ${n}`))
   const perm = PERMISSION_TEXT[effectivePermission(agent.adapter, task.permission ?? agent.permission)]
   if (perm) lines.push('', perm)
@@ -277,6 +278,8 @@ export type RunOutcome =
   | 'needs_input'
   | 'not_ready'
   | 'cancelled'
+  /** Interrupted by the person to take a new instruction: the same task runs again with a summary of where it stood. */
+  | 'restart'
   /** Stopped by the usage limit; the task is ready again once it resets. */
   | 'limited'
 
@@ -439,6 +442,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     error: undefined,
     result: undefined,
     report: undefined,
+    restartNote: undefined,
     reply: undefined, // consumed by this run (the prompt was built from the snapshot above)
     question: undefined
   })
@@ -636,6 +640,20 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   }
   const lastError = [...live.all()].reverse().find((e) => e.kind === 'error')?.text
 
+  if (res.aborted && deps.signal?.reason === 'restart') {
+    // Not a stop: the person gave a new instruction that cannot reach the running CLI. Keep what exists and run again.
+    const d = await tracker.finish().catch(() => undefined)
+    const files = (d?.files ?? []).slice(0, 30).map((f) => `- ${f.path} (${f.status})`)
+    const note = [
+      'Your previous run was interrupted by the human because of a new instruction (listed above). Continue from where it stood — do not redo finished work.',
+      files.length ? `Files already changed by that run:\n${files.join('\n')}` : 'That run had not changed any files yet.',
+      stdout.trim() ? `The last thing it said:\n${stdout.trim().slice(-2500)}` : ''
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+    hive.updateTask(task.id, { status: 'todo', restartNote: note, sessionId, error: undefined, lastRunId: saveRun('cancelled', { error: '새 지시를 받으려고 중단했어요.' }) })
+    return 'restart'
+  }
   if (res.aborted) {
     // A person stopped it: it is held (or cancelled) and never starts again by itself.
     const why = typeof deps.signal?.reason === 'string' ? deps.signal.reason : 'hold'

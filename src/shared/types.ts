@@ -199,6 +199,8 @@ export interface Task {
   /** When the person last confirmed a stale bundle should go on. */
   /** A live run is interrupted and waiting for the person's next message. */
   paused?: boolean
+  /** Where an interrupted run stopped, for the run that continues it (restart with a summary). */
+  restartNote?: string
   /** The running AI takes messages right now (live mode). */
   liveInput?: boolean
   staleOkAt?: string

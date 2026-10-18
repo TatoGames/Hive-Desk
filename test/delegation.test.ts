@@ -768,3 +768,59 @@ describe('6-0.7: approvals the app may answer itself', () => {
     eng.shutdown()
   })
 })
+
+describe('6-3: adjusting a running delegation', () => {
+  const plan2 = (a: string, b: string): string =>
+    `[[SUBTASK: 첫째 | assignee=${a} | done=끝 | after=none]]\n[[SUBTASK: 둘째 | assignee=${b} | done=끝 | after=1]]\n[[ESTIMATE: 5]]`
+
+  async function started() {
+    const { eng, ids } = company(makeScript({ plan: (who) => (who === 'coo' ? plan2('alice-hq', 'alice-hq') : '[[SELF: x]]') }))
+    const t = eng.createTask({ title: '큰 일', delegate: true })
+    await eng.runTask(t.id) // the plan only; nothing below has run
+    expect(task(eng, t.id).status).toBe('delegated')
+    return { eng, ids, root: t }
+  }
+
+  it('skipping a step counts it as done so the next one can go on', async () => {
+    const { eng, root } = await started()
+    const [a, b] = kids(eng, root.id)
+    expect(eng.skipStep(a.id)).toBe(true)
+    expect(task(eng, a.id).status).toBe('done')
+    expect(task(eng, b.id).status).not.toBe('done')
+    eng.shutdown()
+  })
+
+  it('a step can be added to a running plan, and the bundle waits for it', async () => {
+    const { eng, ids, root } = await started()
+    eng.addStep(root.id, { title: '추가 단계', assignee: ids.hq, done: '확인' })
+    const all = kids(eng, root.id)
+    expect(all).toHaveLength(3)
+    expect(task(eng, root.id).plan!.childIds).toContain(all[2].id)
+    expect(() => eng.addStep(root.id, { title: 'x', assignee: 'nobody' })).toThrow()
+    eng.shutdown()
+  })
+
+  it('instructing down reaches every unfinished task below', async () => {
+    const { eng, root } = await started()
+    const n = await eng.instructTree(root.id, '모든 문서는 영어로', { down: true })
+    expect(n).toBe(2)
+    for (const k of kids(eng, root.id)) expect(task(eng, k.id).instructions?.[0].text).toBe('모든 문서는 영어로')
+    expect(task(eng, root.id).instructions).toHaveLength(1)
+    eng.shutdown()
+  })
+
+  it('replanning drops the unfinished sub-tasks and has the planner start over with the instruction', async () => {
+    const { eng, root } = await started()
+    const [a] = kids(eng, root.id)
+    eng.skipStep(a.id) // finished work is kept
+    await eng.instructTree(root.id, '방향을 바꿔요', { replan: true })
+    const r = task(eng, root.id)
+    expect(r.plan!.status).toMatch(/rejected|approved/)
+    expect(events(eng, root.id).join('\n')).toContain('방향을 바꿔요')
+    const old = kids(eng, root.id).filter((k) => k.title === '둘째')
+    expect(old.every((k) => k.status === 'cancelled' || k.status === 'todo' || k.status === 'delegated')).toBe(true)
+    expect(task(eng, a.id).status).toBe('done')
+    eng.shutdown()
+  })
+})
+

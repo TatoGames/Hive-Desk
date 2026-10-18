@@ -88,7 +88,7 @@ export const SCARCE_HOURS = 6
 export type Emit = (e: EngineEvent) => void
 
 /** Why a person stopped a run: pause the task, cancel it, or the emergency stop. */
-export type StopKind = 'hold' | 'cancel' | 'emergency'
+export type StopKind = 'hold' | 'cancel' | 'emergency' | 'restart'
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
   todo: '할 일',
@@ -973,7 +973,7 @@ export class Engine {
     const agent = this.localAgent(task.assignee)
     if (!agent) return 'not_ready'
     if (this.running.has(id)) return 'not_ready'
-    const ac = new AbortController()
+    let ac = new AbortController()
     this.running.set(id, ac)
     this.changed()
     // Sub-tasks of a git project get their own work tree, so they do not queue behind each other
@@ -992,6 +992,12 @@ export class Engine {
         return 'cancelled'
       }
       let outcome = await this.runOnce(agent, id, ac)
+      // an instruction that could not reach the running CLI interrupted it: run again with a summary of where it stood
+      for (let i = 0; i < 10 && outcome === 'restart'; i++) {
+        ac = new AbortController()
+        this.running.set(id, ac)
+        outcome = await this.runOnce(agent, id, ac)
+      }
       // instructions that arrived during (or after) the run: apply them in the same conversation, as many rounds as needed
       for (let i = 0; i < 20 && outcome === 'done' && !ac.signal.aborted; i++) {
         const t = this.hive.getTask(id)
@@ -1119,7 +1125,8 @@ export class Engine {
     this.changed()
   }
 
-  private applyStop(id: string, kind: StopKind): void {
+  private applyStop(id: string, stop: StopKind): void {
+    const kind = stop === 'restart' ? 'hold' : stop
     const t = this.hive.getTask(id)
     if (!t || t.status === 'done' || t.status === 'cancelled' || (t.status === 'held' && kind !== 'cancel')) return
     const by = this.config.memberName || 'me'
@@ -1636,12 +1643,69 @@ export class Engine {
     }
     const i = addInstructionTo(this.hive, id, text, by, mode)
     if (!i) return
+    // No live input to this CLI (Codex, agy, custom, or the old mode): "cut it now" means stop, then run again with a summary.
+    const ac = this.running.get(id)
+    if (mode === 'interrupt' && t.status === 'running' && ac && this.liveRuns.has(id) && !ac.signal.aborted) {
+      this.hive.addEvent(id, 'instruction', by, `하던 일을 끊고 새 지시로 다시 시작해요 (지금까지의 진행을 요약해 넘겨요): ${i.text}`)
+      ac.abort('restart')
+      this.changed()
+      return
+    }
     this.hive.addEvent(
       id,
       'instruction',
       by,
       t.status === 'running' ? `추가 지시 (이번 실행이 끝난 뒤 반영): ${i.text}` : `추가 지시 (다음 실행의 첫 입력으로 전달): ${i.text}`
     )
+    this.changed()
+  }
+
+  /**
+   * An instruction for a whole delegation: it goes to the task itself and, when asked, to every unfinished task below it.
+   * `replan` throws away the unfinished sub-tasks and has the planner write a new plan.
+   */
+  async instructTree(id: string, text: string, opts: { down?: boolean; replan?: boolean; mode?: InstructionMode } = {}): Promise<number> {
+    const body = text.trim()
+    const root = this.hive.getTask(id)
+    if (!root || !body) return 0
+    const by = this.config.memberName || 'me'
+    const below = subtree(this.hive.listTasks(), id).filter((t) => t.id !== id && t.kind !== 'review' && t.status !== 'done' && t.status !== 'cancelled')
+    if (opts.replan && root.plan && root.status === 'delegated') {
+      const waiters: Promise<unknown>[] = []
+      for (const t of subtree(this.hive.listTasks(), id)) {
+        if (t.id === id || t.status === 'done' || t.status === 'cancelled') continue
+        const p = this.pendingRuns.get(t.id)
+        this.stopTask(t.id, 'cancel')
+        if (p) waiters.push(p)
+      }
+      await Promise.allSettled(waiters)
+      this.delegation.replan(id, body, by)
+      this.changed()
+      void this.runTask(id)
+      return below.length
+    }
+    this.addInstruction(id, body, opts.mode ?? 'after')
+    let n = 0
+    if (opts.down) {
+      for (const t of below) {
+        if (t.kind === 'plan' && t.status === 'delegated') continue // its own children are in `below`
+        this.addInstruction(t.id, body, opts.mode ?? 'after')
+        n++
+      }
+      this.hive.addEvent(id, 'instruction', by, `아래 업무 ${n}개에도 전달했어요.`)
+    }
+    this.changed()
+    return n
+  }
+
+  skipStep(childId: string): boolean {
+    const ok = this.delegation.skipStep(childId, this.config.memberName || 'me')
+    if (ok) this.changed()
+    return ok
+  }
+
+  addStep(parentId: string, spec: { title: string; assignee: string; done?: string }): void {
+    this.delegation.addStep(parentId, spec, this.config.memberName || 'me')
     this.changed()
   }
 

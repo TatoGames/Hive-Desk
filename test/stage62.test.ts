@@ -208,4 +208,31 @@ describe('6-2: the engine talks to a live run', () => {
     await eng.runTask(t.id)
     expect(live).toBeFalsy()
   })
+
+  it('interrupt without live input (Codex etc.): the run is cut and runs again with a summary and the instruction', async () => {
+    const prompts: string[] = []
+    let calls = 0
+    const runner: Runner = (_b, o) => {
+      calls++
+      prompts.push(o.prompt)
+      if (calls > 1) return Promise.resolve({ code: 0, stdout: REPORT, stderr: '', timedOut: false, aborted: false })
+      return new Promise((resolve) => {
+        o.signal?.addEventListener('abort', () => resolve({ code: 1, stdout: '', stderr: '', timedOut: false, aborted: true }))
+      })
+    }
+    const { eng, agent } = make(runner)
+    const t = eng.createTask({ title: '긴 일', assignee: agent.id })
+    const p = eng.runTask(t.id)
+    await wait(150)
+    eng.addInstruction(t.id, '영어로 써줘', 'interrupt')
+    await p
+    expect(calls).toBe(2)
+    expect(prompts[1]).toContain('Where the interrupted run stopped')
+    expect(prompts[1]).toContain('영어로 써줘')
+    const done = eng.hive.getTask(t.id)!
+    expect(done.status).not.toBe('held')
+    expect(done.status).not.toBe('cancelled')
+    expect(done.restartNote).toBeUndefined()
+  })
 })
+

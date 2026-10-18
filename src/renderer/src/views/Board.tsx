@@ -151,6 +151,7 @@ function ListBoard({
 
       {detail && snap.tasks.find((t) => t.id === detail) && (
         <TaskDetail
+          snap={snap}
           task={snap.tasks.find((t) => t.id === detail)!}
           assigneeName={nameOf(snap.tasks.find((t) => t.id === detail)!.assignee)}
           workDir={workDirOf(snap.tasks.find((t) => t.id === detail)!)}
