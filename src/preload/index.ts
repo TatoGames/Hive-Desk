@@ -19,7 +19,8 @@ import type {
   SyncResult,
   SetupCheck,
   Task,
-  TaskHistory
+  TaskHistory,
+  SubtaskSpec
 } from '../shared/types'
 
 const api = {
@@ -62,6 +63,7 @@ const api = {
   cancelPreview: (id: string, scope: 'this' | 'tree' | 'pending'): Promise<import('../shared/tree').CancelPreview & { files: number; additions: number; deletions: number }> => ipcRenderer.invoke('task:cancel-preview', id, scope),
   resolveFailure: (id: string, choice: 'retry' | 'skip' | 'cancel-all'): Promise<void> => ipcRenderer.invoke('failure:resolve', id, choice),
   resumeTask: (id: string, instruction?: string): Promise<void> => ipcRenderer.invoke('task:resume', id, instruction),
+  editPlanApprove: (approvalId: string, items: SubtaskSpec[], human?: number[], runCap?: number): Promise<void> => ipcRenderer.invoke('plan:edit-approve', approvalId, items, human, runCap),
   quickPreview: (title: string, description?: string): Promise<import('../main/quick').QuickPreview> => ipcRenderer.invoke('quick:preview', title, description),
   quickAssign: (input: { title: string; description?: string; agentId?: string; projectId?: string }): Promise<Task> => ipcRenderer.invoke('quick:assign', input),
   quickTable: (): Promise<{ modelKey: string; label: string; kind: string; kindLabel: string; tasks: number; firstPass: number; avgRuns: number; avgUsage: number }[]> => ipcRenderer.invoke('quick:table'),
@@ -86,7 +88,7 @@ const api = {
   },
   runTask: (id: string): Promise<string> => ipcRenderer.invoke('task:run', id),
   stopTask: (id: string, kind?: 'hold' | 'cancel'): Promise<void> => ipcRenderer.invoke('task:stop', id, kind),
-  openAgenda: (title: string, body: string): Promise<void> => ipcRenderer.invoke('agenda:open', title, body),
+  openAgenda: (title: string, body: string, deep?: boolean): Promise<void> => ipcRenderer.invoke('agenda:open', title, body, deep),
   decideAgenda: (id: string, choice: number, note?: string): Promise<void> =>
     ipcRenderer.invoke('agenda:decide', id, choice, note),
   applyReassignment: (domain: string, from: string, to: string): Promise<number> =>

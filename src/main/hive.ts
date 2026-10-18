@@ -66,7 +66,8 @@ const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   'agent-request': '에이전트 요청',
   plan: '분배 계획',
   failure: '작업 실패',
-  'bundle-cap': '실행 상한'
+  'bundle-cap': '실행 상한',
+  'stale-bundle': '오래된 묶음'
 }
 
 /** Tasks written before v4 kept pending instructions as plain strings in `followups`. */
@@ -427,7 +428,7 @@ export class Hive {
 
     const task = this.getTask(a.taskId)
     // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
-    if (task && a.kind !== 'plan' && a.kind !== 'failure' && a.kind !== 'bundle-cap') {
+    if (task && a.kind !== 'plan' && a.kind !== 'failure' && a.kind !== 'bundle-cap' && a.kind !== 'stale-bundle') {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'

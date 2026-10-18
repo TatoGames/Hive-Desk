@@ -1,7 +1,7 @@
 import { classifyInput } from '../shared/manage'
 import { app, BrowserWindow, dialog, ipcMain, Notification, powerSaveBlocker, shell } from 'electron'
 import { join } from 'node:path'
-import type { AdapterId, Agent, AppConfig, EngineEvent, Project, Task } from '../shared/types'
+import type { AdapterId, Agent, AppConfig, EngineEvent, Project, SubtaskSpec, Task } from '../shared/types'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
@@ -87,6 +87,7 @@ function registerIpc(): void {
   ipcMain.handle('failure:resolve', (_e, id: string, choice: 'retry' | 'skip' | 'cancel-all') => engine.resolveFailure(id, choice))
   ipcMain.handle('task:resume', (_e, id: string, instruction?: string) => engine.resumeTask(id, instruction))
   ipcMain.handle('input:classify', (_e, text: string) => classifyInput(text))
+  ipcMain.handle('plan:edit-approve', (_e, approvalId: string, items: SubtaskSpec[], human?: number[], runCap?: number) => engine.editPlanApprove(approvalId, items, human ?? [], runCap))
   ipcMain.handle('quick:preview', (_e, title: string, description?: string) => engine.quickPreview(title, description ?? ''))
   ipcMain.handle('quick:assign', (_e, input: { title: string; description?: string; agentId?: string; projectId?: string }) => engine.quickAssign(input))
   ipcMain.handle('quick:table', () => engine.quickTable())
@@ -176,7 +177,7 @@ function registerIpc(): void {
   ipcMain.handle('conn:order', (_e, order: string[], adapter?: string) => engine.setCompanyOrder(order, adapter))
   ipcMain.handle('office:reassign', (_e, id: string, agentId: string) => engine.reassignTask(id, agentId))
   ipcMain.handle('office:feed', () => engine.officeFeed())
-  ipcMain.handle('agenda:open', (_e, title: string, body: string) => engine.openAgenda(title, body))
+  ipcMain.handle('agenda:open', (_e, title: string, body: string, deep?: boolean) => engine.openAgenda(title, body, !!deep))
   ipcMain.handle('agenda:decide', (_e, id: string, choice: number, note?: string) => engine.decideAgenda(id, choice, note))
   ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))
   ipcMain.handle('update:check', () => checkForUpdate(app.getVersion()))

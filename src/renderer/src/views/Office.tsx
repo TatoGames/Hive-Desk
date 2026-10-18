@@ -1,3 +1,4 @@
+import Bundles, { useBundles } from './Bundles'
 import { AutoSwitches, TaskControls } from './Controls'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { LiveSummary, RosterEntry, Snapshot, Task, TaskStatus } from '@shared/types'
@@ -301,6 +302,19 @@ export default function Office({
 
   const [qp, setQp] = useState<{ title: string; pv: Awaited<ReturnType<typeof window.hive.quickPreview>> } | null>(null)
   const [qWho, setQWho] = useState('')
+  const bundles = useBundles(snap).filter((b) => b.remaining > 0)
+  const [older, setOlder] = useState<string | null>(null)
+  /** A new bundle while older ones still have work left: ask what to do with them first. */
+  const toOrganisation = async (title: string, ignoreOlder = false): Promise<void> => {
+    if (!ignoreOlder && bundles.length) {
+      setOlder(title)
+      return
+    }
+    await window.hive.createTask({ title, delegate: true })
+    setBoardTitle('')
+    setMsg('')
+    setOlder(null)
+  }
   const errText = (err: unknown): string => String((err as Error).message).replace(/^Error invoking remote method '[^']+': Error: /, '')
 
   /** Board input: management words first, then "small job → one employee" or "organisation". */
@@ -314,9 +328,7 @@ export default function Office({
         setQWho(pv.pick.agentId)
         return
       }
-      await window.hive.createTask({ title: boardTitle, delegate: true })
-      setBoardTitle('')
-      setMsg('')
+      await toOrganisation(boardTitle)
     } catch (err) {
       setMsg(errText(err))
     }
@@ -382,6 +394,27 @@ export default function Office({
         </button>
       </div>
       {msg && <div className="warn-text small">{msg}</div>}
+      {older && (
+        <div className="panel quickbox">
+          <div className="small">
+            아직 끝나지 않은 묶음이 {bundles.length}개 있어요 (남은 작업 {bundles.reduce((n, b) => n + b.remaining, 0)}건). 새 일을 맡기면 이전 묶음의 남은 작업도 계속 돌 수 있어요.
+          </div>
+          <div className="row">
+            <button className="primary" onClick={() => void toOrganisation(older, true).catch((e) => setMsg(errText(e)))}>
+              이전 묶음은 그대로 두고 새로 시작
+            </button>
+            <button
+              onClick={async () => {
+                for (const b of bundles) await window.hive.cancelTask(b.root.id, { scope: 'pending', files: 'keep' })
+                await toOrganisation(older, true).catch((e) => setMsg(errText(e)))
+              }}
+            >
+              이전 묶음의 남은 일을 취소하고 시작
+            </button>
+            <button className="ghost" onClick={() => setOlder(null)}>닫기</button>
+          </div>
+        </div>
+      )}
       {qp && (
         <div className="panel quickbox">
           <div className="small">{(qp.pv.options.find((o) => o.agentId === qWho) ?? qp.pv.pick!).line}</div>
@@ -411,10 +444,8 @@ export default function Office({
             <button
               onClick={async () => {
                 try {
-                  await window.hive.createTask({ title: qp.title, delegate: true })
-                  setBoardTitle('')
-                  setMsg('')
                   setQp(null)
+                  await toOrganisation(qp.title)
                 } catch (err) {
                   setMsg(errText(err))
                 }
@@ -426,6 +457,8 @@ export default function Office({
           </div>
         </div>
       )}
+
+      <Bundles snap={snap} onOpen={setDetail} />
 
       <section className="ticker" aria-label="실시간 소식판">
         <b className="small">소식판</b>

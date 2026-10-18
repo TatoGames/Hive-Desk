@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { ApprovalKind, Snapshot } from '@shared/types'
+import type { ApprovalKind, Snapshot, SubtaskSpec } from '@shared/types'
+import { moveItem, removeItem } from '@shared/planedit'
 import { FLAG_LABEL } from '@shared/delegation'
 import { fmtTime } from '../store'
 import { NeedBox, ReviewBox } from './Materials'
@@ -10,7 +11,8 @@ const KIND: Record<ApprovalKind, string> = {
   'agent-request': '에이전트 요청',
   plan: '분배 계획',
   failure: '작업 실패',
-  'bundle-cap': '실행 상한'
+  'bundle-cap': '실행 상한',
+  'stale-bundle': '오래된 묶음'
 }
 
 const ACCESS = { read: '읽기만', edit: '파일 수정', exec: '명령 실행' } as const
@@ -84,6 +86,15 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
                   묶음 전체 취소
                 </button>
               </div>
+            ) : a.kind === 'stale-bundle' ? (
+              <div className="row">
+                <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
+                  계속 진행
+                </button>
+                <button className="danger" onClick={() => void window.hive.decideApproval(a.id, 'rejected')}>
+                  남은 일 보류
+                </button>
+              </div>
             ) : a.kind === 'bundle-cap' ? (
               <div className="row">
                 <button className="primary" onClick={() => void window.hive.decideApproval(a.id, 'approved')}>
@@ -139,8 +150,22 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
 function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapshot['tasks'][number] }): JSX.Element {
   const [note, setNote] = useState('')
   const plan = task.plan!
-  const cap = Math.ceil(plan.estimateRuns * 1.5) + 2
+  const [items, setItems] = useState<SubtaskSpec[]>(plan.items)
+  const [human, setHuman] = useState<Set<number>>(new Set())
+  const [err, setErr] = useState('')
   const who = (aid: string) => snap.roster.find((r) => r.id === aid)?.name ?? aid
+  const edited = JSON.stringify(items) !== JSON.stringify(plan.items) || human.size > 0
+  const cap = Math.ceil(plan.estimateRuns * 1.5) + 2
+  const set = (i: number, patch: Partial<SubtaskSpec>): void => setItems(items.map((it, k) => (k === i ? { ...it, ...patch } : it)))
+  const issues = plan.issues ?? []
+  const apply = async (): Promise<void> => {
+    try {
+      setErr('')
+      await window.hive.editPlanApprove(id, items, [...human])
+    } catch (e) {
+      setErr(String((e as Error).message).replace(/^Error invoking remote method '[^']+': Error: /, ''))
+    }
+  }
   return (
     <div>
       <div className="small">
@@ -165,18 +190,47 @@ function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapsho
         </ul>
       )}
       <ol className="plan-items">
-        {plan.items.map((it, i) => (
-          <li key={i}>
-            <b>{it.title}</b> — {who(it.assignee)}
-            <span className="tag" style={{ marginLeft: 6 }}>{ACCESS[it.access ?? 'edit']}</span>
-            {it.est ? <span className="muted small"> · 약 {it.est}회</span> : null}
-            <div className="muted small">
-              완료 조건: {it.done || '-'}
-              {!!it.after.length && ` · 먼저 끝나야 함: ${it.after.join(', ')}번`}
-            </div>
-          </li>
-        ))}
+        {items.map((it, i) => {
+          const mine = issues.filter((x) => x.index === i && JSON.stringify(plan.items[i]) === JSON.stringify(it))
+          return (
+            <li key={i} className={human.has(i) ? 'muted' : ''}>
+              <div className="row">
+                <b className="grow">{it.title}</b>
+                <button className="sm ghost" disabled={i === 0} onClick={() => setItems(moveItem(items, i, -1))} title="위로">↑</button>
+                <button className="sm ghost" disabled={i === items.length - 1} onClick={() => setItems(moveItem(items, i, 1))} title="아래로">↓</button>
+                <button className="sm ghost" onClick={() => { setItems(removeItem(items, i)); setHuman(new Set()) }} title="이 작업 빼기">빼기</button>
+                <label className="small row" title="계획에서 빼고 담당 없는 업무로 만들어요">
+                  <input type="checkbox" checked={human.has(i)} onChange={(e) => setHuman(new Set(e.target.checked ? [...human, i] : [...human].filter((x) => x !== i)))} />
+                  사람이 할 일
+                </label>
+              </div>
+              <div className="row small">
+                <select value={it.assignee} onChange={(e) => set(i, { assignee: e.target.value })}>
+                  {snap.roster.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+                <select value={it.access ?? 'edit'} onChange={(e) => set(i, { access: e.target.value as SubtaskSpec['access'] })}>
+                  <option value="read">읽기만</option>
+                  <option value="edit">파일 수정</option>
+                  <option value="exec">명령 실행</option>
+                </select>
+                <input className="grow" value={it.done} placeholder="완료 조건" onChange={(e) => set(i, { done: e.target.value })} />
+                {it.est ? <span className="muted">약 {it.est}회</span> : null}
+              </div>
+              {!!it.after.length && <div className="muted small">먼저 끝나야 함: {it.after.join(', ')}번</div>}
+              {mine.map((x) => (
+                <div key={x.text} className="warn-text small">
+                  ⚠ {x.text}{' '}
+                  {x.fix && <button className="sm" onClick={() => set(i, { access: x.fix!.access })}>{ACCESS[x.fix.access]}로 바꾸기</button>}
+                </div>
+              ))}
+              <div className="muted small">담당: {who(it.assignee)} · {ACCESS[it.access ?? 'edit']}</div>
+            </li>
+          )
+        })}
       </ol>
+      {err && <div className="warn-text small">{err}</div>}
       <input
         className="grow"
         placeholder="반려할 때 이유 (담당 관리자에게 전달돼요)"
@@ -184,10 +238,18 @@ function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapsho
         onChange={(e) => setNote(e.target.value)}
       />
       <div className="row">
-        <button className="primary" onClick={() => void window.hive.decideApproval(id, 'approved', undefined, undefined, cap)}>
-          {`최대 ${cap}회로 승인`}
-        </button>
-        <button onClick={() => void window.hive.decideApproval(id, 'approved')}>상한 없이 진행</button>
+        {edited ? (
+          <button className="primary" onClick={() => void apply()}>
+            고쳐서 승인 (AI 재실행 없음)
+          </button>
+        ) : (
+          <>
+            <button className="primary" disabled={issues.length > 0} title={issues.length ? '할 수 없는 작업이 있어요. 빼거나 고쳐 주세요' : ''} onClick={() => void window.hive.decideApproval(id, 'approved', undefined, undefined, cap)}>
+              {`최대 ${cap}회로 승인`}
+            </button>
+            <button disabled={issues.length > 0} onClick={() => void window.hive.decideApproval(id, 'approved')}>상한 없이 진행</button>
+          </>
+        )}
         <button className="danger" disabled={!note.trim()} onClick={() => void window.hive.decideApproval(id, 'rejected', note)}>
           반려 (다시 계획)
         </button>

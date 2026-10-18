@@ -77,10 +77,25 @@ describe('vote parsing', () => {
   })
 })
 
+describe('CEO committee quick mode', () => {
+  it('is the default: one round of runs (one per member), then straight to the board with every proposal side by side', async () => {
+    const { eng } = setup({ c1: 1, c2: 2, c3: 3 })
+    eng.openAgenda('빠른 안건', '본문')
+    await settle(eng)
+    const a = eng.hive.listAgendas()[0]
+    expect(a.mode).toBe('quick')
+    expect(a.phase).toBe('board')
+    expect(a.proposals).toHaveLength(3)
+    expect(a.critiques).toHaveLength(0)
+    expect(a.recommendation).toBeTruthy()
+    eng.shutdown()
+  })
+})
+
 describe('CEO committee', () => {
   it('proposals → critique → votes → recommendation with minority → board decision becomes fixed memory', async () => {
     const { eng, ids } = setup({ c1: 2, c2: 2, c3: 1 })
-    eng.openAgenda('새 사업 방향', '게임을 만들까요 도구를 만들까요?')
+    eng.openAgenda('새 사업 방향', '게임을 만들까요 도구를 만들까요?', true)
     const a0 = eng.hive.listAgendas()[0]
     expect(a0.members.sort()).toEqual([ids.c1, ids.c2, ids.c3].sort())
     await settle(eng)
@@ -120,7 +135,7 @@ describe('CEO committee', () => {
       if (o.prompt.includes('Vote for exactly one')) seen.push(o.prompt)
       return inner(b, o)
     }
-    eng.openAgenda('A', 'B')
+    eng.openAgenda('A', 'B', true)
     await settle(eng)
     expect(seen.length).toBe(2)
     expect(seen[0]).toContain('Proposal 1 (by c1)')

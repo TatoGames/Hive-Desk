@@ -1,4 +1,5 @@
 import { parseEscalation } from '../shared/committee'
+import { planIssues, removeItem } from '../shared/planedit'
 import {
   FLAG_LABEL,
   LIMITS,
@@ -23,6 +24,7 @@ import type {
   Plan,
   ReportNode,
   RosterEntry,
+  SubtaskSpec,
   Task
 } from '../shared/types'
 import { rootOf, subtree } from '../shared/tree'
@@ -544,7 +546,9 @@ export class Delegation {
     const budget = this.budgetOf(t.projectId)
     if (budget && this.runsUsed(t.projectId) + estimate > budget) flags.add('budget')
 
+    const issues = planIssues(parsed.items, this.capabilities(), (id) => this.isManager(id))
     const reasons: string[] = []
+    if (issues.length) reasons.push(`할 수 없는 작업이 ${new Set(issues.map((i) => i.index)).size}개 있어요: ${issues.map((i) => `${i.index + 1}번 ${i.text}`).join(' / ')}`)
     if (company && estimate > company.bigJobRuns) reasons.push(`예상 AI 실행 ${estimate}회 (기준 ${company.bigJobRuns}회 초과)`)
     for (const f of flags) reasons.push(FLAG_LABEL[f])
     if (t.risky) reasons.push('위험 작업으로 표시된 태스크예요')
@@ -566,6 +570,7 @@ export class Delegation {
       items: parsed.items,
       estimateRuns: estimate,
       estimateParts: { plan: est.plan, work: est.work, review: est.review, buffer: est.buffer, basis: est.basis },
+      ...(issues.length ? { issues } : {}),
       flags: [...flags],
       status: approver === 'board' ? 'awaiting_board' : approver === 'superior' ? 'awaiting_superior' : 'approved',
       approver,
@@ -585,6 +590,45 @@ export class Delegation {
     // superior approves: a plan-review task runs on the superior's agent
     this.makeReviewTask(t, superior!, `[계획 검토] ${t.title}`)
     h.updateTask(t.id, { status: 'in_review' })
+  }
+
+  /** What this company can do beyond reading and writing files (grows with the external connections of v4 stage 6-5 and later). */
+  capabilities(): { github: boolean; web: boolean } {
+    return { github: false, web: false }
+  }
+
+  /**
+   * The board edits a plan itself (take a sub-task out, change who does it, reorder, fix the completion condition)
+   * and approves it — no AI run. Sub-tasks marked `human` become tasks nobody is assigned to.
+   */
+  editPlan(taskId: string, items: SubtaskSpec[], by: string, human: number[] = []): void {
+    const h = this.c.hive
+    const t = h.getTask(taskId)
+    if (!t?.plan) throw new Error('고칠 계획이 없어요.')
+    const team = this.teamOf(t.assignee ?? '')
+    const ids = new Set(team.map((x) => x.agent.id))
+    let list = items
+    // work for a person: leave the plan, become an open task
+    for (const i of [...human].sort((a, b) => b - a)) {
+      const it = list[i]
+      if (!it) continue
+      const made = h.createTask({ title: it.title, description: `${it.title}\n\n상위 업무: ${t.title}\n완료 조건: ${it.done || '(정해지지 않음)'}\n(자동 계획에서 사람이 할 일로 옮겼어요)`, assignee: null, createdBy: by, projectId: t.projectId })
+      h.addEvent(t.id, 'delegation', by, `"${it.title}"는 사람이 할 일로 옮겼어요 (업무 ${made.id.slice(0, 6)}).`)
+      list = removeItem(list, i)
+    }
+    if (!list.length) throw new Error('하위 작업이 하나도 남지 않았어요. 계획을 반려하거나 취소하세요.')
+    const bad = validateAfter(list)
+    if (bad) throw new Error(bad)
+    const unknown = list.filter((i) => !ids.has(i.assignee)).map((i) => i.assignee)
+    if (unknown.length) throw new Error(`목록에 없는 담당자예요: ${[...new Set(unknown)].join(', ')}`)
+    const managers = list.map((i) => this.isManager(i.assignee))
+    const est = estimateBreakdown(list.map((i, k) => ({ manager: managers[k], est: i.est, reviewed: i.access !== 'read' })), this.runHistory())
+    const issues = planIssues(list, this.capabilities(), (id) => this.isManager(id))
+    if (issues.length) throw new Error(`아직 할 수 없는 작업이 있어요: ${issues.map((i) => `${i.index + 1}번 ${i.text}`).join(' / ')}`)
+    h.updateTask(t.id, {
+      plan: { ...t.plan, items: list, estimateRuns: est.total, estimateParts: { plan: est.plan, work: est.work, review: est.review, buffer: est.buffer, basis: est.basis }, issues: undefined }
+    })
+    this.event(t.id, `${by}가 계획을 직접 고쳤어요 (하위 작업 ${list.length}개 · 예상 실행 ${est.total}회).`)
   }
 
   /** What finished sub-tasks of this company really cost in AI runs (needs a few samples to count). */

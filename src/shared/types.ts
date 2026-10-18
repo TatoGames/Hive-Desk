@@ -190,6 +190,8 @@ export interface Task {
   jobKind?: import('./quick').JobKind
   /** Handed straight to one employee (6-0.5) instead of through the organisation. */
   quick?: QuickInfo
+  /** When the person last confirmed a stale bundle should go on. */
+  staleOkAt?: string
   /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
   reportFile?: string
   attachments?: Attachment[]
@@ -289,6 +291,8 @@ export interface Plan {
   estimateRuns: number
   /** What the number is made of (shown on the approval screen). */
   estimateParts?: { plan: number; work: number; review: number; buffer: number; basis: string[] }
+  /** Sub-tasks that cannot be done as written (no GitHub, web off, read-only but must write). */
+  issues?: { index: number; kind: 'github' | 'web' | 'readonly'; text: string; fix?: { access: PermissionLevel } }[]
   /** The board approved "at most N runs": the bundle stops and asks when it reaches this. */
   runCap?: number
   flags: string[]
@@ -500,7 +504,7 @@ export interface TaskHistory {
   runs: RunSummary[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle'
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface Approval {
@@ -553,6 +557,8 @@ export interface Agenda {
   createdAt: string
   createdBy: string
   phase: AgendaPhase
+  /** `quick` (default): one round, every member proposes and recommends in one run. `deep`: proposals → critique → votes. */
+  mode?: 'quick' | 'deep'
   /** Roster ids of the committee (agents on CEO seats), frozen when the agenda opens. */
   members: string[]
   /** Hidden tasks of the phase that is running. */
@@ -613,6 +619,8 @@ export interface AppConfig {
   autoRunOrg?: boolean
   /** Hours a failed bundle waits for the board's decision before it is held (default 3). */
   failureHoldHours?: number
+  /** A bundle nobody touched for this many hours asks before its waiting tasks start by themselves (0 = never ask). */
+  staleBundleHours?: number
   maxConcurrent: number
   syncIntervalMinutes: number
 }

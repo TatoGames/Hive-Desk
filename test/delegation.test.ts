@@ -655,3 +655,31 @@ describe('safeguards of the tree', () => {
     eng.shutdown()
   })
 })
+
+describe('6-0.6: the board fixes a plan itself', () => {
+  const plan2 = (a: string, b: string): string =>
+    `[[SUBTASK: GitHub Pages로 배포 | assignee=${a} | done=열림 | after=none]]\n[[SUBTASK: 문서 정리 | assignee=${b} | done=문서 | after=1]]\n[[ESTIMATE: 50]]`
+
+  it('a sub-task that cannot be done is flagged; the board takes it out and approves without any AI run', async () => {
+    const { eng } = company(makeScript({ plan: (who) => (who === 'coo' ? plan2('alice-hq', 'alice-hq') : '[[SELF: x]]') }))
+    const t = eng.createTask({ title: '사이트 올리기', delegate: true })
+    await settle(eng)
+    const p = task(eng, t.id).plan!
+    expect(p.issues?.map((i) => i.kind)).toEqual(['github'])
+    expect(p.boardReasons.join(' ')).toContain('할 수 없는')
+    const ap = eng.hive.listApprovals().find((a) => a.status === 'pending')!
+    // keeping the item is refused
+    expect(() => eng.editPlanApprove(ap.id, p.items)).toThrow('GitHub')
+    // the person takes the deployment out: it becomes an open task for a person
+    const before = eng.hive.listTasks().length
+    eng.editPlanApprove(ap.id, p.items, [0])
+    expect(task(eng, t.id).status).toBe('delegated')
+    const created = kids(eng, t.id)
+    expect(created).toHaveLength(1)
+    expect(created[0].title).toBe('문서 정리')
+    expect(created[0].dependsOn).toEqual([])
+    expect(eng.hive.listTasks().some((x) => x.title === 'GitHub Pages로 배포' && !x.assignee && !x.parentId)).toBe(true)
+    expect(eng.hive.listTasks().length).toBeGreaterThan(before)
+    eng.shutdown()
+  })
+})

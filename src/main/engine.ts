@@ -21,13 +21,15 @@ import type {
   RunShared,
   ConnectionCheck,
   TaskHistory,
-  TaskStatus
+  TaskStatus,
+  SubtaskSpec
 } from '../shared/types'
 import type { LiveRun } from './activity'
 import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Runner } from './adapters'
 import { checkCli } from './setup'
 import { Committee } from './committee'
 import { Delegation } from './delegation'
+import { bundlesOf, isStale } from '../shared/bundles'
 import { rootOf, subtree, cancelTargets, type CancelPreview } from '../shared/tree'
 import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, queuedOf } from './instructions'
 import { Collaboration } from './collaboration'
@@ -454,6 +456,14 @@ export class Engine {
         minutesToday: Math.round(usage.reduce((n, u) => n + u.ms, 0) / 60000)
       }
     })
+  }
+
+  /** Fix a plan by hand and approve it (no AI run). `human` = indexes of sub-tasks that become open tasks for a person. */
+  editPlanApprove(approvalId: string, items: SubtaskSpec[], human: number[] = [], runCap?: number): void {
+    const a = this.hive.listApprovals().find((x) => x.id === approvalId)
+    if (!a || a.kind !== 'plan' || a.status !== 'pending') return
+    this.delegation.editPlan(a.taskId, items, this.config.memberName || 'me', human)
+    this.decideApproval(approvalId, 'approved', undefined, undefined, runCap)
   }
 
   // ---- quick assignment (6-0.5) ----
@@ -1142,7 +1152,25 @@ export class Engine {
 
   private bundleCapped(h: Hive, all: Task[], t: Task): boolean {
     const root = rootOf(all, t)
-    return !!root.plan?.runCap && h.hasPendingApproval(root.id, 'bundle-cap')
+    return (!!root.plan?.runCap && h.hasPendingApproval(root.id, 'bundle-cap')) || h.hasPendingApproval(root.id, 'stale-bundle')
+  }
+
+  /** A bundle nobody touched for a day (setting) must be confirmed before its waiting tasks start again. */
+  private checkStaleBundles(h: Hive, all: Task[]): void {
+    const hours = this.config.staleBundleHours ?? 24
+    for (const b of bundlesOf(all)) {
+      if (!isStale(b, hours) || b.root.status === 'held' || b.root.status === 'cancelled') continue
+      if (h.hasPendingApproval(b.root.id, 'stale-bundle')) continue
+      // only when something would start by itself
+      if (!subtree(all, b.root.id).some((t) => t.status === 'todo' && t.auto)) continue
+      h.createApproval({
+        kind: 'stale-bundle',
+        taskId: b.root.id,
+        agentId: b.root.assignee ?? '',
+        reason: `"${b.root.title}" 묶음을 ${hours}시간 넘게 아무도 손대지 않았어요 (남은 작업 ${b.remaining}건). 계속 진행할까요?`
+      })
+      this.notify('오래된 묶음이에요', `${b.root.title}: 남은 작업 ${b.remaining}건 · 계속할지 정해 주세요`)
+    }
   }
 
   /** Failed bundles nobody decided on for a while are held (nothing starts by itself). */
@@ -1438,9 +1466,9 @@ export class Engine {
   }
 
   // ---- CEO committee ----
-  openAgenda(title: string, body: string): void {
+  openAgenda(title: string, body: string, deep = false): void {
     if (!title.trim()) return
-    this.committee.open(title, body, this.config.memberName || 'me')
+    this.committee.open(title, body, this.config.memberName || 'me', undefined, deep)
     this.changed()
   }
 
@@ -1544,6 +1572,13 @@ export class Engine {
           reply: `사람이 승인했어요: ${a.reason}${raisePermission ? `\n이 업무의 권한을 "${raisePermission === 'exec' ? '명령 실행' : '파일 수정'}"으로 올렸어요. 이제 가능하니 이어서 진행하세요.` : '\n이어서 진행하세요.'}`
         })
         if (raisePermission) this.hive.addEvent(t.id, 'changed', by, `권한을 올렸어요: ${raisePermission === 'exec' ? '명령 실행' : '파일 수정'}${ag ? '' : ''}`)
+      }
+    }
+    if (a?.kind === 'stale-bundle' && a.status === 'pending') {
+      const root = this.hive.getTask(a.taskId)
+      if (root) {
+        if (decision === 'approved') this.hive.updateTask(root.id, { staleOkAt: new Date().toISOString() })
+        else for (const x of subtree(this.hive.listTasks(), root.id)) if (x.status === 'todo' && x.id !== root.id) this.applyStop(x.id, 'hold')
       }
     }
     if (a?.kind === 'bundle-cap' && a.status === 'pending') {
@@ -1972,6 +2007,7 @@ export class Engine {
       for (const h of order) {
         const all = h.listTasks()
         this.checkBundleCaps(h, all)
+        this.checkStaleBundles(h, all)
         this.holdStaleFailures(h, all)
         for (const t of all) {
           if (this.running.size >= this.config.maxConcurrent) return

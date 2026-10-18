@@ -23,12 +23,12 @@ export class Committee {
     return [...new Set(seats.map((s) => s.agentId!))]
   }
 
-  open(title: string, body: string, by: string, fromTaskId?: string): Agenda {
+  open(title: string, body: string, by: string, fromTaskId?: string, deep = false): Agenda {
     const members = this.members()
     if (!members.length) throw new Error('CEO 자리에 에이전트가 앉아 있어야 위원회를 열 수 있어요. (회사 탭에서 CEO 자리를 만들고 에이전트를 배정하세요)')
     const a: Agenda = {
       id: newId(), title: title.trim(), body: body.trim(), createdAt: new Date().toISOString(), createdBy: by,
-      phase: 'proposals', members, taskIds: [], proposals: [], critiques: [], votes: [],
+      phase: 'proposals', mode: deep ? 'deep' : 'quick', members, taskIds: [], proposals: [], critiques: [], votes: [],
       ...(fromTaskId ? { fromTaskId } : {})
     }
     this.start(a, 'proposals')
@@ -55,6 +55,8 @@ export class Committee {
     const name = (id: string): string => this.c.hive.listRoster().find((r) => r.id === id)?.name ?? id
     const head = ['', `## Your role in this task: CEO COMMITTEE member (${agent.name})`, `Agenda: ${a.title}`, a.body, 'You only read and think; do not change any files.']
     const numbered = a.proposals.map((p, i) => `### Proposal ${i + 1} (by ${name(p.agentId)})\n${p.text}`)
+    if (a.phase === 'proposals' && a.mode !== 'deep')
+      return [...head, 'Write your own independent proposal in plain language: what to do, why, risks, and what it costs. Do not ask the others.', 'End with ONE line `[[RECOMMEND: why your proposal is the best choice and what the board should watch]]`. This is the only round: the board reads all proposals side by side and decides.']
     if (a.phase === 'proposals') return [...head, 'Write your own independent proposal in plain language: what to do, why, risks, and what it costs. Do not ask the others.']
     if (a.phase === 'critique')
       return [...head, 'Here are all proposals. Write ONE round of critique: for each proposal, its strongest weakness and what you would change. Be specific and short.', ...numbered]
@@ -84,6 +86,12 @@ export class Committee {
     if (a.phase === 'proposals') {
       a.proposals = results
       if (results.length === 1) return this.toBoard(a, { choice: 1, tally: [1], minority: [] })
+      if (a.mode !== 'deep') {
+        // quick round: each member stands behind their own proposal; the app lays them side by side
+        a.votes = results.map((r, i) => ({ agentId: r.agentId, choice: i + 1, reason: (/\[\[RECOMMEND:\s*([\s\S]*?)\]\]/i.exec(r.text)?.[1] ?? '').trim() }))
+        a.proposals = results.map((r) => ({ agentId: r.agentId, text: r.text.replace(/\[\[RECOMMEND:[\s\S]*?\]\]/gi, '').trim() }))
+        return this.toBoard(a, tally(a.votes, a.proposals.length))
+      }
       this.start(a, 'critique')
     } else if (a.phase === 'critique') {
       a.critiques = results

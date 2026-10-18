@@ -3,6 +3,7 @@ import type { AdapterId, LiveSummary, PermissionLevel, Snapshot, Task, TaskStatu
 import { fmtTime } from '../store'
 import TaskDetail, { ReportView } from './TaskDetail'
 import Office from './Office'
+import Bundles from './Bundles'
 import { AutoSwitches, TaskControls } from './Controls'
 import {
   ConfirmButton,
@@ -77,6 +78,7 @@ function ListBoard({
       </header>
 
       <NewTask snap={snap} />
+      <Bundles snap={snap} onOpen={setDetail} />
 
       <div className="row filters">
         <input className="grow" placeholder="제목 검색" value={fText} onChange={(e) => setFText(e.target.value)} />
