@@ -20,7 +20,28 @@ const KIND: Record<ApprovalKind, string> = {
 
 const ACCESS = { read: '읽기만', edit: '파일 수정', exec: '명령 실행' } as const
 
-export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
+type Elsewhere = 'reports' | 'committee' | 'collab' | 'board' | 'connections'
+
+/** v0.6: what waits on the person in other screens, in one list with a way there. */
+function elsewhere(snap: Snapshot): { label: string; n: number; go: Elsewhere; hint: string }[] {
+  const failed = snap.tasks.filter((t) => t.status === 'failed' && !t.hidden && !t.reviewOf)
+  const finals = snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review')
+  const agendas = snap.company.agendas.filter((a) => a.phase === 'board')
+  const collab = snap.collab.requests.filter((r) => r.status === 'pending')
+  const limited = snap.tasks.filter((t) => t.limitWait && !t.hidden)
+  const loggedOut = snap.connections.filter((c) => c.check && !c.check.ok)
+  return [
+    { label: '실패한 업무', n: failed.length, go: 'board' as const, hint: '업무에서 다시 시도하거나 다른 직원에게 넘겨요' },
+    { label: '최종 보고서 확인', n: finals.length, go: 'reports' as const, hint: '묶음 업무의 최종 보고서를 읽고 마무리해요' },
+    { label: 'CEO 위원회 안건', n: agendas.length, go: 'committee' as const, hint: '방향을 정해 달라는 안건이에요' },
+    { label: '협업 요청', n: collab.length, go: 'collab' as const, hint: '다른 회사가 도움을 청했어요' },
+    { label: '한도를 기다리는 업무', n: limited.length, go: 'board' as const, hint: '한도가 풀리면 저절로 이어서 해요 (넘기려면 업무 상세에서)' },
+    { label: '다시 로그인이 필요한 AI', n: loggedOut.length, go: 'connections' as const, hint: 'AI 연결에서 로그인하거나 연결 확인을 눌러요' }
+  ].filter((x) => x.n > 0)
+}
+
+export default function Approvals({ snap, go }: { snap: Snapshot; go?: (tab: Elsewhere) => void }): JSX.Element {
+  const others = elsewhere(snap)
   const pending = snap.approvals.filter((a) => a.status === 'pending')
   const asking = snap.tasks.filter((t) => t.status === 'needs_input')
   const reviewing = snap.tasks.filter((t) => t.status === 'needs_review')
@@ -31,8 +52,25 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
   return (
     <div className="page">
       <header className="page-head">
-        <h1>승인·확인·자료 요청</h1>
+        <h1>내가 할 일</h1>
       </header>
+      {!!others.length && (
+        <section className="panel elsewhere">
+          <h2>다른 화면에서 기다리는 일</h2>
+          {others.map((o) => (
+            <div key={o.label} className="row between">
+              <span>
+                <b>{o.label}</b> <span className="badge warn">{o.n}</span> <span className="muted small">{o.hint}</span>
+              </span>
+              {go && (
+                <button className="sm" onClick={() => go(o.go)}>
+                  보러 가기
+                </button>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
       <p className="muted">
         위험한 작업, 예산 초과, 에이전트가 직접 멈추고 물어본 일은 여기서 사람이 결정해요. 승인하면 태스크가 다시
         &lsquo;할 일&rsquo;로 돌아가요. 에이전트가 파일이나 정보를 요청하면 답하거나 파일을 넣어 주세요. 같은 대화를
@@ -62,8 +100,8 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
           <ReviewBox task={t} />
         </div>
       ))}
-      {!pending.length && !asking.length && !reviewing.length && (
-        <div className="panel empty">대기 중인 승인, 확인, 자료 요청이 없어요.</div>
+      {!pending.length && !asking.length && !reviewing.length && !others.length && (
+        <div className="panel empty">지금 할 일이 없어요. 직원들이 일하는 중이면 업무 › 작업 현황에서 볼 수 있어요.</div>
       )}
       {pending.map((a) => {
         const t = task(a.taskId)

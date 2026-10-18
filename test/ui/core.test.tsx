@@ -53,4 +53,18 @@ describe('UI safety net: the core flow renders', () => {
     expect(screen.getAllByText(/자동 검사/).length).toBeGreaterThan(0)
     expect(screen.getByText('테스트')).toBeTruthy()
   })
+
+  it('내가 할 일 gathers what waits elsewhere, with a way there', async () => {
+    ui = await mountApp((eng, dir) => {
+      const { dev } = ready(eng, dir)
+      const t = eng.createTask({ title: '빌드 고치기', assignee: dev })
+      eng.hive.updateTask(t.id, { status: 'failed', error: '테스트 실패' })
+    })
+    fireEvent.click(screen.getByText('내가 할 일'))
+    await ui.refresh()
+    expect(screen.getByText('실패한 업무')).toBeTruthy()
+    fireEvent.click(screen.getByText('보러 가기'))
+    await ui.refresh()
+    expect(screen.getAllByText('빌드 고치기').length).toBeGreaterThan(0)
+  })
 })

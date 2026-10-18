@@ -77,7 +77,7 @@ export default function App(): JSX.Element {
   const needsSetup = !snap.config.memberName
   const pending =
     snap.approvals.filter((a) => a.status === 'pending').length +
-    snap.tasks.filter((t) => t.status === 'needs_input' || t.status === 'needs_review').length
+    snap.tasks.filter((t) => t.status === 'needs_input' || t.status === 'needs_review' || (t.status === 'failed' && !t.hidden && !t.reviewOf)).length
   const unread = snap.messages.filter((m) => !m.read).length
   const current: Tab = needsSetup ? 'settings' : tab
 
@@ -206,7 +206,7 @@ export default function App(): JSX.Element {
         {current === 'performance' && <Performance snap={snap} />}
         {current === 'agents' && <Agents snap={snap} goBoard={() => setTab('board')} />}
         {current === 'inbox' && <Inbox snap={snap} />}
-        {current === 'approvals' && <Approvals snap={snap} />}
+        {current === 'approvals' && <Approvals snap={snap} go={(t) => setTab(t)} />}
         {current === 'settings' && <Settings snap={snap} firstRun={needsSetup} onSaved={refresh} />}
       </main>
     </div>
