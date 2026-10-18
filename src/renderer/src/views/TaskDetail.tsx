@@ -178,6 +178,10 @@ export default function TaskDetail({
 
         {history && <TimeRow task={task} history={history} />}
 
+        {!running && (task.status === 'done' || task.status === 'needs_review' || task.status === 'failed') && (
+          <ResultCard task={task} record={record} cwd={cwd} />
+        )}
+
         {task.status === 'needs_input' && (
           <>
             <h2 className="sec">에이전트가 기다리고 있어요</h2>
@@ -369,6 +373,65 @@ function TimeRow({ task, history }: { task: Task; history: TaskHistory }): JSX.E
     <div className="muted small" title="이 업무가 만들어진 뒤 걸린 시간을 나눠 본 거예요">
       ⏱ 전체 {fmtLong(b.total)} — {parts.filter(([, v]) => v >= 1000).map(([k, v]) => `${k} ${fmtLong(v)}`).join(' · ')}
     </div>
+  )
+}
+
+/** v0.6: the result in one card — what was done, how to check it, what the app checked, and the way back. */
+function ResultCard({ task, record, cwd }: { task: Task; record: RunRecord | null; cwd: string }): JSX.Element {
+  const ok = task.status !== 'failed'
+  const files = record?.diff.available ? record.diff.files : []
+  const c = task.checks
+  const ran = c?.items.filter((i) => !i.skipped) ?? []
+  const shot = c?.items.find((i) => i.screenshot)?.screenshot
+  return (
+    <section className={'result-card ' + (ok ? 'ok' : 'bad')}>
+      <div className="row between">
+        <h2>{task.status === 'failed' ? '❌ 실패했어요' : task.status === 'needs_review' ? '👀 확인을 기다려요' : '✅ 끝났어요'}</h2>
+        <div className="row">
+          <button className="sm" onClick={() => void window.hive.openPath(cwd)}>
+            결과 폴더 열기
+          </button>
+          {shot && (
+            <button className="sm" onClick={() => void window.hive.openPath(shot)}>
+              앱 화면 보기
+            </button>
+          )}
+        </div>
+      </div>
+      {task.status === 'failed' && task.error && <p className="warn-text">{task.error.split('\n')[0]}</p>}
+      {task.report?.did && (
+        <p>
+          <b>한 일</b> {task.report.did}
+        </p>
+      )}
+      {task.report?.verify && task.report.verify !== 'none' && (
+        <p>
+          <b>확인 방법</b> {task.report.verify}
+        </p>
+      )}
+      <div className="result-facts">
+        {!!files.length && <span>📄 바뀐 파일 {files.length}개</span>}
+        {!!ran.length && (
+          <span className={c!.ok ? 'ok-text' : 'warn-text'}>
+            {c!.ok ? '✓' : '✗'} 자동 검사 {ran.map((i) => CHECK_LABEL[i.name] ?? i.name).join('·')}
+          </span>
+        )}
+        {task.reviewState && (
+          <span>
+            🔎{' '}
+            {task.reviewState.status === 'passed'
+              ? `교차 검토 통과${task.reviewState.round ? ` (수정 ${task.reviewState.round}회)` : ''}`
+              : task.reviewState.status === 'skipped'
+                ? 'AI 검토 생략'
+                : task.reviewState.status === 'changes'
+                  ? '수정 요청 받음'
+                  : '검토 중'}
+          </span>
+        )}
+        {task.report?.risks && task.report.risks !== 'none' && <span className="warn-text">⚠ 남은 위험: {task.report.risks}</span>}
+      </div>
+      {record && <UndoBar task={task} record={record} />}
+    </section>
   )
 }
 

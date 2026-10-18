@@ -379,3 +379,11 @@ label.chip.on { border-color: var(--accent); color: inherit; }
 .examples { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .example { text-align: left; white-space: normal; }
 .side { overflow-y: auto; }
+/* v0.6 result card */
+.result-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin: 10px 0; background: var(--panel); }
+.result-card.ok { border-left: 4px solid var(--ok, #16a34a); }
+.result-card.bad { border-left: 4px solid #ef4444; }
+.result-card h2 { margin: 0; font-size: 16px; }
+.result-card p { margin: 6px 0; }
+.result-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; margin: 6px 0; }
+.result-facts .ok-text, .result-facts .warn-text { margin: 0; }

@@ -51,7 +51,8 @@ describe('UI safety net: the core flow renders', () => {
     await ui.refresh()
     expect(screen.getAllByText(/덧셈을 고쳤어요/).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/자동 검사/).length).toBeGreaterThan(0)
-    expect(screen.getByText('테스트')).toBeTruthy()
+    expect(screen.getByText('✅ 끝났어요')).toBeTruthy()
+    expect(screen.getByText(/자동 검사 테스트/)).toBeTruthy()
   })
 
   it('내가 할 일 gathers what waits elsewhere, with a way there', async () => {
