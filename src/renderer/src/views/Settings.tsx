@@ -57,7 +57,9 @@ export default function Settings({
       staleBundleHours: Math.max(0, stale),
       approvalTimeoutHours: Math.max(0, timeout),
       discordWebhook: discord.trim() || undefined,
-      telegram: tgToken.trim() && tgChat.trim() ? { token: tgToken.trim(), chatId: tgChat.trim() } : undefined
+      telegram: tgToken.trim() && tgChat.trim() ? { token: tgToken.trim(), chatId: tgChat.trim() } : undefined,
+      // someone new starts with the everyday menus; the sidebar switch shows the rest
+      ...(firstRun ? { uiMode: 'basic' as const } : {})
     })
     await onSaved()
     setMsg({ ok: true, message: '저장했어요.' })

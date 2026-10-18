@@ -14,6 +14,7 @@ import Company from './views/Company'
 import Inbox from './views/Inbox'
 import Approvals from './views/Approvals'
 import Settings from './views/Settings'
+import Start, { startSteps } from './views/Start'
 
 /** Ask GitHub once at start (and every few hours) whether a newer release exists. */
 function useUpdateNotice(): {
@@ -56,7 +57,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'boardroom' | 'collab' | 'connections' | 'external' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'start' | 'boardroom' | 'collab' | 'connections' | 'external' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -64,11 +65,11 @@ export default function App(): JSX.Element {
   const routed = useRef(false)
   const update = useUpdateNotice()
 
-  // No AI connected yet → open the setup screen first.
+  // Not ready to work yet → open the start screen first.
   useEffect(() => {
     if (!snap || routed.current || !snap.config.memberName) return
     routed.current = true
-    if (!snap.config.agents.length) setTab('agents')
+    if (!startSteps(snap).done && (!snap.config.agents.length || snap.config.uiMode === 'basic')) setTab('start')
   }, [snap])
 
   if (!snap) return <div className="loading">불러오는 중…</div>
@@ -81,22 +82,43 @@ export default function App(): JSX.Element {
   const current: Tab = needsSetup ? 'settings' : tab
 
   const otherWaiting = snap.companies.filter((c) => !c.active).reduce((n, c) => n + c.waiting, 0)
-  const tabs: { id: Tab; label: string; badge?: number }[] = [
-    { id: 'boardroom', label: '이사회 (모든 회사)', badge: otherWaiting },
-    { id: 'board', label: '태스크 보드' },
-    { id: 'company', label: '회사' },
-    { id: 'projects', label: '프로젝트' },
-    { id: 'reports', label: '보고서함', badge: snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review').length },
-    { id: 'committee', label: 'CEO 위원회', badge: snap.company.agendas.filter((a) => a.phase === 'board').length },
-    { id: 'performance', label: '성과' },
-    { id: 'collab', label: '협업', badge: snap.collab.requests.filter((r) => r.status === 'pending').length },
-    { id: 'connections', label: 'AI 연결' },
-    { id: 'external', label: '외부 연결', badge: snap.approvals.filter((a) => a.status === 'pending' && a.kind === 'external').length },
-    { id: 'agents', label: '에이전트' },
-    { id: 'inbox', label: '메시지 · 메모리', badge: unread },
-    { id: 'approvals', label: '승인·확인·자료 요청', badge: pending },
-    { id: 'settings', label: '설정' }
+  const steps = startSteps(snap)
+  const basic = snap.config.uiMode === 'basic'
+  type Item = { id: Tab; label: string; badge?: number; advanced?: boolean; hint?: string }
+  // menus grouped by what people do: the work, the team, and the rest (shown in advanced mode, or when something waits there)
+  const groups: { title: string; items: Item[] }[] = [
+    {
+      title: '일',
+      items: [
+        ...(!steps.done ? [{ id: 'start' as Tab, label: '시작하기', hint: 'AI 연결 → 팀 꾸리기 → 첫 일 맡기기' }] : []),
+        { id: 'approvals', label: '내가 할 일', badge: pending, hint: '결재, 질문, 확인할 결과가 모여요' },
+        { id: 'board', label: '업무', hint: '맡긴 일과 진행 상황 (오피스 · 작업 현황 · 목록)' },
+        { id: 'reports', label: '보고서함', badge: snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review').length, hint: '끝난 일의 결과 보고서' },
+        { id: 'projects', label: '프로젝트', hint: '작업 폴더와 프로젝트 설명' }
+      ]
+    },
+    {
+      title: '팀',
+      items: [
+        { id: 'company', label: '회사 · 조직도', hint: '팀 꾸리기, 자리와 직원' },
+        { id: 'agents', label: '에이전트', hint: '직원 한 명 한 명의 설정' },
+        { id: 'connections', label: 'AI 연결', hint: 'Claude · Codex · Antigravity 로그인과 모델' },
+        { id: 'performance', label: '성과', advanced: true }
+      ]
+    },
+    {
+      title: '더보기',
+      items: [
+        { id: 'boardroom', label: '이사회 (모든 회사)', badge: otherWaiting, advanced: snap.companies.length < 2 },
+        { id: 'committee', label: 'CEO 위원회', badge: snap.company.agendas.filter((a) => a.phase === 'board').length, advanced: true },
+        { id: 'collab', label: '협업', badge: snap.collab.requests.filter((r) => r.status === 'pending').length, advanced: true },
+        { id: 'external', label: '외부 연결', badge: snap.approvals.filter((a) => a.status === 'pending' && a.kind === 'external').length, advanced: true },
+        { id: 'inbox', label: '메시지 · 메모리', badge: unread, advanced: true }
+      ]
+    },
+    { title: '', items: [{ id: 'settings', label: '설정' }] }
   ]
+  const shown = (t: Item): boolean => !basic || !t.advanced || !!t.badge || current === t.id
 
   return (
     <div className="app">
@@ -121,18 +143,33 @@ export default function App(): JSX.Element {
           </div>
         )}
         <nav>
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              className={'nav' + (current === t.id ? ' on' : '')}
-              disabled={needsSetup && t.id !== 'settings'}
-              onClick={() => setTab(t.id)}
-            >
-              <span>{t.label}</span>
-              {!!t.badge && <span className={'badge' + (t.id === 'approvals' ? ' warn' : '')}>{t.badge}</span>}
-            </button>
-          ))}
+          {groups.map((g) => {
+            const items = g.items.filter(shown)
+            if (!items.length) return null
+            return (
+              <div key={g.title || 'end'} className="nav-group">
+                {g.title && <div className="nav-title">{g.title}</div>}
+                {items.map((t) => (
+                  <button
+                    key={t.id}
+                    className={'nav' + (current === t.id ? ' on' : '') + (t.id === 'start' ? ' nav-start' : '')}
+                    disabled={needsSetup && t.id !== 'settings'}
+                    onClick={() => setTab(t.id)}
+                    title={t.hint}
+                  >
+                    <span>{t.label}</span>
+                    {!!t.badge && <span className={'badge' + (t.id === 'approvals' ? ' warn' : '')}>{t.badge}</span>}
+                  </button>
+                ))}
+              </div>
+            )
+          })}
         </nav>
+        {!needsSetup && (
+          <label className="mode-toggle small" title="기본: 매일 쓰는 메뉴만 · 고급: 위원회·협업·외부 연결 등 모든 메뉴">
+            <input type="checkbox" checked={!basic} onChange={(e) => void window.hive.saveSettings({ uiMode: e.target.checked ? 'advanced' : 'basic' }).then(refresh)} /> 고급 메뉴 보기
+          </label>
+        )}
         <div className="side-foot">
           <div className="who">{snap.config.memberName || '이름 미설정'}</div>
           <div className="muted small">
@@ -156,6 +193,7 @@ export default function App(): JSX.Element {
             </button>
           </div>
         )}
+        {current === 'start' && <Start snap={snap} go={(t) => setTab(t)} />}
         {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
         {current === 'collab' && <Collab snap={snap} />}
         {current === 'connections' && <Connections snap={snap} />}

@@ -794,6 +794,8 @@ export interface AppConfig {
   handoff?: HandoffSettings
   /** v5.1: the app's own checks and when an AI review is needed. */
   review?: ReviewSettings
+  /** v0.6: `basic` shows the everyday menus only; `advanced` (default for configs from before v0.6) shows everything. */
+  uiMode?: 'basic' | 'advanced'
   maxConcurrent: number
   syncIntervalMinutes: number
 }

@@ -23,7 +23,7 @@ const connected = (eng: Parameters<Parameters<typeof mountApp>[0] & object>[0], 
 describe('v0.6 UI: a team in one click', () => {
   it('the company tab builds the org chart and seats connected AIs with one button', async () => {
     ui = await mountApp(connected)
-    fireEvent.click(screen.getByText('회사'))
+    fireEvent.click(screen.getByText('회사 · 조직도'))
     await ui.refresh()
     expect(screen.getByText('한 번에 팀 꾸리기')).toBeTruthy()
     fireEvent.click(screen.getByText('팀 꾸리기'))

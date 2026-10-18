@@ -364,3 +364,18 @@ textarea.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consola
 .quick-team { border-color: var(--accent); }
 label.chip { cursor: pointer; font-size: 12px; padding: 3px 9px; }
 label.chip.on { border-color: var(--accent); color: inherit; }
+/* v0.6 grouped menu, mode switch, start screen */
+.nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.nav-title { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; padding: 4px 10px 2px; }
+.nav.nav-start { color: var(--accent); font-weight: 700; }
+.mode-toggle { display: flex; gap: 6px; align-items: center; color: var(--muted); padding: 6px 10px; cursor: pointer; }
+.start .step { position: relative; }
+.start .step.now { border-color: var(--accent); }
+.start .step.done { opacity: 0.75; }
+.step-no { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; align-items: center; justify-content: center; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; margin-right: 6px; }
+.step.done .step-no { background: var(--ok, #16a34a); color: #fff; border-color: transparent; }
+.step.now .step-no { background: var(--accent); color: #fff; border-color: transparent; }
+.start textarea { width: 100%; box-sizing: border-box; margin: 6px 0; }
+.examples { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.example { text-align: left; white-space: normal; }
+.side { overflow-y: auto; }

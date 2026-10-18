@@ -354,7 +354,7 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
 type CardState = { busy?: 'install' | 'check' | 'login'; log?: string; msg?: string; ok?: boolean; needsLogin?: boolean }
 
 /** ① 설치 → ② 로그인 → ③ 연결 확인, all from inside the app. */
-function CliSetup({
+export function CliSetup({
   detected,
   agents,
   onRedetect
