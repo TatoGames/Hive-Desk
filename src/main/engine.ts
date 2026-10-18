@@ -32,7 +32,7 @@ import { Committee } from './committee'
 import { Delegation } from './delegation'
 import { bundlesOf, isStale } from '../shared/bundles'
 import { rootOf, subtree, cancelTargets, type CancelPreview } from '../shared/tree'
-import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, liveMessage, markSentOne, queuedOf } from './instructions'
+import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, liveMessage, liveTeamMessage, markSentOne, queuedOf } from './instructions'
 import { Collaboration } from './collaboration'
 import { CollabStore } from './collab'
 import type { ChannelInput } from './collaboration'
@@ -67,6 +67,7 @@ import {
 import DEFAULT_MODELS from '../shared/models.default.json'
 import { autoPlace } from '../shared/placement'
 import {
+  lighterThan,
   modelAgentId,
   substituteFor,
   type AutoRow,
@@ -727,6 +728,11 @@ export class Engine {
         if (!chosen) chosen = substituteFor(rec ? full.find((m) => m.id === rec) : undefined, usable)?.id ?? null
         const ma = chosen ? usableMas.find((x) => x.modelId === chosen) : undefined
         const substituted = !!chosen && chosen !== rec
+        const chosenEntry = chosen ? full.find((m) => m.id === chosen) : undefined
+        const light = lighterThan(chosenEntry, usable.filter((m) => usableMas.some((x) => x.modelId === m.id)))
+        const lightMa = light ? usableMas.find((x) => x.modelId === light.id) : undefined
+        const recWeight = rec ? full.find((m) => m.id === rec)?.weight ?? 0 : 0
+        const heavier = !!chosenEntry && substituted && recOk && chosenEntry.weight > recWeight
         return {
           seatId: st.id,
           seatTitle: st.title,
@@ -739,7 +745,9 @@ export class Engine {
           chosenLabel: label(chosen),
           substituted,
           modelAgentId: ma?.id ?? null,
-          note: !chosen
+          weight: chosenEntry?.weight ?? 0,
+          ...(light && lightMa ? { lighter: { modelId: light.id, modelAgentId: lightMa.id, label: label(light.id), weight: light.weight } } : {}),
+          note: (heavier ? `규칙 때문에 추천(${label(rec)}, 가중치 ${recWeight})보다 무거운 모델(가중치 ${chosenEntry!.weight})이 들어갔어요. ` : '') + (!chosen
             ? '연결된 AI가 없어요. 연결 탭에서 AI를 연결하세요.'
             : substituted
               ? recOk
@@ -749,7 +757,7 @@ export class Engine {
                 : tierOf(rec) === tierOf(chosen)
                   ? `${label(rec)}은(는) 쓸 수 없어서 같은 체급의 다른 모델로 대체했어요.`
                   : `${label(rec)}은(는) 쓸 수 없고 같은 체급에 팀 규칙(모델 섞기·검토자 다르게)에 맞는 모델이 없어서 ${TIER_LABEL[tierOf(chosen) as Tier] ?? ''} 체급 모델로 대체했어요.`
-              : ''
+              : '')
         }
       })
   }
@@ -1093,6 +1101,7 @@ export class Engine {
       machine: this.config.memberName,
       signal: ac.signal,
       live: this.config.liveInstructions !== false,
+      sendMessage: (from, to, body) => this.deliverMessage(from, to, body),
       onHandle: (taskId, h, runId) => {
         if (h) {
           this.handles.set(taskId, { h, runId })
@@ -1871,8 +1880,22 @@ export class Engine {
   }
 
   sendMessage(from: string, to: string, body: string): void {
-    this.hive.sendMessage(from, to, body)
+    this.deliverMessage(from, to, body)
     this.changed()
+  }
+
+  /**
+   * Put a message in the receiver's inbox and, when the receiver is an AI working right now with live input
+   * (Claude), hand it over at once instead of at its next run. Delivered messages count as read.
+   */
+  private deliverMessage(from: string, to: string, body: string): boolean {
+    const m = this.hive.sendMessage(from, to, body)
+    const t = this.hive.listTasks().find((x) => x.assignee === to && x.status === 'running' && this.handles.has(x.id))
+    const live = t ? this.handles.get(t.id) : undefined
+    if (!t || !live || t.paused || !live.h.send(liveTeamMessage(from, m.body))) return false
+    this.hive.markRead(to, m.id)
+    this.hive.addEvent(t.id, 'instruction', from, `실행 중에 메시지를 바로 전달했어요: ${m.body.slice(0, 200)}`)
+    return true
   }
 
   addMemory(text: string, kind: 'fixed' | 'recent' = 'recent'): void {

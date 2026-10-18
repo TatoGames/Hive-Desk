@@ -53,6 +53,19 @@ export interface AutoRow {
   /** Model agent that would be hired. */
   modelAgentId: string | null
   note: string
+  /** Usage weight of the chosen model (how fast one run uses up the limit). */
+  weight: number
+  /** The closest lighter usable model, for the [가벼운 모델로] button. */
+  lighter?: { modelId: string; modelAgentId: string; label: string; weight: number }
+}
+
+/** The usable model just below `chosen` in usage weight (the heaviest of the lighter ones; same tier first). */
+export function lighterThan<M extends { id: string; weight: number; tier: Tier }>(chosen: M | undefined, usable: M[]): M | undefined {
+  if (!chosen) return undefined
+  const rank: Record<Tier, number> = { light: 1, balanced: 2, top: 3 }
+  return usable
+    .filter((m) => m.id !== chosen.id && (m.weight ?? 0) < (chosen.weight ?? 0))
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0) || Math.abs(rank[a.tier] - rank[chosen.tier]) - Math.abs(rank[b.tier] - rank[chosen.tier]) || a.id.localeCompare(b.id))[0]
 }
 
 export const modelAgentId = (adapter: AdapterId, modelId: string): string => `ma-${adapter}-${modelId}`

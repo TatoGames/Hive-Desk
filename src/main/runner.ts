@@ -269,6 +269,8 @@ export interface RunnerDeps {
   live?: boolean
   /** A live run started (handle) or ended (undefined). */
   onHandle?: (taskId: string, handle: RunHandle | undefined, runId: string) => void
+  /** Send a [[MSG]] the agent wrote (the engine also hands it to the receiver right away when it is running). */
+  sendMessage?: (from: string, to: string, body: string) => void
 }
 
 export type RunOutcome =
@@ -726,7 +728,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     known.add(key)
     hive.addMemory(agent.id, text)
   }
-  for (const m of parsed.messages) hive.sendMessage(agent.id, m.to, m.body)
+  for (const m of parsed.messages) (deps.sendMessage ?? ((f, t, b) => void hive.sendMessage(f, t, b)))(agent.id, m.to, m.body)
 
   if (parsed.approvals.length && repeatedApproval(hive, task.id, parsed.approvals.join(' / '))) {
     // the same request again although it was approved: more runs would only repeat this
