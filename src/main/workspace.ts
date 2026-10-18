@@ -1,5 +1,5 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { uniqueName } from '../shared/names'
 
 /**
@@ -151,4 +151,35 @@ export function migrateLegacy(ws: string, newId: string, hooks: MigrationHooks =
     throw new Error(`기존 데이터를 회사 폴더로 옮기지 못해 원래대로 되돌렸어요 (백업: ${backup}): ${(e as Error).message}`)
   }
   return { companyId: newId, name, backup }
+}
+
+// ---- company folders that moved (renamed): old run records still hold the old absolute paths ----
+const movesFile = (ws: string): string => join(ws, '.local', 'folder-moves.json')
+
+export function recordFolderMove(ws: string, from: string, to: string): void {
+  let list: { from: string; to: string }[] = []
+  try {
+    list = JSON.parse(readFileSync(movesFile(ws), 'utf8'))
+  } catch {
+    /* first move */
+  }
+  list.push({ from, to })
+  mkdirSync(join(ws, '.local'), { recursive: true })
+  writeFileSync(movesFile(ws), JSON.stringify(list, null, 2) + '\n', 'utf8')
+}
+
+/** Where a path recorded before folder renames lives now (follows several renames in order). */
+export function movedPath(ws: string, p: string): string {
+  let list: { from: string; to: string }[] = []
+  try {
+    list = JSON.parse(readFileSync(movesFile(ws), 'utf8'))
+  } catch {
+    return p
+  }
+  let out = p
+  for (const m of list) {
+    if (out === m.from) out = m.to
+    else if (out.startsWith(m.from + sep) || out.startsWith(m.from + '/')) out = m.to + out.slice(m.from.length)
+  }
+  return out
 }

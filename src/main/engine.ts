@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   CompanySummary,
@@ -80,7 +80,7 @@ import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
 import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './worktree'
-import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
+import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, movedPath, readMeta, recordFolderMove, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
 /** After the account hit its usage limit, the company priority decides who may start work for this long. */
 export const SCARCE_HOURS = 6
@@ -213,6 +213,13 @@ export class Engine {
       const m = { id: newId(), name: '내 회사', createdAt: new Date().toISOString() }
       writeMeta(ws, m)
       metas = [m]
+    }
+    // folders from before v4 are named by id: give them the company's name (nothing runs yet at startup)
+    for (const m of metas) {
+      const cur = companyDir(ws, m.id)
+      if (basename(cur) !== m.id) continue
+      const moved = renameCompanyFolder(ws, m.id, m.name)
+      if (moved) recordFolderMove(ws, cur, moved)
     }
     for (const m of metas) this.hives.set(m.id, new Hive(companyDir(ws, m.id), m.id))
     this.primaryId = metas[0].id
@@ -497,6 +504,8 @@ export class Engine {
     const who = this.hive.listRoster().find((r) => r.id === t.assignee)?.name ?? t.assignee
     this.hive.addEvent(t.id, 'delegation', by, `빠른 배정: ${who}에게 바로 맡겼어요${t.quick?.trial ? ' (시험 배정)' : ''}${t.quick?.chosen ? ' (사람이 고른 직원)' : ''}.`)
     this.changed()
+    // the person just said "hand it over": start now, whatever the auto-run switches say
+    if (this.localAgent(t.assignee)) void this.runTask(t.id)
     return t
   }
 
@@ -537,7 +546,10 @@ export class Engine {
     if (c) h.saveCompany({ ...c, name: clean })
     // the folder carries the company's name; only while nothing of this company runs (a folder in use cannot move)
     const busy = h.listTasks().some((t) => this.running.has(t.id))
-    if (!busy && renameCompanyFolder(this.config.workspace, id, clean)) {
+    const before = companyDir(this.config.workspace, id)
+    const moved = busy ? null : renameCompanyFolder(this.config.workspace, id, clean)
+    if (moved) recordFolderMove(this.config.workspace, before, moved)
+    if (moved) {
       h = new Hive(companyDir(this.config.workspace, id), id)
       this.hives.set(id, h)
     }
@@ -1796,6 +1808,9 @@ export class Engine {
       return { ok: false, message: '이 폴더에서 다른 작업이 실행 중이에요. 끝난 뒤에 되돌려 주세요.' }
     }
     const by = this.config.memberName || 'me'
+    // a company folder renamed after this run: point the checkpoint at where the files are now
+    const root = movedPath(this.config.workspace, rec.checkpoint.root)
+    if (root !== rec.checkpoint.root) rec.checkpoint = { ...rec.checkpoint, root }
     const r = await rollback(this.hive, rec.checkpoint, this.excludesFor(rec.checkpoint.root))
     if (!r.ok) return { ok: false, message: r.message }
     this.hive.addRun({ ...rec, rolledBackAt: new Date().toISOString() })

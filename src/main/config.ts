@@ -25,8 +25,9 @@ export function loadConfig(file: string, home: string): AppConfig {
     if (existsSync(file)) {
       const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<AppConfig>
       const cfg = { ...base, ...raw, agents: raw.agents ?? [] }
-      // before v4 one switch looked like it controlled everything: keep what the person saw
-      if (raw.autoRunOrg === undefined && raw.autoRun !== undefined) cfg.autoRunOrg = !!raw.autoRun
+      // before v4 the single switch only covered the person's own tasks; delegated work always moved on.
+      // Keep that behaviour on upgrade, or every delegation would silently stop.
+      if (raw.autoRunOrg === undefined) cfg.autoRunOrg = true
       return cfg
     }
   } catch {
