@@ -465,6 +465,8 @@ export interface LiveSummary {
   tracking: TrackMode
   /** Last thing the agent did, for the card. */
   last?: string
+  /** What kind of thing that was (the speech bubble of the work-status view is made from it). */
+  lastKind?: ActivityKind
 }
 
 /** Everything the detail panel shows for a running task. */

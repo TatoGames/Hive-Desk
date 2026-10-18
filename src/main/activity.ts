@@ -368,6 +368,7 @@ export function createParser(kind: StreamKind, now: () => Date = () => new Date(
 
 /** The numbers and lists the UI shows while a task runs. One per run, lives in memory. */
 export class LiveRun {
+  private lastKind?: ActivityKind
   private events: ActivityEvent[] = []
   private dropped = 0
   private diff: RunDiff = { available: true, files: [], patch: '', truncated: false }
@@ -398,7 +399,10 @@ export class LiveRun {
       this.events = this.events.slice(-1000)
     }
     const last = [...evs].reverse().find((e) => e.kind !== 'plan')
-    if (last) this.lastText = last.text
+    if (last) {
+      this.lastText = last.text
+      this.lastKind = last.kind
+    }
   }
 
   setDiff(d: RunDiff): void {
@@ -423,7 +427,8 @@ export class LiveRun {
       del: files.reduce((n, f) => n + f.deletions, 0),
       plan: this.plan,
       tracking: this.tracking,
-      last: this.lastText
+      last: this.lastText,
+      ...(this.lastKind ? { lastKind: this.lastKind } : {})
     }
   }
 
