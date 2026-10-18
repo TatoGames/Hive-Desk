@@ -80,7 +80,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
-import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree } from './worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree, type GitState } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
@@ -1305,6 +1305,44 @@ export class Engine {
     if (!wt) return
     this.hive.updateTask(id, { worktree: wt })
     this.hive.addEvent(id, 'status', 'system', `별도 작업 폴더에서 실행해요 (브랜치 ${wt.branch}). 다른 하위 작업과 동시에 돌 수 있어요.`)
+  }
+
+  /** v0.6.1: what git state a folder is in (for the start screen). */
+  folderGit(dir: string): Promise<GitState> {
+    return gitState(dir)
+  }
+
+  /** The person agreed: make a folder a git folder (see initGitFolder). */
+  initFolderGit(dir: string): Promise<{ ok: boolean; message: string }> {
+    return initGitFolder(dir)
+  }
+
+  /**
+   * The first task from the start screen: in the folder the person picked (a project is made for it, or the
+   * existing project of that folder is used), or in the company folder when none is picked.
+   */
+  startFirstTask(text: string, folder?: string): { ok: boolean; id?: string; dir: string; warning?: string } {
+    const clean = text.trim()
+    let projectId: string | undefined
+    let dir = this.hive.ensureWorkspace()
+    if (folder && existsSync(folder)) {
+      const want = normPath(folder)
+      const paths = this.hive.projectPaths()
+      const known = this.hive.listProjects().find((p) => paths[p.id] && normPath(paths[p.id]) === want)
+      if (known) projectId = known.id
+      else {
+        const p = this.hive.saveProject({ name: basename(folder) || '내 프로젝트', folderName: basename(folder), createdBy: this.config.memberName || 'me' })
+        const r = this.setProjectPath(p.id, folder)
+        if (!r.ok) {
+          this.hive.deleteProject(p.id)
+          return { ok: false, dir: folder, warning: r.warning }
+        }
+        projectId = p.id
+      }
+      dir = folder
+    }
+    const t = this.createTask({ title: clean.split(/[.\n]/)[0].slice(0, 60), description: clean, ...(projectId ? { projectId } : {}) })
+    return { ok: true, id: t.id, dir }
   }
 
   /** Why this task cannot run next to others in its folder, and what the person can do about it. */
