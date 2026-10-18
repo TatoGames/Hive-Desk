@@ -65,7 +65,7 @@ function scripted(s: Script): Runner {
 /** A small company: COO — 개발본부장 — 서버팀(팀장, 개발자 ×2, 리뷰어), 인프라팀(팀장). */
 function company(s: Script) {
   const eng = new Engine(join(dir, 'config.json'), () => {}, scripted(s), dir)
-  eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), humanReview: 'changes' })
+  eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), humanReview: 'changes', review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
   eng.watchMs = 20
   eng.applyTemplate('blank', '테스트 회사', false)
   const exec = eng.saveUnit({ name: '경영진', kind: '경영' })
@@ -108,6 +108,12 @@ async function settle(eng: Engine, max = 400): Promise<void> {
     const after = JSON.stringify(eng.hive.listTasks().map((t) => [t.id, t.status, t.kind, t.assignee]))
     idle = before === after && !eng.snapshot().running.length ? idle + 1 : 0
   }
+}
+
+/** Start the next company from nothing (the same names would otherwise be hired as "name 2"). */
+const fresh = (): void => {
+  rmSync(join(dir, 'config.json'), { force: true })
+  rmSync(join(dir, 'ws'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 }
 
 const task = (eng: Engine, id: string): Task => eng.hive.getTask(id)!
@@ -183,7 +189,7 @@ describe('entry: who receives the job', () => {
 
   it('without a COO, an unassigned job is refused and nothing is left behind', () => {
     const eng = new Engine(join(dir, 'c2.json'), () => {}, scripted(makeScript()), dir)
-    eng.saveSettings({ memberName: 'a', workspace: join(dir, 'ws2') })
+    eng.saveSettings({ memberName: 'a', workspace: join(dir, 'ws2'), review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
     eng.applyTemplate('blank', 'x', false)
     expect(() => eng.createTask({ title: 'X', delegate: true })).toThrow('총괄 본부장')
     expect(eng.hive.listTasks()).toEqual([])
@@ -457,12 +463,14 @@ describe('plan problems', () => {
     await settle(eng)
     expect(events(eng, t.id).some((e) => e.includes(`최대 ${LIMITS.maxSubtasks}개`))).toBe(true)
     eng.shutdown()
+    fresh()
 
     const { eng: e2, ids: i2 } = company(makeScript({ plan: () => '[[SUBTASK: a | assignee=alice-dev1 | done=x | after=2]]\n[[SUBTASK: b | assignee=alice-dev2 | done=x | after=none]]' }))
     const t2 = e2.createTask({ title: 'Y', assignee: i2.srv, delegate: true })
     await settle(e2)
     expect(events(e2, t2.id).some((e) => e.includes('뒤'))).toBe(true)
     e2.shutdown()
+    fresh()
 
     const { eng: e3, ids: i3 } = company(makeScript({ plan: () => '[[SUBTASK: a | assignee=alice-ops | done=x | after=none]]' }))
     const t3 = e3.createTask({ title: 'Z', assignee: i3.hq, delegate: true })
@@ -574,7 +582,7 @@ describe('cross review', () => {
   it('with nobody on another model, the review is skipped (and the task still finishes)', async () => {
     const s = makeScript()
     const eng = new Engine(join(dir, 'c3.json'), () => {}, scripted(s), dir)
-    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws3') })
+    eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws3'), review: { checks: true, appCheck: true, policy: 'always', maxRounds: 2 } })
     eng.watchMs = 20
     const w = join(dir, 'solo')
     mkdirSync(w)

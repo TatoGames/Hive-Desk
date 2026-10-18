@@ -28,6 +28,8 @@ import type {
   Task
 } from '../shared/types'
 import { rootOf, subtree } from '../shared/tree'
+import { canSkipReview, checksFailNote, checksForReviewer, checksLine, reviewRisk } from '../shared/review'
+import { DEFAULT_REVIEW, type ReviewSettings } from '../shared/types'
 import type { Hive } from './hive'
 
 export interface DelegationCtx {
@@ -46,7 +48,15 @@ export interface DelegationCtx {
   aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
   /** What the company's external connections make possible (GitHub, web reading). */
   capabilities?: () => { github: boolean; web: boolean }
+  /** v5.1: the app's own checks and when an AI review is needed. */
+  reviewSettings?: () => ReviewSettings
 }
+
+/** Who sent work back when it was the app's own checks (not a reviewer). */
+const CHECKS_BY = 'checks'
+
+/** Two check outputs say the same thing (timings and counts aside). */
+const sameOutput = (a: string, b: string): boolean => a.replace(/\d+/g, '#') === b.replace(/\d+/g, '#')
 
 const MANAGER_JOBS = ['lead', 'coo']
 const isManagerJob = (j?: string): boolean => !!j && MANAGER_JOBS.includes(j)
@@ -318,8 +328,11 @@ export class Delegation {
       lines.push(...run.files.slice(0, 30).map((f) => `- ${f.status} ${f.path}`))
       if (run.patch) lines.push('```diff', run.patch.slice(0, 12000), '```')
     }
+    lines.push(...checksForReviewer(target.checks))
     lines.push(
-      'Inspect the files in the work folder yourself (read only — do not change anything). Be strict but fair.',
+      run?.patch
+        ? 'Judge from the report and the diff above; open other files in the work folder only when the diff is not enough (read only — do not change anything). Be strict but fair.'
+        : 'Inspect the changed files in the work folder yourself (read only — do not change anything). Be strict but fair.',
       'Answer with exactly one verdict line: [[VERDICT: pass]] or [[VERDICT: changes: the concrete things to fix]].'
     )
     return lines
@@ -803,11 +816,33 @@ export class Delegation {
     this.event(t.id, `계획 반려 (${by}): ${reason}`)
   }
 
+  private settings(): ReviewSettings {
+    return { ...DEFAULT_REVIEW, ...(this.c.reviewSettings?.() ?? {}) }
+  }
+
   private afterWork(w: Task): void {
     const h = this.c.hive
     if (w.reviewState?.status === 'pending') return
-    const reviewer = this.pickReviewer(w.assignee)
     const prev = w.reviewState
+    const s = this.settings()
+    // v5.1: the app's own checks failed — back to the worker with the output, no AI review spent
+    // the very same failure again after a send-back: probably not this work's fault (a test that was already broken) — a reviewer judges
+    const failNote = w.checks && !w.checks.ok ? checksFailNote(w.checks) : ''
+    const sameAgain = !!failNote && prev?.status === 'changes' && prev.by === CHECKS_BY && !!prev.note && sameOutput(prev.note, failNote)
+    if (failNote && !sameAgain) return this.handleChanges(w, failNote, '자동 검사', CHECKS_BY)
+    if (sameAgain) this.event(w.id, '고친 뒤에도 자동 검사가 똑같이 실패해요. 원래 있던 문제일 수 있어서 검토자가 판단해요.')
+    // small, safe and checked: no AI review needed (not after a reviewer sent it back — that reviewer confirms the fix)
+    const run = this.lastRun(w.id)
+    const risk = reviewRisk({ files: run?.files ?? [], lines: run?.diffStat.available })
+    const reviewerAsked = prev?.status === 'changes' && prev.by !== CHECKS_BY
+    if (!reviewerAsked && !sameAgain && canSkipReview(s.policy, risk, w.checks)) {
+      const why = `${risk.why}${w.checks ? ' · ' + checksLine(w.checks) : ''}`
+      h.updateTask(w.id, { reviewState: { status: 'skipped', round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, note: `AI 검토 생략: ${why}` } })
+      this.event(w.id, `위험이 낮아서 AI 검토를 생략했어요 (${why}).`)
+      this.c.aptitude(w.assignee, w.id, { approved: 1 })
+      return void this.rollUp(w)
+    }
+    const reviewer = this.pickReviewer(w.assignee)
     if (!reviewer) {
       h.updateTask(w.id, { reviewState: { status: 'skipped', round: prev?.round ?? 0, escalations: prev?.escalations ?? 0, note: '다른 모델의 검토자가 없어서 검토 없이 끝냈어요.' } })
       this.event(w.id, '다른 모델의 검토자를 찾지 못해 교차 검토를 건너뛰었어요 (회사 탭에서 검토자 자리에 다른 모델 에이전트를 두세요).')
@@ -876,21 +911,22 @@ export class Delegation {
   }
 
   /** The reviewer wants changes: back to the worker, then up to the lead, then to the board. */
-  private handleChanges(w: Task, note: string, reviewerName: string): void {
+  private handleChanges(w: Task, note: string, reviewerName: string, by?: string): void {
     const h = this.c.hive
     const st = w.reviewState ?? { status: 'pending' as const, round: 0, escalations: 0 }
     this.c.aptitude(w.assignee, w.id, { changes: 1 })
     const round = st.round + 1
+    const maxRounds = Math.min(3, Math.max(1, this.settings().maxRounds || LIMITS.rejectLimit))
     // a quick job sent back twice goes one tier up instead of to a lead
     if (w.quick && !w.parentId && round >= 2 && this.c.quickEscalate?.(w, `검토에서 ${round}번 반려됐어요: ${note}`)) return
-    if (round <= LIMITS.rejectLimit) {
+    if (round <= maxRounds) {
       h.updateTask(w.id, {
         status: 'todo',
         auto: true,
-        reply: `교차 검토(${reviewerName})에서 수정을 요청했어요 (${round}/${LIMITS.rejectLimit}):\n${note}`,
-        reviewState: { status: 'changes', round, escalations: st.escalations, by: st.by, note }
+        reply: by === CHECKS_BY ? `${note}\n(${round}/${maxRounds})` : `교차 검토(${reviewerName})에서 수정을 요청했어요 (${round}/${maxRounds}):\n${note}`,
+        reviewState: { status: 'changes', round, escalations: st.escalations, by: by ?? st.by, note }
       })
-      this.event(w.id, `수정 요청 ${round}/${LIMITS.rejectLimit} (${reviewerName}): ${note}`)
+      this.event(w.id, `수정 요청 ${round}/${maxRounds} (${reviewerName}): ${note.split('\n')[0]}`)
       return
     }
     const lead = st.escalations === 0 && w.assignee ? this.superiorOf(w.assignee) : null
@@ -899,10 +935,10 @@ export class Delegation {
         assignee: lead,
         status: 'todo',
         auto: true,
-        reply: `이 작업은 담당자가 ${LIMITS.rejectLimit}번 반려돼서 당신에게 올라왔어요. 검토 의견:\n${note}\n직접 고쳐서 끝내 주세요.`,
+        reply: `이 작업은 담당자가 ${maxRounds}번 반려돼서 당신에게 올라왔어요. 검토 의견:\n${note}\n직접 고쳐서 끝내 주세요.`,
         reviewState: { status: 'changes', round: 0, escalations: 1, by: st.by, note }
       })
-      this.event(w.id, `반려가 ${LIMITS.rejectLimit}번 반복돼서 ${this.rosterOf(lead)?.name ?? lead}(윗 직책)에게 올렸어요.`)
+      this.event(w.id, `반려가 ${maxRounds}번 반복돼서 ${this.rosterOf(lead)?.name ?? lead}(윗 직책)에게 올렸어요.`)
       this.c.notify('작업이 윗 직책으로 올라갔어요', w.title)
       return
     }

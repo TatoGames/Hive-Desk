@@ -84,11 +84,14 @@ import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './wo
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
-import { DEFAULT_HANDOFF } from '../shared/types'
+import { DEFAULT_HANDOFF, DEFAULT_REVIEW, type ReviewSettings } from '../shared/types'
 import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
+import { runChecks } from './checks'
+import { checksLine } from '../shared/review'
+import { freeName, summarize, type TeamMember, type TeamSummary, type TeamTemplate } from '../shared/team'
 import { domainOf, type ExtAccess, type ExtConnection, type ExtKind } from '../shared/external'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, movedPath, readMeta, recordFolderMove, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
@@ -191,7 +194,8 @@ export class Engine {
       cancelTree: (rootId) => void self.cancelTask(rootId, { scope: 'tree' }),
       aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d),
       quickEscalate: (t, why) => self.quick.escalate(t, why),
-      capabilities: () => self.external.capabilities(self.github.status())
+      capabilities: () => self.external.capabilities(self.github.status()),
+      reviewSettings: () => self.reviewSettings()
     })
     this.external = new External({
       get hive(): Hive {
@@ -857,6 +861,113 @@ export class Engine {
     return n
   }
 
+  // ---- v0.6: teams set up in one go ----
+
+  /** A ready team in one click: the org chart of a template, and every seat filled with a connected AI. */
+  quickTeam(templateId: string): { seats: number; hired: number; missing: number } {
+    const usable = this.machine.modelAgents().filter((x) => this.modelAgentStatus(x).status !== 'unavailable')
+    if (!usable.length) throw new Error('연결된 AI가 없어요. 먼저 AI 연결에서 Claude·Codex·Antigravity 중 하나를 로그인하고 연결 확인을 눌러 주세요.')
+    const name = this.hive.getCompany()?.name || this.companyName(this.hive.id)
+    this.applyTemplate(templateId, name, true)
+    const hired = this.autoConnectApply()
+    const seats = this.hive.listSeats().length
+    return { seats, hired, missing: this.hive.listSeats().filter((x) => !x.agentId).length }
+  }
+
+  listTeams(): TeamSummary[] {
+    return this.machine.teamTemplates().map(summarize)
+  }
+
+  /** Save this company's org chart and employees as a team to set up again elsewhere. */
+  saveTeam(name: string): TeamSummary {
+    const company = this.hive.getCompany()
+    if (!company) throw new Error('먼저 회사 조직을 만들어 주세요.')
+    const clean = name.trim() || company.name
+    const agents = this.agentsOf(this.hive.id)
+    const seats = this.hive.listSeats()
+    const members: TeamMember[] = agents.map((a) => ({
+      name: a.name,
+      adapter: a.adapter,
+      role: a.role,
+      extraArgs: a.extraArgs,
+      dailyRunLimit: a.dailyRunLimit,
+      dailyMinuteLimit: a.dailyMinuteLimit,
+      timeoutMinutes: a.timeoutMinutes,
+      requireApproval: a.requireApproval,
+      ...(a.job ? { job: a.job } : {}),
+      ...(a.modelRef ? { modelRef: a.modelRef } : {}),
+      ...(a.permission ? { permission: a.permission } : {}),
+      ...(a.command ? { command: a.command } : {}),
+      ...(seats.find((x) => x.agentId === a.id) ? { seat: seats.find((x) => x.agentId === a.id)!.id } : {})
+    }))
+    const t: TeamTemplate = {
+      id: newId(),
+      name: clean,
+      savedAt: new Date().toISOString(),
+      from: this.companyName(this.hive.id),
+      company: { templateId: company.templateId, ranks: company.ranks, rules: company.rules, bigJobRuns: company.bigJobRuns },
+      units: this.hive.listUnits(),
+      seats: seats.map(({ agentId: _drop, ...rest }) => rest),
+      members
+    }
+    // the same name again replaces the older one
+    this.machine.saveTeamTemplates([...this.machine.teamTemplates().filter((x) => x.name !== clean), t])
+    this.changed()
+    return summarize(t)
+  }
+
+  deleteTeam(id: string): void {
+    this.machine.saveTeamTemplates(this.machine.teamTemplates().filter((x) => x.id !== id))
+    this.changed()
+  }
+
+  /**
+   * Set a saved team up in the company on screen: its org chart replaces the current one, and its employees are
+   * hired again on their seats (models this computer cannot use are left out and reported).
+   */
+  applyTeam(id: string): { hired: number; skipped: string[] } {
+    const t = this.machine.teamTemplates().find((x) => x.id === id)
+    if (!t) throw new Error('없는 팀이에요.')
+    const name = this.hive.getCompany()?.name || this.companyName(this.hive.id)
+    this.hive.clearOrg()
+    this.hive.saveCompany({ ...t.company, name, createdAt: new Date().toISOString() })
+    const unitIds = new Map(t.units.map((u) => [u.id, newId()]))
+    for (const u of t.units) this.hive.saveUnit({ ...u, id: unitIds.get(u.id)!, parentId: u.parentId ? unitIds.get(u.parentId) ?? null : null })
+    const seatIds = new Map(t.seats.map((x) => [x.id, newId()]))
+    for (const x of t.seats) this.hive.saveSeat({ ...x, id: seatIds.get(x.id)!, unitId: unitIds.get(x.unitId) ?? x.unitId })
+    // agents that pointed at the old org lose the link
+    this.config = { ...this.config, agents: this.config.agents.map((a) => (this.companyOf(a) === this.hive.id ? { ...a, unitId: undefined, rankId: undefined } : a)) }
+    saveConfig(this.configFile, this.config)
+    const skipped: string[] = []
+    let hired = 0
+    for (const m of t.members) {
+      const { seat, ...rest } = m
+      const ma = m.modelRef ? this.machine.modelAgents().find((x) => x.modelId === m.modelRef!.id) : undefined
+      if (m.modelRef && (!this.catalogOf(m.modelRef.id) || (ma && this.modelAgentStatus(ma).status === 'unavailable'))) {
+        skipped.push(`${m.name} (이 컴퓨터에서 쓸 수 없는 모델)`)
+        continue
+      }
+      const a = this.saveAgent({ ...rest, workDir: '' })
+      hired++
+      const sid = seat ? seatIds.get(seat) : undefined
+      if (sid) this.assignSeat(sid, a.id)
+    }
+    this.publishRoster()
+    this.changed()
+    return { hired, skipped }
+  }
+
+  /** Copy employees of another company into the one on screen (same settings, no seat). */
+  copyAgents(fromCompanyId: string, ids: string[]): number {
+    let n = 0
+    for (const a of this.agentsOf(fromCompanyId).filter((x) => ids.includes(x.id))) {
+      const { id: _id, companyId: _c, unitId: _u, rankId: _r, ...rest } = a
+      this.saveAgent({ ...rest, workDir: '' })
+      n++
+    }
+    return n
+  }
+
   /** Put a model on a seat by dragging it there: hire from the model agent and sit down (replacing nobody's data). */
   hireToSeat(seatId: string, modelAgentId: string): Agent {
     return this.hire({ modelAgentId, seatId })
@@ -896,6 +1007,12 @@ export class Engine {
     }
     const prev = existingId ? this.config.agents.find((a) => a.id === existingId) : undefined
     const company = input.companyId ?? (prev ? this.companyOf(prev) : this.hive.id)
+    // a new employee whose name is taken gets "name 2" — it never replaces the one already there
+    if (!prev) {
+      const idOf = (name: string): string => makeAgent(this.config.memberName, { ...input, name, companyId: company }, this.idTag(company)).id
+      const name = freeName(input.name, (n) => this.config.agents.some((a) => a.id === idOf(n)))
+      if (name !== input.name.trim()) input = { ...input, name }
+    }
     const next = makeAgent(this.config.memberName, { ...input, companyId: company }, this.idTag(company))
     const agents = this.config.agents.filter((a) => a.id !== (existingId ?? next.id))
     agents.push(next)
@@ -1049,6 +1166,36 @@ export class Engine {
     next.grant()
   }
 
+  reviewSettings(): ReviewSettings {
+    return { ...DEFAULT_REVIEW, ...(this.config.review ?? {}) }
+  }
+
+  /** v5.1: run the project's own checks (and start an Electron app) on what a work run changed. */
+  private async checkWork(agent: Agent, id: string): Promise<void> {
+    const s = this.reviewSettings()
+    const runs = this.hive.listSharedRuns(id)
+    const run = runs[runs.length - 1]
+    // after a send-back by the checks they run again even when nothing changed (the failure must not slip through)
+    const recheck = this.hive.getTask(id)?.reviewState?.by === 'checks'
+    if (!s.checks || !run || (!run.files.length && !recheck)) {
+      if (this.hive.getTask(id)?.checks) this.hive.updateTask(id, { checks: undefined })
+      return
+    }
+    const dir = this.cwdFor(agent, id)
+    this.hive.addEvent(id, 'status', 'system', '자동 검사를 돌려요 (테스트·타입 검사 등 — AI를 쓰지 않아요).')
+    this.changed()
+    const checks = await runChecks(dir, {
+      app: s.appCheck,
+      shotDir: join(this.hive.root, '.local', 'checks'),
+      shotName: `${id}-${Date.now()}`,
+      env: cleanEnv(process.env, this.config.stripApiKeys)
+    }).catch((e) => ({ at: new Date().toISOString(), ok: true, items: [{ name: 'checks', cmd: '', ok: true, ms: 0, tail: '', skipped: (e as Error).message }] }))
+    if (!this.hive.getTask(id)) return
+    this.hive.updateTask(id, { checks })
+    const line = checksLine(checks)
+    if (line) this.hive.addEvent(id, 'status', 'system', line)
+  }
+
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
@@ -1119,6 +1266,8 @@ export class Engine {
       if (finished?.kind === 'work' && finished.worktree && !finished.worktree.merged) await commitWorktree(finished.worktree, finished.title).catch(() => false)
       if (finished?.github?.branch) await this.github.commit(id)
       if (finished?.status === 'done' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
+      // v5.1: the app checks the work itself before any AI review (still inside the folder lock)
+      if (!ac.signal.aborted && finished?.kind === 'work' && finished.status === 'done') await this.checkWork(agent, id)
       // delegation: what a plan / review / work run produced decides what happens next
       if (!ac.signal.aborted) {
         this.delegation.onRunFinished(id)

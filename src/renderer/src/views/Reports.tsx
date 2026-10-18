@@ -1,3 +1,4 @@
+import { Hint, Term } from './Help'
 import { useState } from 'react'
 import type { FinalReport, ReportNode, Snapshot } from '@shared/types'
 import { finalReportMarkdown } from '@shared/delegation'
@@ -95,6 +96,7 @@ export default function Reports({ snap }: { snap: Snapshot }): JSX.Element {
           <button className={tab === 'task' ? 'on' : ''} onClick={() => setTab('task')}>업무 보고서</button>
         </div>
       </header>
+      <Hint id="reports">큰 일(<Term k="묶음" />)이 끝나면 관리자가 쓴 최종 보고서가 여기 와요. 한 일, 확인한 것, 남은 위험을 읽고 마무리해 주세요.</Hint>
       {tab === 'task' && <TaskReports snap={snap} />}
       {tab === 'final' && <p className="muted small">조직이 끝낸 큰 일의 최종 보고서예요. 확인하면 완료, 고칠 점을 적으면 다시 통합해요.</p>}
       {tab === 'final' && !finals.length && <div className="panel empty">아직 보고서가 없어요.</div>}

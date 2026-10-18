@@ -178,6 +178,10 @@ export default function TaskDetail({
 
         {history && <TimeRow task={task} history={history} />}
 
+        {!running && (task.status === 'done' || task.status === 'needs_review' || task.status === 'failed') && (
+          <ResultCard task={task} record={record} cwd={cwd} />
+        )}
+
         {task.status === 'needs_input' && (
           <>
             <h2 className="sec">에이전트가 기다리고 있어요</h2>
@@ -257,6 +261,7 @@ export default function TaskDetail({
         <UrlAttach task={task} />
         {snap && <TaskExternal snap={snap} task={task} />}
         <HandoffPanel snap={snap} task={task} />
+        <ChecksPanel task={task} />
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>
@@ -371,6 +376,65 @@ function TimeRow({ task, history }: { task: Task; history: TaskHistory }): JSX.E
   )
 }
 
+/** v0.6: the result in one card — what was done, how to check it, what the app checked, and the way back. */
+function ResultCard({ task, record, cwd }: { task: Task; record: RunRecord | null; cwd: string }): JSX.Element {
+  const ok = task.status !== 'failed'
+  const files = record?.diff.available ? record.diff.files : []
+  const c = task.checks
+  const ran = c?.items.filter((i) => !i.skipped) ?? []
+  const shot = c?.items.find((i) => i.screenshot)?.screenshot
+  return (
+    <section className={'result-card ' + (ok ? 'ok' : 'bad')}>
+      <div className="row between">
+        <h2>{task.status === 'failed' ? '❌ 실패했어요' : task.status === 'needs_review' ? '👀 확인을 기다려요' : '✅ 끝났어요'}</h2>
+        <div className="row">
+          <button className="sm" onClick={() => void window.hive.openPath(cwd)}>
+            결과 폴더 열기
+          </button>
+          {shot && (
+            <button className="sm" onClick={() => void window.hive.openPath(shot)}>
+              앱 화면 보기
+            </button>
+          )}
+        </div>
+      </div>
+      {task.status === 'failed' && task.error && <p className="warn-text">{task.error.split('\n')[0]}</p>}
+      {task.report?.did && (
+        <p>
+          <b>한 일</b> {task.report.did}
+        </p>
+      )}
+      {task.report?.verify && task.report.verify !== 'none' && (
+        <p>
+          <b>확인 방법</b> {task.report.verify}
+        </p>
+      )}
+      <div className="result-facts">
+        {!!files.length && <span>📄 바뀐 파일 {files.length}개</span>}
+        {!!ran.length && (
+          <span className={c!.ok ? 'ok-text' : 'warn-text'}>
+            {c!.ok ? '✓' : '✗'} 자동 검사 {ran.map((i) => CHECK_LABEL[i.name] ?? i.name).join('·')}
+          </span>
+        )}
+        {task.reviewState && (
+          <span>
+            🔎{' '}
+            {task.reviewState.status === 'passed'
+              ? `교차 검토 통과${task.reviewState.round ? ` (수정 ${task.reviewState.round}회)` : ''}`
+              : task.reviewState.status === 'skipped'
+                ? 'AI 검토 생략'
+                : task.reviewState.status === 'changes'
+                  ? '수정 요청 받음'
+                  : '검토 중'}
+          </span>
+        )}
+        {task.report?.risks && task.report.risks !== 'none' && <span className="warn-text">⚠ 남은 위험: {task.report.risks}</span>}
+      </div>
+      {record && <UndoBar task={task} record={record} />}
+    </section>
+  )
+}
+
 /** Undo a run: put the work folder back the way it was just before it. */
 function UndoBar({ task, record }: { task: Task; record: RunRecord }): JSX.Element | null {
   const [msg, setMsg] = useState('')
@@ -470,3 +534,34 @@ function RunBody({ record }: { record: RunRecord }): JSX.Element {
     </div>
   )
 }
+
+/** v5.1: what the app checked by itself after the work (tests, types, lint, the app on screen). */
+function ChecksPanel({ task }: { task: Task }): JSX.Element | null {
+  const c = task.checks
+  if (!c || !c.items.length) return null
+  return (
+    <>
+      <h2 className="sec">자동 검사 {c.ok ? '✅' : '❌'}</h2>
+      <div className="checks">
+        {c.items.map((i, k) => (
+          <details key={k} className={'check ' + (i.skipped ? 'skip' : i.ok ? 'ok' : 'bad')}>
+            <summary>
+              {i.skipped ? '⏭' : i.ok ? '✓' : '✗'} <b>{CHECK_LABEL[i.name] ?? i.name}</b> <span className="muted small">{i.cmd}</span>
+              {!i.skipped && <span className="muted small"> · {Math.max(1, Math.round(i.ms / 1000))}초</span>}
+              {i.skipped && <span className="muted small"> · {i.skipped}</span>}
+            </summary>
+            {i.tail.trim() && <pre className="out small-log">{i.tail.trim()}</pre>}
+            {i.screenshot && (
+              <button className="sm" onClick={() => void window.hive.openPath(i.screenshot!)}>
+                찍은 화면 보기
+              </button>
+            )}
+          </details>
+        ))}
+      </div>
+      {task.reviewState?.note && <p className="muted small">{task.reviewState.note}</p>}
+    </>
+  )
+}
+
+const CHECK_LABEL: Record<string, string> = { test: '테스트', typecheck: '타입 검사', lint: '린트', build: '빌드', app: '앱 실행', node: '패키지' }

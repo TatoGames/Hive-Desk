@@ -231,6 +231,8 @@ export interface Task {
   handoffs?: Handoff[]
   /** The last step saving point of the running (or last) run. */
   stepSave?: StepSave
+  /** v5.1: what the app checked by itself after the last work run (tests, types, lint, app start). */
+  checks?: CheckRun
   /** Waits for its connection's usage limit (set when the run hit it; cleared when it runs again). */
   limitWait?: { adapter: AdapterId; since: string }
   /** External connections this task may use (ids). Absent = whatever the employee may use. */
@@ -706,6 +708,43 @@ export interface HandoffSettings {
   rollbackStep: boolean
 }
 
+/** One check the app ran in the work folder (no AI, no tokens). */
+export interface CheckItem {
+  /** `test`, `typecheck`, `lint`, `build`, `app` (the app was started) */
+  name: string
+  /** The command line, or what was started. */
+  cmd: string
+  ok: boolean
+  ms: number
+  /** The end of what it printed (failures: the part that says why). */
+  tail: string
+  /** `app` check: a picture of the first window. */
+  screenshot?: string
+  /** Skipped (e.g. nothing to start the app with); not a failure. */
+  skipped?: string
+}
+
+export interface CheckRun {
+  at: string
+  ok: boolean
+  items: CheckItem[]
+}
+
+export type ReviewPolicy = 'risk' | 'always'
+
+export interface ReviewSettings {
+  /** Run the project's own checks before an AI looks at the work (default on). */
+  checks: boolean
+  /** Start an Electron app the work built and look at it (default on). */
+  appCheck: boolean
+  /** `risk` (default): small, safe changes that pass the checks need no AI review. `always`: every change is reviewed. */
+  policy: ReviewPolicy
+  /** How many times work goes back to the same worker before it moves up (1–3, default 2). */
+  maxRounds: number
+}
+
+export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2 }
+
 export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
 
 export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
@@ -753,6 +792,10 @@ export interface AppConfig {
   externalApprovalMinutes?: number
   /** v5: when a connection runs out of usage, another connection's employee carries the task on. */
   handoff?: HandoffSettings
+  /** v5.1: the app's own checks and when an AI review is needed. */
+  review?: ReviewSettings
+  /** v0.6: `basic` shows the everyday menus only; `advanced` (default for configs from before v0.6) shows everything. */
+  uiMode?: 'basic' | 'advanced'
   maxConcurrent: number
   syncIntervalMinutes: number
 }

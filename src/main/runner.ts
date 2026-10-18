@@ -14,6 +14,10 @@ import type {
   Task
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
+import { isLongCommand } from '../shared/review'
+
+/** How long an install / build / test command may stay silent before the idle timeout counts again. */
+const LONG_COMMAND_MS = 20 * 60_000
 import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type RunHandle, type Runner } from './adapters'
 import { createCheckpoint, stepCheckpoint } from './checkpoint'
 import { classifyFailure, failureMessage } from './failure'
@@ -203,6 +207,13 @@ export function buildPrompt(opts: {
     for (const r of roster) lines.push(`- ${r.id} (${r.role || r.adapter})`)
   }
   if (opts.extras?.length) lines.push(...opts.extras)
+  if (task.kind !== 'review' && task.kind !== 'plan') {
+    lines.push(
+      '',
+      '## Commands',
+      'Never start anything that keeps running (dev servers, watch modes, `npm start`, `electron .`): it would never end. When you finish, the app runs the project\'s tests, type check and lint itself, and starts an Electron app to look at it — so keep those scripts in package.json working.'
+    )
+  }
   lines.push(
     '',
     '## Reply protocol',
@@ -561,7 +572,13 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       if (hive.getTask(task.id)) hive.updateTask(task.id, { stepSave: save })
     })
   }
+  // v5.1: an install / build / test may stay silent for minutes — the run is not stuck meanwhile
+  let longUntil = 0
   const push = (evs: ActivityEvent[]): void => {
+    if (evs.length) {
+      const last = evs[evs.length - 1]
+      longUntil = last.kind === 'command' && isLongCommand(last.text.replace(/^명령:\s*/, '')) ? Date.now() + LONG_COMMAND_MS : 0
+    }
     live.add(evs)
     const plan = parser.plan()
     live.setPlan(plan)
@@ -587,7 +604,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     live.setPlan(parser.plan())
     // files changing means the agent is alive even if the CLI prints nothing
     const sig = d.files.map((f) => `${f.path}:${f.status}:${f.additions}:${f.deletions}`).join('|')
-    if (sig !== lastSig) {
+    if (sig !== lastSig || Date.now() < longUntil) {
       lastSig = sig
       touch?.()
     }
