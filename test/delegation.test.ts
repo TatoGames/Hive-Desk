@@ -822,6 +822,8 @@ describe('6-3: adjusting a running delegation', () => {
     const old = kids(eng, root.id).filter((k) => k.title === '둘째')
     expect(old.every((k) => k.status === 'cancelled' || k.status === 'todo' || k.status === 'delegated')).toBe(true)
     expect(task(eng, a.id).status).toBe('done')
+    // the new planning run is still going: let it finish, or its git process keeps the folder busy (Windows EBUSY)
+    for (let i = 0; i < 400 && eng.snapshot().running.length; i++) await new Promise((r) => setTimeout(r, 20))
     eng.shutdown()
   })
 })
