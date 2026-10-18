@@ -117,8 +117,10 @@ describe('6-2: the engine talks to a live run', () => {
     const log: string[] = []
     let finish: (() => void) | undefined
     let pausedNow = false
+    let n = 0
     const runner: Runner = (_b, o) =>
       new Promise((resolve) => {
+        n++
         const end = (): void => resolve({ code: 0, stdout: REPORT, stderr: '', timedOut: false, aborted: false })
         finish = end
         o.signal?.addEventListener('abort', () => resolve({ code: 1, stdout: '', stderr: '', timedOut: false, aborted: true }))
@@ -128,7 +130,7 @@ describe('6-2: the engine talks to a live run', () => {
           paused: () => pausedNow
         })
       })
-    return { runner, log, finish: () => finish?.() }
+    return { runner, log, finish: () => finish?.(), calls: () => n }
   }
   function make(runner: Runner) {
     const eng = new Engine(join(dir, 'config.json'), () => {}, runner, dir)
@@ -178,7 +180,8 @@ describe('6-2: the engine talks to a live run', () => {
     expect(lr.log).toEqual([])
     expect(eng.hive.getTask(t.id)!.instructions![0].state).toBe('queued')
     lr.finish()
-    await wait(200) // the queued instruction starts one more round
+    // the queued instruction starts one more round: wait until it really runs
+    for (let i = 0; i < 400 && lr.calls() < 2; i++) await wait(20)
     lr.finish()
     await p
     expect(eng.hive.getTask(t.id)!.instructions![0].state).not.toBe('queued')
@@ -227,7 +230,8 @@ describe('6-2: the engine talks to a live run', () => {
     const { eng, agent } = make(runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     const p = eng.runTask(t.id)
-    await wait(150)
+    // the run must really be in progress (slow Windows runners take longer than a fixed pause to get there)
+    for (let i = 0; i < 400 && calls < 1; i++) await wait(20)
     eng.addInstruction(t.id, '영어로 써줘', 'interrupt')
     await p
     expect(calls).toBe(2)
