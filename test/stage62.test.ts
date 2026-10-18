@@ -107,6 +107,10 @@ describe('6-2: live runs', () => {
 describe('6-2: the engine talks to a live run', () => {
   const REPORT = '[[DID: 했어요]]\n[[FILES: none]]\n[[VERIFY: 확인]]\n[[RISK: none]]\n[[NEXT: none]]'
   const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+  /** Slow CI machines (Windows) need longer than a fixed pause: wait until the run has handed out its handle, or give up after 5s. */
+  const started = async (lr: { log: string[]; runner: unknown }, eng: Engine, id: string): Promise<void> => {
+    for (let i = 0; i < 250 && !eng.hive.getTask(id)?.liveInput; i++) await wait(20)
+  }
 
   /** A runner that hands out a handle, records what is written to it and ends when told. */
   function liveRunner() {
@@ -141,7 +145,7 @@ describe('6-2: the engine talks to a live run', () => {
     const { eng, agent } = make(lr.runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     const p = eng.runTask(t.id)
-    await wait(80)
+    await started(lr, eng, t.id)
     expect(eng.hive.getTask(t.id)!.liveInput).toBe(true)
     eng.addInstruction(t.id, '표로 정리', 'live')
     expect(lr.log[0]).toContain('send:')
@@ -157,7 +161,7 @@ describe('6-2: the engine talks to a live run', () => {
     const { eng, agent } = make(lr.runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     const p = eng.runTask(t.id)
-    await wait(80)
+    await started(lr, eng, t.id)
     eng.addInstruction(t.id, '방향 바꿔', 'interrupt')
     expect(lr.log[0]).toMatch(/^interrupt:[\s\S]*방향 바꿔/)
     lr.finish()
@@ -169,7 +173,7 @@ describe('6-2: the engine talks to a live run', () => {
     const { eng, agent } = make(lr.runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     const p = eng.runTask(t.id)
-    await wait(80)
+    await started(lr, eng, t.id)
     eng.addInstruction(t.id, '나중에', 'after')
     expect(lr.log).toEqual([])
     expect(eng.hive.getTask(t.id)!.instructions![0].state).toBe('queued')
@@ -185,7 +189,7 @@ describe('6-2: the engine talks to a live run', () => {
     const { eng, agent } = make(lr.runner)
     const t = eng.createTask({ title: '긴 일', assignee: agent.id })
     const p = eng.runTask(t.id)
-    await wait(80)
+    await started(lr, eng, t.id)
     expect(eng.pauseTask(t.id)).toBe(true)
     expect(eng.hive.getTask(t.id)!.paused).toBe(true)
     eng.addInstruction(t.id, '이렇게 해', 'after') // while paused any instruction resumes the run

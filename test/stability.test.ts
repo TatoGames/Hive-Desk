@@ -264,7 +264,7 @@ describe('B2: one run per work folder', () => {
     expect(eng.snapshot().waiting).toEqual({})
     // the folder is free again afterwards, and a person can continue it
     eng.resumeTask(t2.id)
-    await new Promise((r) => setTimeout(r, 200))
+    for (let i = 0; i < 250 && eng.hive.getTask(t2.id)!.status !== 'done'; i++) await new Promise((r) => setTimeout(r, 20))
     expect(eng.hive.getTask(t2.id)!.status).toBe('done')
     eng.shutdown()
   })

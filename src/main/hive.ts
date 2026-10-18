@@ -473,14 +473,15 @@ export class Hive {
 
   // ---- shared memory (append-only entries: never conflicts in git) ----
   addMemory(author: string, text: string, kind: 'fixed' | 'recent' = 'recent'): MemoryEntry {
-    const e: MemoryEntry = { id: newId(), author, text: text.trim(), createdAt: now(), ...(kind === 'fixed' ? { kind } : {}) }
+    const e: MemoryEntry = { id: eventId(), author, text: text.trim(), createdAt: now(), ...(kind === 'fixed' ? { kind } : {}) }
     writeJson(this.p('memory', e.id + '.json'), e)
     return e
   }
 
   listMemory(limit = 200): MemoryEntry[] {
-    const all = listJson<MemoryEntry>(this.p('memory')).sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt)
+    const all = listJson<MemoryEntry>(this.p('memory')).sort(
+      // entries made in the same millisecond keep the order they were added in (their ids count up)
+      (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
     )
     return all.slice(-limit)
   }
