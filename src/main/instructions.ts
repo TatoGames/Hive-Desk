@@ -57,3 +57,20 @@ export function dropInstruction(hive: Hive, taskId: string, id: string): void {
 export function joinInstructions(list: Instruction[]): string {
   return list.map((x, k) => (list.length > 1 ? `${k + 1}. ` : '') + x.text).join('\n')
 }
+
+/** One instruction was written straight into a running conversation. */
+export function markSentOne(hive: Hive, taskId: string, id: string, runId: string): void {
+  change(hive, taskId, (i) => (i.id === id && i.state === 'queued' ? { ...i, state: 'sent', runId, stateAt: nowIso() } : null))
+}
+
+/** The CLI echoed a message back: the instructions it contains have been taken in. */
+export function markSeen(hive: Hive, taskId: string, runId: string, echoed: string): void {
+  change(hive, taskId, (i) =>
+    i.state === 'sent' && i.runId === runId && echoed.includes(i.text) ? { ...i, state: 'seen', stateAt: nowIso() } : null
+  )
+}
+
+/** The text that carries a live instruction into the conversation. */
+export function liveMessage(text: string): string {
+  return `[사람의 새 지시 — 지금 하던 일에 반영하세요]\n${text}\n\n먼저 [[ACK: 무엇을 바꾸는지 한 줄]]을 적고, 남은 [[PLAN]]을 고쳐 쓰세요. 이미 한 일이 이 지시와 어긋나면 되돌리거나 RISK에 적으세요.`
+}

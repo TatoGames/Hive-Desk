@@ -1,4 +1,4 @@
-import { applyAcks, joinInstructions, markSent, queuedOf, requeue } from './instructions'
+import { applyAcks, joinInstructions, markSeen, markSent, queuedOf, requeue } from './instructions'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
@@ -13,7 +13,7 @@ import type {
   Task
 } from '../shared/types'
 import { createParser, LiveRun } from './activity'
-import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type Runner } from './adapters'
+import { adapterAccess, buildCommand, cleanEnv, effectivePermission, type RunHandle, type Runner } from './adapters'
 import { createCheckpoint } from './checkpoint'
 import { classifyFailure, failureMessage } from './failure'
 import { detectLimit, type LimitInfo } from './limits'
@@ -264,6 +264,10 @@ export interface RunnerDeps {
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
   now?: () => Date
+  /** Claude runs keep their input open so instructions can reach them while they work (off = the old one-shot mode). */
+  live?: boolean
+  /** A live run started (handle) or ended (undefined). */
+  onHandle?: (taskId: string, handle: RunHandle | undefined, runId: string) => void
 }
 
 export type RunOutcome =
@@ -464,6 +468,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   try {
     built = buildCommand(agent, {
       stream: true,
+      live: deps.live !== false && !!deps.onHandle,
       permission: level,
       refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
       resumeSession,
@@ -550,6 +555,8 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       idleTimeoutMs: Math.max(1, agent.timeoutMinutes) * 60_000,
       timeoutMs: Math.max(1, task.maxMinutes ?? DEFAULT_MAX_MINUTES) * 60_000,
       onTouchReady: (t) => (touch = t),
+      onHandle: (h) => deps.onHandle?.(task.id, h, runId),
+      onReplay: (text) => markSeen(hive, task.id, runId, text),
       env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
       onOutput: (c) => {
         push(parser.push(c))
@@ -558,6 +565,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       signal: deps.signal
     })
   } finally {
+    deps.onHandle?.(task.id, undefined, runId)
     watching = false
     if (watchTimer) clearTimeout(watchTimer)
     staged.cleanup()

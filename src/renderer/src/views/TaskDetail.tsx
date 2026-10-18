@@ -100,6 +100,7 @@ export default function TaskDetail({
   const [record, setRecord] = useState<RunRecord | null>(null)
   const [live, setLive] = useState<LiveState | null>(null)
   const [extra, setExtra] = useState('')
+  const [mode, setMode] = useState<'live' | 'interrupt' | 'after'>('live')
   const running = task.status === 'running'
 
   // Reload whenever the task changes on disk (updatedAt moves on every status/result change).
@@ -252,26 +253,35 @@ export default function TaskDetail({
           <>
             <h2 className="sec">추가 지시</h2>
             <div className="row">
+              {running && task.liveInput && !task.paused && (
+                <select value={mode} onChange={(e) => setMode(e.target.value as 'live' | 'interrupt' | 'after')} title="지시를 언제 반영할지 고르세요">
+                  <option value="live">바로 반영</option>
+                  <option value="interrupt">즉시 끊고 반영</option>
+                  <option value="after">끝난 뒤 반영</option>
+                </select>
+              )}
               <input
                 className="grow"
-                placeholder={running ? '이번 실행이 끝난 뒤 반영돼요' : '다음 실행의 첫 입력으로 전달돼요'}
+                placeholder={task.paused ? '지시하고 이어서 (비워 두면 그냥 이어가요)' : running ? (task.liveInput ? '실행 중인 AI에게 바로 전달돼요' : '이번 실행이 끝난 뒤 반영돼요') : '다음 실행의 첫 입력으로 전달돼요'}
                 value={extra}
                 onChange={(e) => setExtra(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && extra.trim()) {
-                    void window.hive.addInstruction(task.id, extra)
+                    void window.hive.addInstruction(task.id, extra, running && task.liveInput ? mode : 'after')
                     setExtra('')
                   }
                 }}
               />
               <button
-                disabled={!extra.trim()}
+                disabled={!extra.trim() && !task.paused}
+                className={task.paused ? 'primary' : ''}
                 onClick={() => {
-                  void window.hive.addInstruction(task.id, extra)
+                  if (task.paused && !extra.trim()) void window.hive.resumeLive(task.id)
+                  else void window.hive.addInstruction(task.id, extra, running && task.liveInput ? mode : 'after')
                   setExtra('')
                 }}
               >
-                보내기
+                {task.paused ? '지시하고 이어서' : '보내기'}
               </button>
             </div>
             <InstructionList task={task} />

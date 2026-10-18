@@ -85,6 +85,8 @@ function registerIpc(): void {
   ipcMain.handle('task:cancel', (_e, id: string, opts: { scope: 'this' | 'tree' | 'pending'; files?: 'keep' | 'run' | 'task' }) => engine.cancelTask(id, opts))
   ipcMain.handle('task:cancel-preview', (_e, id: string, scope: 'this' | 'tree' | 'pending') => engine.cancelPreview(id, scope))
   ipcMain.handle('failure:resolve', (_e, id: string, choice: 'retry' | 'skip' | 'cancel-all') => engine.resolveFailure(id, choice))
+  ipcMain.handle('task:pause', (_e, id: string) => engine.pauseTask(id))
+  ipcMain.handle('task:resume-live', (_e, id: string, text?: string) => engine.resumeLive(id, text))
   ipcMain.handle('task:resume', (_e, id: string, instruction?: string) => engine.resumeTask(id, instruction))
   ipcMain.handle('input:classify', (_e, text: string) => classifyInput(text))
   ipcMain.handle('plan:edit-approve', (_e, approvalId: string, items: SubtaskSpec[], human?: number[], runCap?: number) => engine.editPlanApprove(approvalId, items, human ?? [], runCap))

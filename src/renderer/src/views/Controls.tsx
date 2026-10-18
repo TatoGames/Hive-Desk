@@ -32,6 +32,12 @@ export function TaskControls({ task, compact }: { task: Task; compact?: boolean 
             ⏸ 중지
           </button>
         )}
+        {task.paused && <span className="tag warn">일시 정지됨</span>}
+        {s === 'running' && task.liveInput && !task.paused && (
+          <button className={cls} onClick={() => void window.hive.pauseTask(task.id)} title="AI가 하던 단계를 멈추고, 지시를 적어 이어가요 (대화는 그대로 유지돼요)">
+            ⏯ 일시 정지
+          </button>
+        )}
         {s === 'held' && (
           <button className={cls + ' primary'} onClick={() => (compact ? void window.hive.resumeTask(task.id) : setResumeOpen(true))}>
             ▶ 이어서 하기

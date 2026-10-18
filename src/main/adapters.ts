@@ -110,6 +110,18 @@ export interface BuiltCommand {
   stream?: StreamKind
   /** The CLI continues an earlier session; the prompt is only the new message. */
   resumed?: boolean
+  /** Messages go in as stream-json lines and stdin stays open, so instructions can reach the run while it works. */
+  live?: boolean
+}
+
+/** What a caller can do to a run that is in progress (only runs started in live mode have one). */
+export interface RunHandle {
+  /** Write a new message into the running conversation. false = the run no longer takes input. */
+  send(text: string): boolean
+  /** Stop what the AI is doing right now but keep the process and the conversation. With `next`, it is sent as soon as the interrupt has landed; without, the run waits (paused). */
+  interrupt(next?: string): boolean
+  /** True while interrupted and waiting for a message. */
+  paused(): boolean
 }
 
 export interface BuildOptions {
@@ -124,6 +136,8 @@ export interface BuildOptions {
   effort?: 'low' | 'medium' | 'high'
   /** Let the file-reading tool open .env / key files (blocked by default). */
   allowSecrets?: boolean
+  /** Claude only: keep stdin open and take messages as stream-json (instructions during a run). */
+  live?: boolean
 }
 
 /** What HiveDesk can really enforce per CLI (the pre-run check shows this honestly). */
@@ -214,9 +228,14 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
   let resumed = false
 
   if (agent.adapter === 'claude') {
+    let live = false
     if (opts.stream) {
       args.push('--output-format', 'stream-json', '--verbose')
       stream = 'claude'
+      if (opts.live) {
+        args.push('--input-format', 'stream-json', '--replay-user-messages')
+        live = true
+      }
     }
     if (agent.model && spec.modelFlag) args.push(spec.modelFlag, agent.model)
     let extra = splitArgs(agent.extraArgs)
@@ -243,7 +262,7 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
       args.push('--resume', opts.resumeSession)
       resumed = true
     }
-    return { command, args, stream, resumed }
+    return { command, args, stream, resumed, live }
   }
 
   if (agent.adapter === 'codex') {
@@ -317,6 +336,10 @@ export interface RunOptions {
   env: NodeJS.ProcessEnv
   onOutput?: (chunk: string) => void
   signal?: AbortSignal
+  /** Live mode: called once with the handle that sends messages into the run. */
+  onHandle?: (h: RunHandle) => void
+  /** Live mode: the CLI echoed back a message we sent (it has been taken in). */
+  onReplay?: (text: string) => void
 }
 
 export interface RunResult {
@@ -349,6 +372,16 @@ export const runCli: Runner = (built, opts) =>
     let settled = false
     let idleTimer: NodeJS.Timeout | undefined
     let killTimer: NodeJS.Timeout | undefined
+    // live mode bookkeeping
+    const live = !!built.live
+    // a message injected mid-turn is folded into that turn, so results cannot be counted against messages: compare sent with echoed
+    let sentCount = 0
+    let echoCount = 0
+    let busy = false
+    let paused = false
+    let afterInterrupt: string | undefined
+    let interrupting = false
+    let lineBuf = ''
 
     const done = (r: Partial<RunResult>): void => {
       if (settled) return
@@ -416,7 +449,7 @@ export const runCli: Runner = (built, opts) =>
     }, opts.timeoutMs)
     // "Still alive" = it printed something or the caller saw files change; silence for too long ends the run.
     const touch = (): void => {
-      if (!opts.idleTimeoutMs || settled) return
+      if (!opts.idleTimeoutMs || settled || paused) return
       if (idleTimer) clearTimeout(idleTimer)
       idleTimer = setTimeout(() => {
         timedOut = true
@@ -432,11 +465,99 @@ export const runCli: Runner = (built, opts) =>
     }
     opts.signal?.addEventListener('abort', onAbort)
 
+    const writeUser = (text: string): boolean => {
+      const stdin = child.stdin
+      if (!stdin || stdin.destroyed || !stdin.writable || stdinEnded) return false
+      stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n')
+      sentCount++
+      busy = true
+      paused = false
+      touch()
+      return true
+    }
+    let stdinEnded = false
+    const endInput = (): void => {
+      if (stdinEnded) return
+      stdinEnded = true
+      try {
+        child.stdin?.end()
+      } catch {
+        /* already closed */
+      }
+    }
+    /** A line of the CLI's output in live mode: results decide whether more input may still come. */
+    const onLine = (line: string): void => {
+      let e: { type?: string; subtype?: string; isReplay?: boolean; message?: { content?: unknown } }
+      try {
+        e = JSON.parse(line)
+      } catch {
+        return
+      }
+      if (e.type === 'user' && e.isReplay) {
+        const c = e.message?.content
+        const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : '')).join('') : ''
+        if (text) opts.onReplay?.(text)
+        echoCount++
+      }
+      const landed = (): boolean => {
+        if (!interrupting) return false
+        interrupting = false
+        if (afterInterrupt !== undefined) {
+          const next = afterInterrupt
+          afterInterrupt = undefined
+          if (writeUser(next)) return true
+        }
+        paused = true
+        if (idleTimer) clearTimeout(idleTimer)
+        return true
+      }
+      if (e.type === 'result') {
+        // messages we wrote that the CLI has not echoed yet will start another turn
+        busy = sentCount > echoCount
+        if (landed()) return
+        if (!busy && !paused) endInput()
+      } else if (e.type === 'control_response' && !busy) {
+        // the turn had already ended when the interrupt arrived
+        landed()
+      }
+    }
+    if (live) {
+      opts.onHandle?.({
+        send: (text) => {
+          if (settled || interrupting) return false
+          return writeUser(text)
+        },
+        interrupt: (next) => {
+          const stdin = child.stdin
+          if (settled || stdinEnded || !stdin || !stdin.writable) return false
+          if (paused) {
+            // already waiting: just deliver the message
+            return next !== undefined ? writeUser(next) : true
+          }
+          if (!busy) return false
+          interrupting = true
+          afterInterrupt = next
+          stdin.write(JSON.stringify({ type: 'control_request', request_id: `i${Date.now()}`, request: { subtype: 'interrupt' } }) + '\n')
+          return true
+        },
+        paused: () => paused
+      })
+    }
+
     child.stdout?.on('data', (d: Buffer) => {
       const s = d.toString('utf8')
       stdout += s
       touch()
       opts.onOutput?.(s)
+      if (live) {
+        lineBuf += s
+        let nl
+        while ((nl = lineBuf.indexOf('\n')) >= 0) {
+          const line = lineBuf.slice(0, nl)
+          lineBuf = lineBuf.slice(nl + 1)
+          if (line.trim()) onLine(line)
+        }
+      }
     })
     child.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8')
@@ -463,7 +584,8 @@ export const runCli: Runner = (built, opts) =>
     child.stdin?.on('error', () => {
       /* EPIPE if the CLI exits before reading stdin */
     })
-    child.stdin?.end(built.promptArg && !win ? '' : opts.prompt)
+    if (live) writeUser(opts.prompt)
+    else child.stdin?.end(built.promptArg && !win ? '' : opts.prompt)
   })
 
 /** Is the CLI installed? (`<cmd> --version`) */

@@ -26,13 +26,13 @@ import type {
 } from '../shared/types'
 import { DEFAULT_AUTO_APPROVE } from '../shared/types'
 import type { LiveRun } from './activity'
-import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type Runner } from './adapters'
+import { ADAPTERS, adapterAccess, cleanEnv, effectivePermission, runCli, type RunHandle, type Runner } from './adapters'
 import { checkCli } from './setup'
 import { Committee } from './committee'
 import { Delegation } from './delegation'
 import { bundlesOf, isStale } from '../shared/bundles'
 import { rootOf, subtree, cancelTargets, type CancelPreview } from '../shared/tree'
-import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, queuedOf } from './instructions'
+import { addInstruction as addInstructionTo, dropInstruction as dropInstructionOf, liveMessage, markSentOne, queuedOf } from './instructions'
 import { Collaboration } from './collaboration'
 import { CollabStore } from './collab'
 import type { ChannelInput } from './collaboration'
@@ -1072,6 +1072,16 @@ export class Engine {
       defaultCwd: this.hive.ensureWorkspace(),
       machine: this.config.memberName,
       signal: ac.signal,
+      live: this.config.liveInstructions !== false,
+      onHandle: (taskId, h, runId) => {
+        if (h) {
+          this.handles.set(taskId, { h, runId })
+          this.hive.updateTask(taskId, { liveInput: true })
+        } else {
+          this.handles.delete(taskId)
+          if (this.hive.getTask(taskId)?.paused || this.hive.getTask(taskId)?.liveInput) this.hive.updateTask(taskId, { paused: false, liveInput: false })
+        }
+      },
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
@@ -1567,11 +1577,63 @@ export class Engine {
     if (this.localAgent(t.assignee)) void this.runTask(id)
   }
 
+  /** Live runs of this company's tasks: the way to talk to the AI while it works. */
+  private handles = new Map<string, { h: RunHandle; runId: string }>()
+
+  /** Stop the AI's current step but keep the conversation; it waits for the next message (resumeLive). */
+  pauseTask(id: string): boolean {
+    const x = this.handles.get(id)
+    if (!x || !x.h.interrupt()) return false
+    this.hive.updateTask(id, { paused: true })
+    this.hive.addEvent(id, 'status', this.config.memberName || 'me', '일시 정지 — AI가 하던 단계를 멈췄어요. 지시를 적어 이어가세요.')
+    this.changed()
+    return true
+  }
+
+  /** Continue a paused live run, optionally with a new instruction. */
+  resumeLive(id: string, text?: string): boolean {
+    const x = this.handles.get(id)
+    if (!x) return false
+    const by = this.config.memberName || 'me'
+    const body = text?.trim()
+    let ok: boolean
+    if (body) {
+      const i = addInstructionTo(this.hive, id, body, by, 'live')
+      if (!i) return false
+      ok = x.h.send(liveMessage(body))
+      if (ok) markSentOne(this.hive, id, i.id, x.runId)
+    } else ok = x.h.send('하던 일을 이어서 계속하세요.')
+    if (!ok) return false
+    this.hive.updateTask(id, { paused: false })
+    this.hive.addEvent(id, 'status', by, body ? `이어서 진행 · 새 지시: ${body}` : '이어서 진행')
+    this.changed()
+    return true
+  }
+
   /** Add an instruction: it is kept until an AI run has received it (whatever the earlier run ended with). */
   addInstruction(id: string, text: string, mode: InstructionMode = 'after'): void {
     const t = this.hive.getTask(id)
     if (!t) return
     const by = this.config.memberName || 'me'
+    const live = t.status === 'running' ? this.handles.get(id) : undefined
+    if (live && t.paused) {
+      this.resumeLive(id, text)
+      return
+    }
+    if (live && (mode === 'live' || mode === 'interrupt')) {
+      const i = addInstructionTo(this.hive, id, text, by, mode)
+      if (!i) return
+      const sent = mode === 'live' ? live.h.send(liveMessage(i.text)) : live.h.interrupt(liveMessage(i.text))
+      if (sent) {
+        markSentOne(this.hive, id, i.id, live.runId)
+        this.hive.addEvent(id, 'instruction', by, `${mode === 'live' ? '바로 전달' : '지금 하던 단계를 끊고 전달'}: ${i.text}`)
+        this.changed()
+        return
+      }
+      this.hive.addEvent(id, 'instruction', by, `바로 전달하지 못해 이번 실행이 끝난 뒤 반영해요: ${i.text}`)
+      this.changed()
+      return
+    }
     const i = addInstructionTo(this.hive, id, text, by, mode)
     if (!i) return
     this.hive.addEvent(

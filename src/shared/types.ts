@@ -197,6 +197,10 @@ export interface Task {
   /** A separate folder + branch this task works in (so tasks of one project can run at the same time). */
   worktree?: { path: string; branch: string; base: string; merged?: boolean }
   /** When the person last confirmed a stale bundle should go on. */
+  /** A live run is interrupted and waiting for the person's next message. */
+  paused?: boolean
+  /** The running AI takes messages right now (live mode). */
+  liveInput?: boolean
   staleOkAt?: string
   /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
   reportFile?: string
@@ -615,6 +619,8 @@ export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPer
 
 export interface AppConfig {
   /** Share of low-risk quick jobs given to a lighter model on trial (0..1). */
+  /** Keep Claude's input open so instructions reach a running task (default on; off = old one-shot mode). */
+  liveInstructions?: boolean
   quickTrialRate?: number
   /** Company priority for shared usage limits (highest first); companies not listed follow in creation order. */
   companyOrder?: string[]
