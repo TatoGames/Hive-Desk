@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
-import { gitState, initGitFolder, addWorktree } from '../src/main/worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree } from '../src/main/worktree'
+import { runChecks } from '../src/main/checks'
+import { lstatSync } from 'node:fs'
 
 let dir: string
 beforeEach(() => {
@@ -111,3 +113,28 @@ function setup2(eng: Engine, a: { id: string }) {
   const t = eng.createTask({ title: '하위', assignee: a.id })
   return { sub: eng.hive.updateTask(t.id, { kind: 'work', parentId: 'parent-x' }) }
 }
+
+describe('work trees share the project\'s installed packages (never saved, never deleted)', () => {
+  it('the link lets checks run in the work tree; the branch does not contain it; removing keeps the real packages', async () => {
+    const w = join(dir, 'proj')
+    mkdirSync(join(w, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(w, 'node_modules', 'dep', 'index.js'), 'module.exports = 1')
+    writeFileSync(join(w, 'package.json'), JSON.stringify({ scripts: { test: 'node t.js' } }))
+    writeFileSync(join(w, 't.js'), 'require("dep")')
+    writeFileSync(join(w, 't2.js'), '')
+    expect((await initGitFolder(w)).ok).toBe(true)
+    const wt = (await addWorktree(w, 'task1'))!
+    expect(lstatSync(join(wt.path, 'node_modules')).isSymbolicLink()).toBe(true)
+    // the tests of the work tree can use the packages (this is what the automatic check does)
+    const run = await runChecks(wt.path, { app: false, shotDir: dir, shotName: 'x' })
+    expect(run.items.map((i) => [i.name, i.ok, !!i.skipped])).toEqual([['test', true, false]])
+    writeFileSync(join(wt.path, 'new.txt'), 'n')
+    await commitWorktree(wt, '작업')
+    expect(git(w, 'ls-tree', '-r', '--name-only', wt.branch)).not.toContain('node_modules')
+    expect((await mergeWorktree(wt, '작업')).ok).toBe(true)
+    expect(git(w, 'status', '--porcelain').trim()).toBe('')
+    await removeWorktree(wt)
+    expect(existsSync(join(w, 'node_modules', 'dep', 'index.js'))).toBe(true)
+    expect(existsSync(wt.path)).toBe(false)
+  })
+})

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git } from './gitdiff'
 
@@ -102,7 +102,44 @@ export async function addWorktree(base: string, taskId: string, branch = `hive/$
     }
   }
   const r = await git(base, ['worktree', 'add', '-q', '-b', branch, path, 'HEAD'])
-  return r.ok ? { path, branch, base } : null
+  if (!r.ok) return null
+  await linkPackages(base, path)
+  return { path, branch, base }
+}
+
+/**
+ * The installed packages are not in git, so a work tree starts without them. Linking the project's own `node_modules`
+ * lets the tests / type check / app check run in the work tree too. The link is kept out of git (`/node_modules`
+ * in the shared exclude file), so it is never saved on the task's branch or merged into the project.
+ */
+async function linkPackages(base: string, path: string): Promise<void> {
+  const from = join(base, 'node_modules')
+  const to = join(path, 'node_modules')
+  try {
+    if (!existsSync(from) || existsSync(to) || !existsSync(join(base, 'package.json'))) return
+    const ex = await git(base, ['rev-parse', '--git-path', 'info/exclude'])
+    if (ex.ok) {
+      const f = join(base, ex.out.trim())
+      const cur = existsSync(f) ? readFileSync(f, 'utf8') : ''
+      if (!cur.split(/\r?\n/).includes('/node_modules')) appendFileSync(f, (cur && !cur.endsWith('\n') ? '\n' : '') + '/node_modules\n')
+    }
+    // a junction needs no special right on Windows
+    symlinkSync(from, to, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch {
+    /* without the link the checks of this task are skipped, nothing else changes */
+  }
+}
+
+/** Take the link away first, so removing the work tree can never reach into the project's real packages. */
+function unlinkPackages(path: string): void {
+  const link = join(path, 'node_modules')
+  try {
+    if (!lstatSync(link).isSymbolicLink()) return
+    if (process.platform === 'win32') rmdirSync(link)
+    else unlinkSync(link)
+  } catch {
+    /* nothing linked */
+  }
 }
 
 /** Save what the AI changed in the work tree on its branch (so it can be merged, and survives a crash). */
@@ -133,6 +170,7 @@ export async function mergeWorktree(wt: Worktree, title: string): Promise<MergeR
 }
 
 export async function removeWorktree(wt: Worktree): Promise<void> {
+  unlinkPackages(wt.path)
   await git(wt.base, ['worktree', 'remove', '--force', wt.path])
   await git(wt.base, ['branch', '-D', wt.branch])
 }
