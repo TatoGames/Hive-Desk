@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { ApprovalKind, Snapshot, SubtaskSpec } from '@shared/types'
+import type { Approval, ApprovalKind, Snapshot, SubtaskSpec } from '@shared/types'
 import { moveItem, removeItem } from '@shared/planedit'
 import { FLAG_LABEL } from '@shared/delegation'
 import { fmtTime } from '../store'
@@ -12,7 +12,9 @@ const KIND: Record<ApprovalKind, string> = {
   plan: '분배 계획',
   failure: '작업 실패',
   'bundle-cap': '실행 상한',
-  'stale-bundle': '오래된 묶음'
+  'stale-bundle': '오래된 묶음',
+  external: '외부 연결 · 실시간 결재',
+  github: 'GitHub'
 }
 
 const ACCESS = { read: '읽기만', edit: '파일 수정', exec: '명령 실행' } as const
@@ -74,7 +76,11 @@ export default function Approvals({ snap }: { snap: Snapshot }): JSX.Element {
               {agent(a.agentId)} · {fmtTime(a.createdAt)}
             </div>
             <p>{a.reason}</p>
-            {a.kind === 'plan' && t?.plan ? (
+            {a.kind === 'external' && a.external ? (
+              <ExternalBox approval={a} />
+            ) : a.kind === 'github' && a.github ? (
+              <GithubBox approval={a} />
+            ) : a.kind === 'plan' && t?.plan ? (
               <PlanBox snap={snap} id={a.id} task={t} />
             ) : a.kind === 'failure' ? (
               <div className="row">
@@ -252,6 +258,83 @@ function PlanBox({ snap, id, task }: { snap: Snapshot; id: string; task: Snapsho
         )}
         <button className="danger" disabled={!note.trim()} onClick={() => void window.hive.decideApproval(id, 'rejected', note)}>
           반려 (다시 계획)
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** A running AI waits for this answer: what it wants to send, where, and until when. */
+function ExternalBox({ approval }: { approval: Approval }): JSX.Element {
+  const x = approval.external!
+  const [edit, setEdit] = useState(x.input)
+  const [why, setWhy] = useState('')
+  const [always, setAlways] = useState(false)
+  const [err, setErr] = useState('')
+  const changed = edit.trim() !== x.input.trim()
+  const left = Math.max(0, Math.round((new Date(x.expiresAt).getTime() - Date.now()) / 60000))
+  const decide = async (d: 'approved' | 'rejected'): Promise<void> => {
+    setErr('')
+    try {
+      await window.hive.decideExternal(approval.id, d, d === 'approved' ? { edited: changed ? edit : undefined, always } : { note: why.trim() || undefined })
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+  return (
+    <div className="ext-req">
+      <div className="small">
+        <b>{x.connectionName}</b> · 도구 <code>{x.tool}</code> · {x.write ? <span className="tag warn">외부에 쓰기</span> : <span className="tag">읽기</span>} · 실행이 기다리는 중 (
+        {left}분 뒤 자동 거절)
+      </div>
+      {x.write && <div className="muted small">외부에 한 일은 HiveDesk의 되돌리기로 되돌릴 수 없어요. 보낼 내용을 확인하세요.</div>}
+      <label className="small">보낼 내용 (고치면 고친 대로 보내요)</label>
+      <textarea className="mono" rows={Math.min(14, Math.max(4, edit.split('\n').length))} value={edit} onChange={(e) => setEdit(e.target.value)} />
+      {x.site && (
+        <label className="small">
+          <input type="checkbox" checked={always} onChange={(e) => setAlways(e.target.checked)} /> {x.site} 항상 허용 (허용 사이트 목록에 추가)
+        </label>
+      )}
+      <div className="row">
+        <button className="primary" onClick={() => void decide('approved')}>
+          {changed ? '고쳐서 승인' : '승인'}
+        </button>
+        <input placeholder="거절 이유 (AI에게 전달돼요)" value={why} onChange={(e) => setWhy(e.target.value)} />
+        <button className="danger" onClick={() => void decide('rejected')}>
+          거절
+        </button>
+      </div>
+      {err && <div className="warn-text small">{err}</div>}
+    </div>
+  )
+}
+
+const GH_ACTION = { 'push-pr': '브랜치 올리기 + PR', merge: 'PR 합치기', comment: '이슈 댓글' } as const
+
+/** A GitHub step the app will do after a yes: the person may change the text first. */
+function GithubBox({ approval }: { approval: Approval }): JSX.Element {
+  const g = approval.github!
+  const [body, setBody] = useState(g.body ?? '')
+  return (
+    <div className="ext-req">
+      <div className="small">
+        <b>{GH_ACTION[g.action]}</b> · {g.repo}
+        {g.branch ? ` · ${g.branch}` : ''}
+        {g.pr ? ` · PR #${g.pr}` : ''}
+        {g.issue ? ` · 이슈 #${g.issue}` : ''}
+      </div>
+      {g.action !== 'merge' && (
+        <>
+          <label className="small">{g.action === 'comment' ? '댓글 내용' : 'PR 본문'}</label>
+          <textarea rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
+        </>
+      )}
+      <div className="row">
+        <button className="primary" onClick={() => void window.hive.decideGithub(approval.id, 'approved', body)}>
+          승인하고 실행
+        </button>
+        <button className="danger" onClick={() => void window.hive.decideGithub(approval.id, 'rejected')}>
+          거절
         </button>
       </div>
     </div>

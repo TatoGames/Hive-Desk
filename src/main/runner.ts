@@ -269,6 +269,10 @@ export interface RunnerDeps {
   live?: boolean
   /** A live run started (handle) or ended (undefined). */
   onHandle?: (taskId: string, handle: RunHandle | undefined, runId: string) => void
+  /** Send a [[MSG]] the agent wrote (the engine also hands it to the receiver right away when it is running). */
+  sendMessage?: (from: string, to: string, body: string) => void
+  /** External connections (web, MCP apps) this run may use, and how its tool requests are answered. */
+  external?: (task: Task, agent: Agent, runId: string, live: boolean) => import('./external').ExtRun | null
 }
 
 export type RunOutcome =
@@ -314,6 +318,8 @@ export function shareRun(hive: Hive, rec: RunRecord, machine: string): void {
     files: files.slice(0, 500),
     ...(small && rec.diff.patch ? { patch: rec.diff.patch } : {}),
     ...(rec.response.length <= SHARED_PATCH_MAX ? { response: rec.response } : {}),
+    ...(rec.sources?.length ? { sources: rec.sources } : {}),
+    ...(rec.external?.length ? { externalWrites: rec.external.length } : {}),
     error: rec.error
   })
 }
@@ -455,6 +461,13 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   )
 
   const staged = stageAttachments(task, hive, cwd)
+  const liveMode = deps.live !== false && !!deps.onHandle
+  let ext: import('./external').ExtRun | null = null
+  try {
+    ext = deps.external?.(task, agent, runId, liveMode) ?? null
+  } catch {
+    ext = null // a broken connection setting must not stop the work itself
+  }
   const prompt = resumeSession
     ? buildFollowUp(task, hive, staged.paths)
     : buildPrompt({
@@ -462,7 +475,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
         task,
         hive,
         staged: staged.paths,
-        extras: deps.promptExtras?.(task, agent),
+        extras: [...(deps.promptExtras?.(task, agent) ?? []), ...(ext?.prompt ?? [])],
         cwd,
         resultsDir: cwd === deps.defaultCwd ? join(cwd, 'results') : undefined
       })
@@ -472,14 +485,16 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
   try {
     built = buildCommand(agent, {
       stream: true,
-      live: deps.live !== false && !!deps.onHandle,
+      live: liveMode,
       permission: level,
       refDirs: (task.refDirs ?? []).filter((d) => existsSync(d)),
       resumeSession,
       effort: task.effort,
-      allowSecrets: task.allowSecrets
+      allowSecrets: task.allowSecrets,
+      ...(ext ? { external: ext.build } : {})
     })
   } catch (e) {
+    ext?.finish([])
     staged.cleanup()
     const finishedAt = nowFn().toISOString()
     hive.addEvent(task.id, 'run_finished', agent.id, '실패 · ' + (e as Error).message, runId)
@@ -561,6 +576,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       onTouchReady: (t) => (touch = t),
       onHandle: (h) => deps.onHandle?.(task.id, h, runId),
       onReplay: (text) => markSeen(hive, task.id, runId, text),
+      ...(ext ? { onPermission: ext.onPermission } : {}),
       env: cleanEnv(deps.env ?? process.env, deps.stripApiKeys),
       onOutput: (c) => {
         push(parser.push(c))
@@ -575,6 +591,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     staged.cleanup()
   }
   push(parser.end())
+  const extUse = ext?.finish(parser.toolUses()) ?? { sources: [], writes: [] }
 
   const stdout = parser.finalText(res.stdout)
   const sessionId = parser.sessionId() ?? resumeSession
@@ -628,7 +645,9 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
       sessionId,
       activity: live.all().slice(-1000),
       checkpoint: cp.checkpoint,
-      checkpointNote: cp.note
+      checkpointNote: cp.note,
+      ...(extUse.sources.length ? { sources: extUse.sources } : {}),
+      ...(extUse.writes.length ? { external: extUse.writes } : {})
     }
     hive.addRun(rec)
     shareRun(hive, rec, deps.machine ?? '')
@@ -726,7 +745,7 @@ async function runTaskInner(agent: Agent, taskId: string, deps: RunnerDeps, ctx:
     known.add(key)
     hive.addMemory(agent.id, text)
   }
-  for (const m of parsed.messages) hive.sendMessage(agent.id, m.to, m.body)
+  for (const m of parsed.messages) (deps.sendMessage ?? ((f, t, b) => void hive.sendMessage(f, t, b)))(agent.id, m.to, m.body)
 
   if (parsed.approvals.length && repeatedApproval(hive, task.id, parsed.approvals.join(' / '))) {
     // the same request again although it was approved: more runs would only repeat this

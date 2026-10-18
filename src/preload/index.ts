@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AutoRow } from '../shared/connections'
+import type { ExtAccess, ExtConnection, ExtKind, GhStatus } from '../shared/external'
 import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
   AdapterId,
@@ -154,6 +155,22 @@ const api = {
   enableSharing: (url: string): Promise<SyncResult> => ipcRenderer.invoke('share:enable', url),
   sync: (): Promise<SyncResult> => ipcRenderer.invoke('share:sync'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:folder'),
+  saveConnection: (c: Partial<ExtConnection> & { kind: ExtKind; name: string }): Promise<ExtConnection> => ipcRenderer.invoke('ext:save', c),
+  deleteConnection: (id: string): Promise<void> => ipcRenderer.invoke('ext:delete', id),
+  setConnectionAccess: (id: string, key: string, access: ExtAccess): Promise<void> => ipcRenderer.invoke('ext:access', id, key, access),
+  setConnectionSecret: (id: string, token: string | null): Promise<void> => ipcRenderer.invoke('ext:secret', id, token),
+  refreshMcpTools: (id: string): Promise<{ ok: boolean; message: string; count: number }> => ipcRenderer.invoke('ext:mcp-tools', id),
+  setMcpToolWrite: (id: string, tool: string, write: boolean): Promise<void> => ipcRenderer.invoke('ext:mcp-tool-write', id, tool, write),
+  decideExternal: (id: string, d: 'approved' | 'rejected', opts?: { note?: string; edited?: string; always?: boolean }): Promise<void> => ipcRenderer.invoke('ext:decide', id, d, opts),
+  decideGithub: (id: string, d: 'approved' | 'rejected', body?: string): Promise<void> => ipcRenderer.invoke('gh:decide', id, d, body),
+  checkGithub: (): Promise<GhStatus> => ipcRenderer.invoke('gh:check'),
+  githubPoll: (): Promise<{ imported: number; updated: number }> => ipcRenderer.invoke('gh:poll'),
+  mergeTaskPr: (id: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('gh:merge', id),
+  openTaskPr: (id: string): Promise<boolean> => ipcRenderer.invoke('gh:open-pr', id),
+  fixCi: (id: string): Promise<boolean> => ipcRenderer.invoke('gh:fix-ci', id),
+  setProjectGithub: (id: string, repo: string, base?: string): Promise<Project> => ipcRenderer.invoke('project:github', id, repo, base),
+  attachUrl: (id: string, url: string): Promise<AttachResult> => ipcRenderer.invoke('task:attach-url', id, url),
+  saveSource: (url: string, note?: string): Promise<void> => ipcRenderer.invoke('memory:source', url, note),
   openPath: (p: string): Promise<string> => ipcRenderer.invoke('open:path', p),
   onEvent: (cb: (e: EngineEvent) => void): (() => void) => {
     const h = (_: unknown, e: EngineEvent): void => cb(e)

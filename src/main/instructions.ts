@@ -74,3 +74,8 @@ export function markSeen(hive: Hive, taskId: string, runId: string, echoed: stri
 export function liveMessage(text: string): string {
   return `[사람의 새 지시 — 지금 하던 일에 반영하세요]\n${text}\n\n먼저 [[ACK: 무엇을 바꾸는지 한 줄]]을 적고, 남은 [[PLAN]]을 고쳐 쓰세요. 이미 한 일이 이 지시와 어긋나면 되돌리거나 RISK에 적으세요.`
 }
+
+/** A message from a teammate (or a person) for an AI that is working right now. Not an instruction: it decides itself what to do with it. */
+export function liveTeamMessage(from: string, text: string): string {
+  return `[${from}에게서 온 메시지 — 지금 하는 일과 관련 있으면 참고하세요]\n${text}\n\n(답할 필요가 있으면 [[MSG to=${from}: …]]로 답하세요. 지금 업무의 지시가 바뀌는 것은 아니에요.)`
+}

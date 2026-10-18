@@ -112,6 +112,8 @@ export interface BuiltCommand {
   resumed?: boolean
   /** Messages go in as stream-json lines and stdin stays open, so instructions can reach the run while it works. */
   live?: boolean
+  /** Claude asks the app (control protocol on stdin/stdout) before a tool that is not allowed in advance. Needs `live`. */
+  permissionPrompt?: boolean
 }
 
 /** What a caller can do to a run that is in progress (only runs started in live mode have one). */
@@ -138,6 +140,8 @@ export interface BuildOptions {
   allowSecrets?: boolean
   /** Claude only: keep stdin open and take messages as stream-json (instructions during a run). */
   live?: boolean
+  /** External connections (Claude only): tools allowed without asking, tools always refused, extra args (MCP config). */
+  external?: { allow: string[]; deny: string[]; args: string[]; ask: boolean }
 }
 
 /** What HiveDesk can really enforce per CLI (the pre-run check shows this honestly). */
@@ -241,16 +245,24 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
     let extra = splitArgs(agent.extraArgs)
     // Deny rules always win over allow rules, so they hold whatever the user's own settings say.
     const deny: string[] = []
+    const allow: string[] = []
     if (level === 'read') {
       extra = dropFlag(extra, ['--permission-mode'])
-      extra.push('--permission-mode', 'default', '--allowedTools', 'Read,Grep,Glob')
+      extra.push('--permission-mode', 'default')
+      allow.push('Read', 'Grep', 'Glob')
       deny.push(...EDIT_TOOLS, 'Bash')
     } else if (level === 'exec') {
       extra = dropFlag(extra, ['--permission-mode'])
-      extra.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
+      extra.push('--permission-mode', 'acceptEdits')
+      allow.push('Bash')
     } else {
       deny.push(...DESTRUCTIVE_BASH_RULES)
     }
+    if (opts.external) {
+      allow.push(...opts.external.allow)
+      deny.push(...opts.external.deny)
+    }
+    if (allow.length) extra.push('--allowedTools', allow.join(','))
     if (!opts.allowSecrets) deny.push(...SECRET_READ_RULES)
     // Reference folders are opened with --add-dir, which also allows writing: take that back.
     for (const d of dirs) for (const tool of EDIT_TOOLS) deny.push(claudePathRule(tool, d))
@@ -262,7 +274,11 @@ export function buildCommand(agent: Agent, opts: BuildOptions = {}): BuiltComman
       args.push('--resume', opts.resumeSession)
       resumed = true
     }
-    return { command, args, stream, resumed, live }
+    if (opts.external) args.push(...opts.external.args)
+    // the app answers permission requests (external connections) — only possible while stdin stays open
+    const permissionPrompt = live && !!opts.external?.ask
+    if (permissionPrompt) args.push('--permission-prompt-tool', 'stdio')
+    return { command, args, stream, resumed, live, permissionPrompt }
   }
 
   if (agent.adapter === 'codex') {
@@ -340,7 +356,16 @@ export interface RunOptions {
   onHandle?: (h: RunHandle) => void
   /** Live mode: the CLI echoed back a message we sent (it has been taken in). */
   onReplay?: (text: string) => void
+  /** Permission-prompt mode: the AI wants a tool that was not allowed in advance. The run waits for the answer. */
+  onPermission?: (req: PermissionRequest) => Promise<PermissionAnswer>
 }
+
+export interface PermissionRequest {
+  tool: string
+  input: Record<string, unknown>
+}
+
+export type PermissionAnswer = { allow: true; input?: Record<string, unknown> } | { allow: false; message: string }
 
 export interface RunResult {
   code: number | null
@@ -382,6 +407,8 @@ export const runCli: Runner = (built, opts) =>
     let afterInterrupt: string | undefined
     let interrupting = false
     let lineBuf = ''
+    /** Permission requests waiting for the app's (or a person's) answer: no idle timeout meanwhile. */
+    let asking = 0
 
     const done = (r: Partial<RunResult>): void => {
       if (settled) return
@@ -449,7 +476,7 @@ export const runCli: Runner = (built, opts) =>
     }, opts.timeoutMs)
     // "Still alive" = it printed something or the caller saw files change; silence for too long ends the run.
     const touch = (): void => {
-      if (!opts.idleTimeoutMs || settled || paused) return
+      if (!opts.idleTimeoutMs || settled || paused || asking > 0) return
       if (idleTimer) clearTimeout(idleTimer)
       idleTimer = setTimeout(() => {
         timedOut = true
@@ -487,10 +514,29 @@ export const runCli: Runner = (built, opts) =>
     }
     /** A line of the CLI's output in live mode: results decide whether more input may still come. */
     const onLine = (line: string): void => {
-      let e: { type?: string; subtype?: string; isReplay?: boolean; message?: { content?: unknown } }
+      let e: { type?: string; subtype?: string; isReplay?: boolean; message?: { content?: unknown }; request_id?: string; request?: Record<string, unknown> }
       try {
         e = JSON.parse(line)
       } catch {
+        return
+      }
+      if (e.type === 'control_request' && e.request?.subtype === 'can_use_tool' && e.request_id) {
+        const id = e.request_id
+        const tool = typeof e.request.tool_name === 'string' ? e.request.tool_name : ''
+        const input = e.request.input && typeof e.request.input === 'object' ? (e.request.input as Record<string, unknown>) : {}
+        asking++
+        if (idleTimer) clearTimeout(idleTimer)
+        const answer = opts.onPermission ? opts.onPermission({ tool, input }) : Promise.resolve<PermissionAnswer>({ allow: false, message: 'HiveDesk가 이 도구를 허용하지 않았어요.' })
+        void answer
+          .catch((err: Error): PermissionAnswer => ({ allow: false, message: err.message }))
+          .then((a) => {
+            asking--
+            touch()
+            const stdin = child.stdin
+            if (settled || stdinEnded || !stdin || !stdin.writable) return
+            const response = a.allow ? { behavior: 'allow', updatedInput: a.input ?? input } : { behavior: 'deny', message: a.message }
+            stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: id, response } }) + '\n')
+          })
         return
       }
       if (e.type === 'user' && e.isReplay) {
@@ -584,6 +630,10 @@ export const runCli: Runner = (built, opts) =>
     child.stdin?.on('error', () => {
       /* EPIPE if the CLI exits before reading stdin */
     })
+    if (live && built.permissionPrompt) {
+      // the control protocol starts with an initialize request; tool permission requests come to us after it
+      child.stdin?.write(JSON.stringify({ type: 'control_request', request_id: `init${Date.now()}`, request: { subtype: 'initialize', hooks: null } }) + '\n')
+    }
     if (live) writeUser(opts.prompt)
     else child.stdin?.end(built.promptArg && !win ? '' : opts.prompt)
   })

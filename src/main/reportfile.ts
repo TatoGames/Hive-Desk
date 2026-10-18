@@ -34,6 +34,8 @@ export function writeTaskReport(hive: Hive, task: Task, who: string): string | n
   const runs = hive.listSharedRuns(t.id)
   const files = new Map<string, string>()
   for (const run of runs) for (const f of run.files) files.set(f.path, f.status)
+  const sources = [...new Set(runs.flatMap((x) => x.sources ?? []))]
+  const outside = runs.reduce((n, x) => n + (x.externalWrites ?? 0), 0)
   const roster = hive.listRoster().find((x) => x.id === t.assignee)
   const project = hive.getProject(t.projectId)
   const md = [
@@ -51,6 +53,9 @@ export function writeTaskReport(hive: Hive, task: Task, who: string): string | n
     ...(r ? [...line('한 일', r.did), ...line('바뀐 파일', r.files), ...line('확인 방법', r.verify), ...line('남은 위험', r.risks), ...line('다음 제안', r.next)] : ['(정해진 보고 형식이 없어요. 아래 결과를 보세요.)']),
     '',
     ...(files.size ? ['## 바뀐 파일', ...[...files].map(([p, s]) => `- ${s} ${p}`), ''] : []),
+    ...(sources.length ? ['## 참고한 출처', ...sources.map((u) => `- ${u}`), ''] : []),
+    ...(outside ? ['## 외부 작업', `되돌릴 수 없는 외부 작업 ${outside}건 (다른 앱에 보내거나 바꾼 것). 자세한 내용은 앱의 외부 연결 → 기록에 있어요.`, ''] : []),
+    ...(t.github?.pr ? [`PR: ${t.github.pr.url}`, ''] : []),
     ...(t.result ? ['## 결과', t.result, ''] : []),
     `실행 ${runs.length}회`
   ].join('\n')

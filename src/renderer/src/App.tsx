@@ -3,6 +3,7 @@ import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
 import Connections from './views/Connections'
+import External from './views/External'
 import Boardroom from './views/Boardroom'
 import Collab from './views/Collab'
 import Committee from './views/Committee'
@@ -55,7 +56,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'boardroom' | 'collab' | 'connections' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'boardroom' | 'collab' | 'connections' | 'external' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -90,6 +91,7 @@ export default function App(): JSX.Element {
     { id: 'performance', label: '성과' },
     { id: 'collab', label: '협업', badge: snap.collab.requests.filter((r) => r.status === 'pending').length },
     { id: 'connections', label: 'AI 연결' },
+    { id: 'external', label: '외부 연결', badge: snap.approvals.filter((a) => a.status === 'pending' && a.kind === 'external').length },
     { id: 'agents', label: '에이전트' },
     { id: 'inbox', label: '메시지 · 메모리', badge: unread },
     { id: 'approvals', label: '승인·확인·자료 요청', badge: pending },
@@ -157,6 +159,7 @@ export default function App(): JSX.Element {
         {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
         {current === 'collab' && <Collab snap={snap} />}
         {current === 'connections' && <Connections snap={snap} />}
+        {current === 'external' && <External snap={snap} />}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
         {current === 'company' && <Company snap={snap} />}
         {current === 'projects' && <Projects snap={snap} />}

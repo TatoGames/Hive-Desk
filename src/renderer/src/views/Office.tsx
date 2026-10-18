@@ -223,6 +223,7 @@ export default function Office({
               {pct(p.progress)}
               {startedAt && ` · ${elapsed(startedAt)} 경과`}
             </div>
+            {v.task.waitingExternal && <div className="warn-text small">결재 대기 · 외부 연결 요청에 답을 기다려요</div>}
             {snap.waiting[v.task.id] && (
               <div className="muted small">폴더 대기 중 · 앞의 업무: {snap.tasks.find((x) => x.id === snap.waiting[v.task!.id])?.title ?? '?'}</div>
             )}

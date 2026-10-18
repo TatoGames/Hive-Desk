@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process'
 import type { AptitudeRecord } from '../shared/aptitude'
 import type { ModelAgent } from '../shared/connections'
 import type { ExternalItem } from '../shared/collab'
+import type { ExtConnection, ExtLogEntry } from '../shared/external'
 import type { Company, ModelAvailability, OrgUnit, Seat } from '../shared/company'
 import type {
   Agent,
@@ -39,7 +40,7 @@ import type {
 } from '../shared/types'
 
 /** Folders of shared (git-synced) hive data. Anything else lives under `.local/`. */
-export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', '.sync/runs', '보고서', 'company', 'aptitude', 'finals', 'agenda', 'external']
+export const SHARED_DIRS = ['tasks', 'approvals', 'inbox', 'memory', 'agents', 'events', 'attachments', 'projects', '.sync/runs', '보고서', 'company', 'aptitude', 'finals', 'agenda', 'external', 'ext/connections', 'ext/log']
 
 export function newId(): string {
   return Date.now().toString(36) + '-' + randomBytes(3).toString('hex')
@@ -67,7 +68,9 @@ const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   plan: '분배 계획',
   failure: '작업 실패',
   'bundle-cap': '실행 상한',
-  'stale-bundle': '오래된 묶음'
+  'stale-bundle': '오래된 묶음',
+  external: '외부 연결',
+  github: 'GitHub'
 }
 
 /** Tasks written before v4 kept pending instructions as plain strings in `followups`. */
@@ -406,6 +409,11 @@ export class Hive {
     writeJson(this.p('approvals', id + '.json'), { ...a, status, decidedAt: now(), decidedBy: by, note })
   }
 
+  /** Write an approval as it is (extra details added after it was created). */
+  saveApproval(a: Approval): void {
+    writeJson(this.p('approvals', a.id + '.json'), a)
+  }
+
   hasPendingApproval(taskId: string, kind: ApprovalKind): boolean {
     return this.listApprovals().some(
       (a) => a.taskId === taskId && a.kind === kind && a.status === 'pending'
@@ -428,7 +436,8 @@ export class Hive {
 
     const task = this.getTask(a.taskId)
     // a plan's task is moved by the delegation engine (it creates the sub-tasks or sends the plan back)
-    if (task && a.kind !== 'plan' && a.kind !== 'failure' && a.kind !== 'bundle-cap' && a.kind !== 'stale-bundle') {
+    // live tool requests (external) and GitHub actions are answered by the engine; the task itself keeps its state
+    if (task && !['plan', 'failure', 'bundle-cap', 'stale-bundle', 'external', 'github'].includes(a.kind)) {
       if (decision === 'approved') {
         const notes =
           a.kind === 'agent-request'
@@ -553,6 +562,8 @@ export class Hive {
       briefing: (input.briefing ?? cur?.briefing ?? '').trim(),
       folderName: (input.folderName ?? cur?.folderName ?? '').trim(),
       ...((input.runBudget ?? cur?.runBudget) ? { runBudget: input.runBudget ?? cur?.runBudget } : {}),
+      // `github: undefined` in the input removes the link; leaving the key out keeps it
+      ...(('github' in input ? input.github : cur?.github) ? { github: 'github' in input ? input.github : cur?.github } : {}),
       createdBy: cur?.createdBy ?? input.createdBy,
       createdAt: cur?.createdAt ?? now()
     }
@@ -696,6 +707,41 @@ export class Hive {
 
   listFinals(): FinalReport[] {
     return listJson<FinalReport>(this.p('finals')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+
+  // ---- external connections (shared: which connections and who may use them; never a secret) ----
+  listExtConnections(): ExtConnection[] {
+    return listJson<ExtConnection>(this.p('ext', 'connections')).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+  saveExtConnection(c: ExtConnection): void {
+    mkdirSync(this.p('ext', 'connections'), { recursive: true })
+    writeJson(this.p('ext', 'connections', c.id + '.json'), c)
+  }
+  deleteExtConnection(id: string): void {
+    rmSync(this.p('ext', 'connections', id + '.json'), { force: true })
+  }
+  /** One file per entry: the log merges cleanly when the team shares the company. */
+  addExtLog(e: Omit<ExtLogEntry, 'id' | 'at'>): ExtLogEntry {
+    const entry: ExtLogEntry = { id: eventId(), at: now(), ...e }
+    mkdirSync(this.p('ext', 'log'), { recursive: true })
+    writeJson(this.p('ext', 'log', entry.id + '.json'), entry)
+    return entry
+  }
+  listExtLog(limit = 200): ExtLogEntry[] {
+    return listJson<ExtLogEntry>(this.p('ext', 'log'))
+      .sort((a, b) => b.id.localeCompare(a.id))
+      .slice(0, limit)
+  }
+
+  /** Secrets of this computer's logins (tokens), already encrypted by the OS secure storage. Never synced. */
+  secretBlobs(): Record<string, string> {
+    return readJson<Record<string, string>>(this.p('.local', 'secrets.json')) ?? {}
+  }
+  setSecretBlob(key: string, blob: string | null): void {
+    const all = this.secretBlobs()
+    if (blob === null) delete all[key]
+    else all[key] = blob
+    writeJson(this.p('.local', 'secrets.json'), all)
   }
 
   // ---- model availability on this computer ----

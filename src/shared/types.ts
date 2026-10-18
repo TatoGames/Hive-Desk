@@ -76,6 +76,8 @@ export interface Project {
   folderName: string
   /** Most AI runs the project may use (0 = no limit). */
   runBudget?: number
+  /** The GitHub repository of the project's code (`owner/repo`) and its default branch. */
+  github?: { repo: string; base: string }
   createdBy: string
   createdAt: string
 }
@@ -99,6 +101,9 @@ export interface RunShared {
   patch?: string
   response?: string
   error?: string
+  sources?: string[]
+  /** Things done outside through a connection that cannot be undone. */
+  externalWrites?: number
 }
 
 export type TaskStatus =
@@ -222,6 +227,21 @@ export interface Task {
   followups?: string[]
   /** What people told this task to do differently; queued ones go into the next run's first input. */
   instructions?: Instruction[]
+  /** External connections this task may use (ids). Absent = whatever the employee may use. */
+  connections?: string[]
+  /** The running AI waits for this approval (a live tool request): shown as "결재 대기" on its card. */
+  waitingExternal?: string
+  /** GitHub link of the task: the issue it came from, its branch and pull request. */
+  github?: {
+    repo: string
+    issue?: { number: number; url: string; commented?: boolean }
+    branch?: string
+    pr?: { number: number; url: string; state: 'open' | 'merged' | 'closed' }
+    /** Latest checks of the pull request. */
+    checks?: { state: 'pending' | 'pass' | 'fail' | 'none'; at: string; failing: string[] }
+    /** Review comments already turned into instructions (ids). */
+    seen?: string[]
+  }
   /** A person stopped / cancelled this task: nothing but a person may restart it. */
   stoppedBy?: { by: string; at: string; kind: 'hold' | 'cancel' | 'emergency' }
   /** Waits for a failed task it depends on (v4 failure propagation). */
@@ -506,6 +526,10 @@ export interface RunRecord {
   checkpointNote?: string
   /** Set when a human undid this run. */
   rolledBackAt?: string
+  /** Web pages the AI read (shown as the report's sources). */
+  sources?: string[]
+  /** What the run did outside through a connection (sent, changed): HiveDesk cannot undo these. */
+  external?: import('./external').ExtLogEntry[]
 }
 
 /** A run without the heavy fields, for lists. */
@@ -519,7 +543,19 @@ export interface TaskHistory {
   approvals: Approval[]
 }
 
-export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle'
+export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle' | 'external' | 'github'
+
+/** A GitHub step the app does for a task once a person says yes (pushing, opening a PR, merging, commenting on the issue). */
+export interface GithubAction {
+  action: 'push-pr' | 'merge' | 'comment'
+  repo: string
+  branch?: string
+  pr?: number
+  issue?: number
+  /** The pull request / comment text the app will send (the person may change it). */
+  title?: string
+  body?: string
+}
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface Approval {
@@ -534,6 +570,9 @@ export interface Approval {
   decidedBy?: string
   /** The decider's comment (a rejected plan's reason). */
   note?: string
+  /** A live tool request of a running AI (external connection): the run waits for this answer. */
+  external?: import('./external').ExtRequest
+  github?: GithubAction
 }
 
 export interface Message {
@@ -658,6 +697,8 @@ export interface AppConfig {
   autoApprove?: AutoApprove
   /** Sub-tasks of a project in a git folder work in their own work trees and run at the same time (off by default). */
   parallelWorktrees?: boolean
+  /** Minutes a running AI waits for a person to answer a live tool request before it is declined (default 30). */
+  externalApprovalMinutes?: number
   maxConcurrent: number
   syncIntervalMinutes: number
 }
@@ -706,6 +747,8 @@ export interface Snapshot {
   company: CompanySnapshot
   /** This computer's folder for each project (project id → absolute path). */
   projectPaths: Record<string, string>
+  /** External connections of the company on screen (web, GitHub, apps) and their log. */
+  ext: import('./external').ExtView
 }
 
 export interface EngineEvent {

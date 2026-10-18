@@ -722,6 +722,16 @@ function AutoConnect({ onClose }: { onClose: () => void }): JSX.Element {
     void window.hive.autoConnectPreview().then(setRows)
   }, [])
   const ready = rows?.filter((r) => r.modelAgentId) ?? []
+  const total = ready.reduce((n, r) => n + r.weight, 0)
+  /** Swap one seat to the closest lighter model (the preview is only changed here; nothing is hired yet). */
+  const lighten = (seatId: string): void =>
+    setRows((rs) =>
+      (rs ?? []).map((r) =>
+        r.seatId === seatId && r.lighter
+          ? { ...r, chosen: r.lighter.modelId, chosenLabel: r.lighter.label, modelAgentId: r.lighter.modelAgentId, weight: r.lighter.weight, substituted: true, lighter: undefined, note: '직접 가벼운 모델로 바꿨어요.' }
+          : r
+      )
+    )
   return (
     <div className="overlay" onClick={onClose}>
       <div className="dialog wide" onClick={(e) => e.stopPropagation()}>
@@ -740,6 +750,7 @@ function AutoConnect({ onClose }: { onClose: () => void }): JSX.Element {
                 <th>추천 모델</th>
                 <th>사용 가능</th>
                 <th>연결할 모델</th>
+                <th title="실행 한 번이 사용 한도를 얼마나 쓰는지 (클수록 빨리 씀)">사용량 가중치</th>
               </tr>
             </thead>
             <tbody>
@@ -754,9 +765,29 @@ function AutoConnect({ onClose }: { onClose: () => void }): JSX.Element {
                     <b>{r.chosenLabel}</b> {r.substituted && <span className="tag warn">대체</span>}
                     {r.note && <div className="muted small">{r.note}</div>}
                   </td>
+                  <td>
+                    {r.modelAgentId ? r.weight : '—'}
+                    {r.lighter && (
+                      <div>
+                        <button className="sm" title={`${r.lighter.label} · 가중치 ${r.lighter.weight}`} onClick={() => lighten(r.seatId)}>
+                          가벼운 모델로
+                        </button>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={4} className="muted small">
+                  모든 자리가 한 번씩 실행할 때 쓰는 양 (가중치 합계)
+                </td>
+                <td>
+                  <b>{total}</b>
+                </td>
+              </tr>
+            </tfoot>
           </table>
         )}
         {done !== null && <div className="small">{done}명을 채용해 자리에 앉혔어요.</div>}
