@@ -87,6 +87,11 @@ describe('6-0.5: choosing by expected total usage', () => {
 const REPORT = '[[DID: 했어요]]\n[[FILES: none]]\n[[VERIFY: 확인]]\n[[RISK: none]]\n[[NEXT: none]]'
 const res = (stdout: string): RunResult => ({ code: 0, stdout, stderr: '', timedOut: false, aborted: false })
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+/** Slow CI machines (Windows) need longer than a fixed pause: wait until the condition holds, or give up after 8s. */
+async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
+  const t0 = Date.now()
+  while (!cond() && Date.now() - t0 < ms) await wait(20)
+}
 
 describe('6-0.5: handing a small job to one employee', () => {
   it('goes straight to an employee (no plan), research needs no review, and a bigger-than-expected job moves one tier up with the notes', async () => {
@@ -114,13 +119,13 @@ describe('6-0.5: handing a small job to one employee', () => {
     const t = eng.quickAssign({ title: 'Godot 물리 엔진 비교 조사해줘', agentId: haiku.id })
     expect(eng.hive.getTask(t.id)).toMatchObject({ kind: 'work', jobKind: 'research', assignee: haiku.id, permission: 'read' })
     await eng.runTask(t.id)
-    await wait(100)
+    await waitFor(() => eng.hive.getTask(t.id)!.assignee === sonnet.id)
     const after = eng.hive.getTask(t.id)!
     expect(after.assignee).toBe(sonnet.id) // moved one tier up
     expect(after.quick?.escalations).toBe(1)
     expect(after.reply).toContain('여러 모듈이 얽혀 있어요')
     await eng.runTask(t.id)
-    await wait(100)
+    await waitFor(() => eng.hive.getTask(t.id)!.status === 'done')
     const fin = eng.hive.getTask(t.id)!
     expect(fin.status).toBe('done') // no files written → no cross review
     expect(seen[1].prompt).toContain('여러 모듈이 얽혀 있어요')
