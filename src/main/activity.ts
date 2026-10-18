@@ -29,6 +29,8 @@ export interface StreamParser {
   /** Tool calls the CLI refused because of the permission level. */
   denials(): string[]
   plan(): PlanItem[]
+  /** Every tool call the AI made (name + input), for the external-connection log and the sources it read. */
+  toolUses(): { name: string; input: Record<string, unknown> }[]
 }
 
 const MAX_TEXT = 300
@@ -56,6 +58,7 @@ class Base {
   protected planItems: PlanItem[] = []
   protected session?: string
   protected denied: string[] = []
+  protected uses: { name: string; input: Record<string, unknown> }[] = []
 
   constructor(private now: () => Date) {}
 
@@ -102,6 +105,9 @@ class Base {
   }
   plan(): PlanItem[] {
     return this.planItems
+  }
+  toolUses(): { name: string; input: Record<string, unknown> }[] {
+    return this.uses
   }
 }
 
@@ -152,7 +158,10 @@ class ClaudeParser extends JsonLines implements StreamParser {
         if (block.type === 'text') {
           this.lastText = str(block.text)
           out.push(...this.message(str(block.text)))
-        } else if (block.type === 'tool_use') out.push(...this.tool(str(block.name), rec(block.input)))
+        } else if (block.type === 'tool_use') {
+          this.uses.push({ name: str(block.name), input: rec(block.input) })
+          out.push(...this.tool(str(block.name), rec(block.input)))
+        }
       }
       return out
     }
@@ -227,8 +236,11 @@ class ClaudeParser extends JsonLines implements StreamParser {
         const done = this.planItems.filter((p) => p.done).length
         return [this.ev('plan', `할 일 목록 ${done}/${this.planItems.length}`)]
       }
-      default:
-        return [this.ev('tool', `도구: ${name}`)]
+      default: {
+        // MCP tools are named mcp__<server>__<tool>
+        const m = name.match(/^mcp__(.+?)__(.+)$/)
+        return [this.ev('tool', m ? `외부 앱 도구: ${m[2]}` : `도구: ${name}`)]
+      }
     }
   }
 

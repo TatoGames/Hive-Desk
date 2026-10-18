@@ -769,7 +769,7 @@ function AutoConnect({ onClose }: { onClose: () => void }): JSX.Element {
                     {r.modelAgentId ? r.weight : '—'}
                     {r.lighter && (
                       <div>
-                        <button className="small" title={`${r.lighter.label} · 가중치 ${r.lighter.weight}`} onClick={() => lighten(r.seatId)}>
+                        <button className="sm" title={`${r.lighter.label} · 가중치 ${r.lighter.weight}`} onClick={() => lighten(r.seatId)}>
                           가벼운 모델로
                         </button>
                       </div>

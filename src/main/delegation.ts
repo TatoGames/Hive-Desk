@@ -44,6 +44,8 @@ export interface DelegationCtx {
   quickEscalate?: (task: Task, why: string) => boolean
   /** Credit/charge the model that did a task (cross review result). */
   aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
+  /** What the company's external connections make possible (GitHub, web reading). */
+  capabilities?: () => { github: boolean; web: boolean }
 }
 
 const MANAGER_JOBS = ['lead', 'coo']
@@ -600,7 +602,7 @@ export class Delegation {
 
   /** What this company can do beyond reading and writing files (grows with the external connections of v4 stage 6-5 and later). */
   capabilities(): { github: boolean; web: boolean } {
-    return { github: false, web: false }
+    return this.c.capabilities?.() ?? { github: false, web: false }
   }
 
   /**

@@ -305,3 +305,7 @@ code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-famil
 .emergency { background: var(--danger); color: #fff; border-color: var(--danger); }
 .sticky-bar { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 6px 0; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
 .cancelled-fold { opacity: 0.7; }
+/* external connections (v4 6-5 ~ 6-7) */
+.warn-box { border-color: var(--warn); background: var(--warn-bg); }
+.ext-req { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+textarea.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }

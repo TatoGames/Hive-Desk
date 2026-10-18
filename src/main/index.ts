@@ -1,5 +1,5 @@
 import { classifyInput } from '../shared/manage'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, safeStorage, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, SubtaskSpec, Task } from '../shared/types'
 import { detectAll } from './adapters'
@@ -187,9 +187,27 @@ function registerIpc(): void {
   ipcMain.handle('reassign:apply', (_e, domain: string, from: string, to: string) => engine.applyReassignment(domain, from, to))
   ipcMain.handle('update:check', () => checkForUpdate(app.getVersion()))
   ipcMain.handle('open:url', (_e, url: string) => {
-    if (/^https:\/\/github\.com\//.test(url)) void shell.openExternal(url)
+    // release pages, pull requests, and the web pages an AI used (sources)
+    if (/^https:\/\//.test(url)) void shell.openExternal(url)
   })
   ipcMain.handle('open:path', (_e, p: string) => shell.openPath(p))
+  // ---- external connections ----
+  ipcMain.handle('ext:save', (_e, c) => engine.saveConnection(c))
+  ipcMain.handle('ext:delete', (_e, id: string) => engine.deleteConnection(id))
+  ipcMain.handle('ext:access', (_e, id: string, key: string, access) => engine.setConnectionAccess(id, key, access))
+  ipcMain.handle('ext:secret', (_e, id: string, token: string | null) => engine.setConnectionSecret(id, token))
+  ipcMain.handle('ext:mcp-tools', (_e, id: string) => engine.refreshMcpTools(id))
+  ipcMain.handle('ext:mcp-tool-write', (_e, id: string, tool: string, write: boolean) => engine.setMcpToolWrite(id, tool, write))
+  ipcMain.handle('ext:decide', (_e, id: string, d: 'approved' | 'rejected', opts) => engine.decideExternal(id, d, opts))
+  ipcMain.handle('gh:decide', (_e, id: string, d: 'approved' | 'rejected', body?: string) => engine.decideGithub(id, d, body))
+  ipcMain.handle('gh:check', () => engine.checkGithub())
+  ipcMain.handle('gh:poll', () => engine.githubPoll())
+  ipcMain.handle('gh:merge', (_e, id: string) => engine.mergeTaskPr(id))
+  ipcMain.handle('gh:open-pr', (_e, id: string) => engine.openTaskPr(id))
+  ipcMain.handle('gh:fix-ci', (_e, id: string) => engine.fixCi(id))
+  ipcMain.handle('project:github', (_e, id: string, repo: string, base?: string) => engine.setProjectGithub(id, repo, base))
+  ipcMain.handle('task:attach-url', (_e, id: string, url: string) => engine.attachUrl(id, url))
+  ipcMain.handle('memory:source', (_e, url: string, note?: string) => engine.saveSource(url, note))
 }
 
 let tray: Tray | undefined
@@ -224,6 +242,13 @@ app.whenReady().then(() => {
   fixPath()
   try {
     engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+    // tokens of external connections are kept encrypted by the operating system (Keychain / DPAPI / libsecret)
+    engine.cipher = {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+      decrypt: (blob) => safeStorage.decryptString(Buffer.from(blob, 'base64'))
+    }
+    void engine.checkGithub().catch(() => undefined)
   } catch (e) {
     dialog.showErrorBox('HiveDesk를 시작하지 못했어요', (e as Error).message)
     app.quit()

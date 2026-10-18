@@ -29,10 +29,9 @@ export async function canBranchFrom(dir: string): Promise<boolean> {
 }
 
 /** A separate folder + branch for one task, so tasks of the same project can run at the same time. */
-export async function addWorktree(base: string, taskId: string): Promise<Worktree | null> {
+export async function addWorktree(base: string, taskId: string, branch = `hive/${taskId}`): Promise<Worktree | null> {
   if (!(await canBranchFrom(base))) return null
   const path = join(base, WORKTREE_DIR, taskId)
-  const branch = `hive/${taskId}`
   if (existsSync(path)) return { path, branch, base }
   mkdirSync(join(base, WORKTREE_DIR), { recursive: true })
   // keep the folder out of the project's own `git status`

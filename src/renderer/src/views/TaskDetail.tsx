@@ -1,3 +1,4 @@
+import { RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
 import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
 import { InstructionList, PlanAdjust, TaskControls } from './Controls'
 import { useEffect, useState } from 'react'
@@ -251,6 +252,8 @@ export default function TaskDetail({
 
         <h2 className="sec">자료와 권한</h2>
         <MaterialsPanel task={task} adapter={adapter} />
+        <UrlAttach task={task} />
+        {snap && <TaskExternal snap={snap} task={task} />}
 
         {(running || task.status === 'todo' || task.status === 'awaiting_approval' || task.status === 'held' || task.status === 'needs_input' || task.status === 'failed') && (
           <>
@@ -338,6 +341,7 @@ export default function TaskDetail({
         )}
 
         {record && <UndoBar task={task} record={record} />}
+        {record && <RunExternal record={record} />}
         {record && <RunBody record={record} />}
       </div>
     </div>
