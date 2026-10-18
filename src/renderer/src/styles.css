@@ -359,3 +359,8 @@ textarea.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consola
 .check.bad { border-color: #ef4444; }
 .check.bad summary b { color: #ef4444; }
 .check.skip { opacity: 0.7; }
+/* v0.6 teams */
+.team-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.quick-team { border-color: var(--accent); }
+label.chip { cursor: pointer; font-size: 12px; padding: 3px 9px; }
+label.chip.on { border-color: var(--accent); color: inherit; }

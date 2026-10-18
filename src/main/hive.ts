@@ -773,6 +773,14 @@ export class Hive {
     mkdirSync(this.p('connections'), { recursive: true })
     writeJson(this.p('connections', 'model-agents.json'), list)
   }
+  /** v0.6: teams saved to be set up again in any company (per computer). */
+  teamTemplates(): import('../shared/team').TeamTemplate[] {
+    return readJson<import('../shared/team').TeamTemplate[]>(this.p('connections', 'team-templates.json')) ?? []
+  }
+  saveTeamTemplates(list: import('../shared/team').TeamTemplate[]): void {
+    mkdirSync(this.p('connections'), { recursive: true })
+    writeJson(this.p('connections', 'team-templates.json'), list)
+  }
   /** When each CLI last ran into its usage limit (the sharing rule gets stricter for a while after that). */
   limitHistory(): Record<string, string> {
     return readJson<Record<string, string>>(this.p('.local', 'limit-history.json')) ?? {}

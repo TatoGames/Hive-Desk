@@ -15,6 +15,7 @@ import { checkPlacement, seatModelKey, type PlacementInput } from '@shared/place
 import { TEMPLATES } from '@shared/templates'
 import { fmtTime } from '../store'
 import { ConfirmButton } from './Materials'
+import { CopyAgents, QuickTeam, SavedTeams } from './Teams'
 
 type Section = 'org' | 'models' | 'perf'
 
@@ -86,8 +87,11 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
 
   if (!c.company) {
     return (
+      <>
+      <QuickTeam snap={snap} />
+      <SavedTeams snap={snap} />
       <section className="panel">
-        <h2>회사 만들기</h2>
+        <h2>직접 만들기</h2>
         <p className="muted small">템플릿을 고르면 조직도, 직급, 자리별 추천 모델이 한 번에 만들어져요. 나중에 모두 고칠 수 있어요.</p>
         <div className="tpl-list">
           {TEMPLATES.map((t) => (
@@ -108,6 +112,7 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
           </button>
         </div>
       </section>
+      </>
     )
   }
 
@@ -222,8 +227,12 @@ function Org({ snap }: { snap: Snapshot }): JSX.Element {
 
       <RulesAndRanks snap={snap} />
 
+      <SavedTeams snap={snap} />
+      <CopyAgents snap={snap} />
+      <QuickTeam snap={snap} compact />
+
       <section className="panel">
-        <h2>회사 다시 만들기</h2>
+        <h2>회사 다시 만들기 (빈 자리로)</h2>
         <p className="muted small">다른 템플릿을 적용하면 지금의 조직도와 자리가 새 것으로 바뀌어요 (에이전트와 태스크는 그대로예요).</p>
         <div className="row">
           <select value={tpl} onChange={(e) => setTpl(e.target.value)}>

@@ -23,6 +23,7 @@ import type {
   TaskHistory,
   SubtaskSpec
 } from '../shared/types'
+import type { TeamSummary } from '../shared/team'
 
 const api = {
   snapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot'),
@@ -107,6 +108,13 @@ const api = {
   hireToSeat: (seatId: string, modelAgentId: string): Promise<Agent> => ipcRenderer.invoke('conn:hire-seat', seatId, modelAgentId),
   autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
   autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
+  quickTeam: (templateId: string): Promise<{ seats: number; hired: number; missing: number }> => ipcRenderer.invoke('team:quick', templateId),
+  listTeams: (): Promise<TeamSummary[]> => ipcRenderer.invoke('team:list'),
+  saveTeam: (name: string): Promise<TeamSummary> => ipcRenderer.invoke('team:save', name),
+  deleteTeam: (id: string): Promise<void> => ipcRenderer.invoke('team:delete', id),
+  applyTeam: (id: string): Promise<{ hired: number; skipped: string[] }> => ipcRenderer.invoke('team:apply', id),
+  agentsOf: (companyId: string): Promise<{ id: string; name: string; adapter: string; model: string }[]> => ipcRenderer.invoke('team:agents-of', companyId),
+  copyAgents: (fromCompanyId: string, ids: string[]): Promise<number> => ipcRenderer.invoke('team:copy-agents', fromCompanyId, ids),
   setCompanyOrder: (order: string[], adapter?: string): Promise<void> => ipcRenderer.invoke('conn:order', order, adapter),
   reassignTask: (id: string, agentId: string): Promise<Task> => ipcRenderer.invoke('office:reassign', id, agentId),
   officeFeed: (): Promise<{ at: string; taskId: string; taskTitle: string; actor: string; text: string }[]> => ipcRenderer.invoke('office:feed'),

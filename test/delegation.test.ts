@@ -110,6 +110,12 @@ async function settle(eng: Engine, max = 400): Promise<void> {
   }
 }
 
+/** Start the next company from nothing (the same names would otherwise be hired as "name 2"). */
+const fresh = (): void => {
+  rmSync(join(dir, 'config.json'), { force: true })
+  rmSync(join(dir, 'ws'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+}
+
 const task = (eng: Engine, id: string): Task => eng.hive.getTask(id)!
 const kids = (eng: Engine, id: string): Task[] => eng.hive.listTasks().filter((t) => t.parentId === id)
 const events = (eng: Engine, id: string): string[] => eng.hive.listEvents(id).map((e) => e.text)
@@ -457,12 +463,14 @@ describe('plan problems', () => {
     await settle(eng)
     expect(events(eng, t.id).some((e) => e.includes(`최대 ${LIMITS.maxSubtasks}개`))).toBe(true)
     eng.shutdown()
+    fresh()
 
     const { eng: e2, ids: i2 } = company(makeScript({ plan: () => '[[SUBTASK: a | assignee=alice-dev1 | done=x | after=2]]\n[[SUBTASK: b | assignee=alice-dev2 | done=x | after=none]]' }))
     const t2 = e2.createTask({ title: 'Y', assignee: i2.srv, delegate: true })
     await settle(e2)
     expect(events(e2, t2.id).some((e) => e.includes('뒤'))).toBe(true)
     e2.shutdown()
+    fresh()
 
     const { eng: e3, ids: i3 } = company(makeScript({ plan: () => '[[SUBTASK: a | assignee=alice-ops | done=x | after=none]]' }))
     const t3 = e3.createTask({ title: 'Z', assignee: i3.hq, delegate: true })
