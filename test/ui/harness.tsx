@@ -49,6 +49,9 @@ export async function mountApp(setup?: (eng: Engine, dir: string) => void, overr
     },
     checkUpdate: () => ({ available: false, current: '0.0.0' }),
     limitSamples: () => [],
+    detectAdapters: () => [],
+    officeFeed: () => [],
+    listTeams: () => [],
     ...overrides
   }
   ;(window as unknown as { hive: unknown }).hive = new Proxy(
