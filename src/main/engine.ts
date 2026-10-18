@@ -74,6 +74,7 @@ import {
 } from '../shared/connections'
 import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
+import { QuickAssign, type QuickPreview } from './quick'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, readMeta, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
 
 /** After the account hit its usage limit, the company priority decides who may start work for this long. */
@@ -130,6 +131,7 @@ export class Engine {
   recovering: Promise<void> = Promise.resolve()
   private timer: NodeJS.Timeout | null = null
   readonly delegation: Delegation
+  private quick!: QuickAssign
   readonly committee: Committee
   collab!: Collaboration
   private syncTimer: NodeJS.Timeout | null = null
@@ -154,7 +156,25 @@ export class Engine {
       notify: (title, body) => self.notify(title, body),
       escalate: (t, q) => self.escalateToCommittee(t, q),
       cancelTree: (rootId) => void self.cancelTask(rootId, { scope: 'tree' }),
-      aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d)
+      aptitude: (agentId, taskId, d) => self.noteAptitudeFor(agentId, taskId, d),
+      quickEscalate: (t, why) => self.quick.escalate(t, why)
+    })
+    this.quick = new QuickAssign({
+      get hive(): Hive {
+        return self.hive
+      },
+      me: () => self.config.memberName || 'me',
+      roster: () => self.hive.listRoster(),
+      catalog: () => self.catalog(),
+      isManager: (id) => self.delegation.isManager(id),
+      limited: (ad) => !!self.limitFor(ad as Agent['adapter']),
+      trialRate: () => self.config.quickTrialRate ?? 0.1,
+      toOrganisation: (t) => {
+        self.hive.updateTask(t.id, { assignee: null, permission: 'read' })
+        return self.delegation.begin(self.hive.getTask(t.id)!, { delegate: true })
+      },
+      changed: () => self.changed(),
+      notify: (title, body) => self.notify(title, body)
     })
     this.committee = new Committee({
       get hive(): Hive {
@@ -434,6 +454,36 @@ export class Engine {
         minutesToday: Math.round(usage.reduce((n, u) => n + u.ms, 0) / 60000)
       }
     })
+  }
+
+  // ---- quick assignment (6-0.5) ----
+  /** Before handing a job over: is it small, who should do it, what will it use? */
+  quickPreview(title: string, description = ''): QuickPreview {
+    return this.quick.preview(title, description)
+  }
+
+  /** Hand a small job straight to one employee (the app's pick unless `agentId` says otherwise). */
+  quickAssign(input: { title: string; description?: string; agentId?: string; projectId?: string }): Task {
+    const by = this.config.memberName || 'me'
+    const t = this.quick.assign(input, (x) => {
+      const made = this.hive.createTask({
+        title: input.title,
+        description: input.description,
+        assignee: x.assignee,
+        permission: x.permission,
+        projectId: input.projectId,
+        createdBy: by
+      })
+      return this.hive.updateTask(made.id, { quick: x.quick, jobKind: x.jobKind, auto: true, kind: 'work', depth: 0 })
+    })
+    const who = this.hive.listRoster().find((r) => r.id === t.assignee)?.name ?? t.assignee
+    this.hive.addEvent(t.id, 'delegation', by, `빠른 배정: ${who}에게 바로 맡겼어요${t.quick?.trial ? ' (시험 배정)' : ''}${t.quick?.chosen ? ' (사람이 고른 직원)' : ''}.`)
+    this.changed()
+    return t
+  }
+
+  quickTable(): ReturnType<QuickAssign['table']> {
+    return this.quick.table()
   }
 
   /** A new, completely separate company (its own folder, board, memory and organization). */
@@ -952,7 +1002,7 @@ export class Engine {
       watchMs: this.watchMs,
       humanReview: this.config.humanReview,
       onLimit: (adapter, info) => this.noteLimit(adapter, info),
-      promptExtras: (task, a) => [...this.delegation.promptExtras(task, a), ...this.committee.promptExtras(task, a)],
+      promptExtras: (task, a) => [...this.delegation.promptExtras(task, a), ...this.committee.promptExtras(task, a), ...this.quick.promptExtras(task)],
       onRunEnd: ({ agent: a, taskId, ms, result }) =>
         this.noteAptitude(a, taskId, {
           runs: 1,
@@ -1821,7 +1871,7 @@ export class Engine {
     const base: AptitudeRecord =
       cur && cur.modelKey === key
         ? cur
-        : { taskId, modelKey: key, modelLabel: label, domain: agent.job || 'general', runs: 0, ms: 0, approved: 0, changes: 0, failed: 0, updatedAt: '' }
+        : { taskId, modelKey: key, modelLabel: label, domain: agent.job || 'general', jobKind: this.hive.getTask(taskId.split('~')[0])?.jobKind, runs: 0, ms: 0, approved: 0, changes: 0, failed: 0, updatedAt: '' }
     if (cur && cur.modelKey !== key) {
       this.hive.saveAptitude({ ...cur, taskId: `${taskId}~${cur.modelKey}` })
     }

@@ -9,6 +9,8 @@ export interface AptitudeRecord {
   modelLabel: string
   /** Work area (the agent's job), `general` when none. */
   domain: string
+  /** Kind of job (doc / impl / …) when the task was handed over by quick assignment. */
+  jobKind?: string
   runs: number
   ms: number
   /** Results a human accepted (or that needed no check). */

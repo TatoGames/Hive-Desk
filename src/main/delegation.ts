@@ -38,6 +38,8 @@ export interface DelegationCtx {
   escalate?: (task: Task, question: string) => void
   /** Cancel a whole bundle (running parts are stopped). */
   cancelTree?: (rootId: string) => void
+  /** A quick (single-employee) job did not work out: move it up. True when it was moved on. */
+  quickEscalate?: (task: Task, why: string) => boolean
   /** Credit/charge the model that did a task (cross review result). */
   aptitude: (agentId: string | null, taskId: string, d: { approved?: number; changes?: number }) => void
 }
@@ -352,8 +354,23 @@ export class Delegation {
   onRunFinished(taskId: string): void {
     const t = this.c.hive.getTask(taskId)
     if (!t || !t.kind) return
-    if (t.status === 'failed') return void this.afterFailure(t)
+    const quick = t.kind === 'work' && !!t.quick && !t.parentId && !t.reviewOf
+    if (t.status === 'failed') {
+      // a model that could not do a quick job: one tier up (not for limits / logins, which another model would not fix)
+      if (quick && t.errorKind !== 'limit' && t.errorKind !== 'login' && t.errorKind !== 'network' && this.c.quickEscalate?.(t, (t.error ?? '실패').split('\n')[0])) return void this.c.changed()
+      return void this.afterFailure(t)
+    }
     if (t.status !== 'done') return
+    if (quick) {
+      const why = parseEscalation(t.result ?? '')
+      if (why && this.c.quickEscalate?.(t, why)) return void this.c.changed()
+      if (!t.quick!.writes) {
+        // answers and research need no cross review
+        this.c.hive.updateTask(t.id, { reviewState: { status: 'skipped', round: 0, escalations: 0, note: '파일을 바꾸지 않는 일이라 검토를 생략했어요.' } })
+        this.c.aptitude(t.assignee, t.id, { approved: 1 })
+        return void this.c.changed()
+      }
+    }
     const q = t.kind === 'plan' ? parseEscalation(t.result ?? '') : null
     if (q && this.c.escalate) this.c.escalate(t, q)
     else if (t.kind === 'plan') this.afterPlan(t)
@@ -756,6 +773,8 @@ export class Delegation {
     const st = w.reviewState ?? { status: 'pending' as const, round: 0, escalations: 0 }
     this.c.aptitude(w.assignee, w.id, { changes: 1 })
     const round = st.round + 1
+    // a quick job sent back twice goes one tier up instead of to a lead
+    if (w.quick && !w.parentId && round >= 2 && this.c.quickEscalate?.(w, `검토에서 ${round}번 반려됐어요: ${note}`)) return
     if (round <= LIMITS.rejectLimit) {
       h.updateTask(w.id, {
         status: 'todo',

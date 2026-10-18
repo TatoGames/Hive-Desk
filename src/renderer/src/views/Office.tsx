@@ -299,6 +299,29 @@ export default function Office({
     return true
   }
 
+  const [qp, setQp] = useState<{ title: string; pv: Awaited<ReturnType<typeof window.hive.quickPreview>> } | null>(null)
+  const [qWho, setQWho] = useState('')
+  const errText = (err: unknown): string => String((err as Error).message).replace(/^Error invoking remote method '[^']+': Error: /, '')
+
+  /** Board input: management words first, then "small job → one employee" or "organisation". */
+  const submitBoard = async (): Promise<void> => {
+    if (!boardTitle.trim()) return
+    if (await manage()) return
+    try {
+      const pv = await window.hive.quickPreview(boardTitle)
+      if (pv.pick) {
+        setQp({ title: boardTitle, pv })
+        setQWho(pv.pick.agentId)
+        return
+      }
+      await window.hive.createTask({ title: boardTitle, delegate: true })
+      setBoardTitle('')
+      setMsg('')
+    } catch (err) {
+      setMsg(errText(err))
+    }
+  }
+
   const tree = delegationTrees(snap.tasks, live)
   const nameOf = (id: string | null): string => snap.roster.find((r) => r.id === id)?.name ?? (id ? '?' : '미배정')
   const renderNode = (n: TreeNode, depth: number): JSX.Element => (
@@ -346,37 +369,63 @@ export default function Office({
           placeholder="이사회 입력창 — 일을 적으면 총괄 본부장이 받아 조직에 나눠요"
           value={boardTitle}
           onChange={(e) => setBoardTitle(e.target.value)}
-          onKeyDown={async (e) => {
-            if (e.key === 'Enter' && boardTitle.trim()) {
-              if (await manage()) return
-              try {
-                await window.hive.createTask({ title: boardTitle, delegate: true })
-                setBoardTitle('')
-                setMsg('')
-              } catch (err) {
-                setMsg(String((err as Error).message).replace(/^Error invoking remote method '[^']+': Error: /, ''))
-              }
-            }
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && boardTitle.trim()) void submitBoard()
           }}
         />
         <button
           className="primary"
           disabled={!boardTitle.trim()}
-          onClick={async () => {
-            if (await manage()) return
-            try {
-              await window.hive.createTask({ title: boardTitle, delegate: true })
-              setBoardTitle('')
-              setMsg('')
-            } catch (err) {
-              setMsg(String((err as Error).message).replace(/^Error invoking remote method '[^']+': Error: /, ''))
-            }
-          }}
+          onClick={() => void submitBoard()}
         >
           접수
         </button>
       </div>
       {msg && <div className="warn-text small">{msg}</div>}
+      {qp && (
+        <div className="panel quickbox">
+          <div className="small">{(qp.pv.options.find((o) => o.agentId === qWho) ?? qp.pv.pick!).line}</div>
+          <div className="row">
+            <button
+              className="primary"
+              onClick={async () => {
+                try {
+                  await window.hive.quickAssign({ title: qp.title, agentId: qWho })
+                  setBoardTitle('')
+                  setMsg('')
+                  setQp(null)
+                } catch (err) {
+                  setMsg(errText(err))
+                }
+              }}
+            >
+              이대로 맡기기
+            </button>
+            <select value={qWho} onChange={(e) => setQWho(e.target.value)} title="다른 사원 고르기">
+              {qp.pv.options.map((o) => (
+                <option key={o.agentId} value={o.agentId}>
+                  {o.name} · {o.label} · 예상 사용량 {o.expectedUsage.toFixed(1)}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={async () => {
+                try {
+                  await window.hive.createTask({ title: qp.title, delegate: true })
+                  setBoardTitle('')
+                  setMsg('')
+                  setQp(null)
+                } catch (err) {
+                  setMsg(errText(err))
+                }
+              }}
+            >
+              조직에 맡기기
+            </button>
+            <button className="ghost" onClick={() => setQp(null)}>닫기</button>
+          </div>
+        </div>
+      )}
 
       <section className="ticker" aria-label="실시간 소식판">
         <b className="small">소식판</b>

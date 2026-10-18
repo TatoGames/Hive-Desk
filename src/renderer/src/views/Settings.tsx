@@ -17,6 +17,7 @@ export default function Settings({
   const [strip, setStrip] = useState(c.stripApiKeys)
   const [notif, setNotif] = useState(c.notifications !== false)
   const [review, setReview] = useState<HumanReview>(c.humanReview)
+  const [trial, setTrial] = useState(Math.round((c.quickTrialRate ?? 0.1) * 100))
   const [interval, setIntervalMin] = useState(c.syncIntervalMinutes)
   const [remote, setRemote] = useState('')
   const [msg, setMsg] = useState<SyncResult | null>(null)
@@ -31,7 +32,8 @@ export default function Settings({
       stripApiKeys: strip,
       notifications: notif,
       humanReview: review,
-      syncIntervalMinutes: Math.max(0, interval)
+      syncIntervalMinutes: Math.max(0, interval),
+      quickTrialRate: Math.min(1, Math.max(0, trial / 100))
     })
     await onSaved()
     setMsg({ ok: true, message: '저장했어요.' })
@@ -87,6 +89,10 @@ export default function Settings({
         <label>
           동시에 실행할 최대 태스크 수
           <input type="number" min={1} value={maxC} onChange={(e) => setMaxC(Number(e.target.value) || 1)} />
+        </label>
+        <label title="파일을 바꾸지 않는 작은 일 중 이 비율은 더 가벼운 모델에게 시험 삼아 맡겨 기록을 쌓아요">
+          빠른 배정 시험 비율(%)
+          <input type="number" min={0} max={100} value={trial} onChange={(e) => setTrial(Number(e.target.value) || 0)} />
         </label>
         <label className="full">
           결과 확인 (완료로 처리하기 전에 사람이 보는 단계)

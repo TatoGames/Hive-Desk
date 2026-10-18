@@ -123,6 +123,22 @@ export type TaskStatus =
 /** One instruction a person gave to a task, tracked until the AI has applied it. */
 export type InstructionMode = 'live' | 'interrupt' | 'after'
 export type InstructionState = 'queued' | 'sent' | 'seen' | 'applied' | 'dropped'
+export interface QuickInfo {
+  size: import('./quick').JobSize
+  kind: import('./quick').JobKind
+  writes: boolean
+  /** A lighter model tried on purpose to build up records. */
+  trial: boolean
+  /** The person picked the employee (not the app). */
+  chosen?: boolean
+  expectedRuns: number
+  expectedUsage: number
+  /** Times the job was handed to a higher tier; two, and it goes to the organisation. */
+  escalations: number
+  /** Why it moved up, oldest first. */
+  trail: string[]
+}
+
 export interface Instruction {
   id: string
   text: string
@@ -170,6 +186,10 @@ export interface Task {
   result?: string
   /** Structured report from the latest run (the agent's own account). */
   report?: Report
+  /** What kind of job this is (set by quick assignment; also used to sort the aptitude records). */
+  jobKind?: import('./quick').JobKind
+  /** Handed straight to one employee (6-0.5) instead of through the organisation. */
+  quick?: QuickInfo
   /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
   reportFile?: string
   attachments?: Attachment[]
@@ -568,6 +588,8 @@ export interface CompanySummary {
 }
 
 export interface AppConfig {
+  /** Share of low-risk quick jobs given to a lighter model on trial (0..1). */
+  quickTrialRate?: number
   /** Company priority for shared usage limits (highest first); companies not listed follow in creation order. */
   companyOrder?: string[]
   /** The same per connection (CLI), overriding `companyOrder`. */

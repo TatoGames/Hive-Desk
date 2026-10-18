@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Snapshot } from '@shared/types'
 import { performance, type PerfRow } from '@shared/performance'
 
@@ -58,6 +58,14 @@ export default function Performance({ snap }: { snap: Snapshot }): JSX.Element {
       }),
     [snap.tasks, snap.company, snap.roster]
   )
+  const [qt, setQt] = useState<Awaited<ReturnType<typeof window.hive.quickTable>>>([])
+  useEffect(() => {
+    let alive = true
+    void window.hive.quickTable().then((t) => alive && setQt(t))
+    return () => {
+      alive = false
+    }
+  }, [snap.company.aptitude])
   return (
     <div className="page">
       <header className="page-head">
@@ -70,6 +78,37 @@ export default function Performance({ snap }: { snap: Snapshot }): JSX.Element {
       <Table title="에이전트별" rows={p.agents} />
       <Table title="조직(팀)별" rows={p.units} />
       <Table title="모델별" rows={p.models} showLoad />
+      <section className="panel">
+        <h2>일 종류별 (빠른 배정이 참고해요)</h2>
+        {!qt.length ? (
+          <div className="empty">빠른 배정으로 끝난 일이 아직 없어요.</div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>모델</th>
+                <th>일 종류</th>
+                <th>건수</th>
+                <th>첫 통과율</th>
+                <th>평균 실행</th>
+                <th>평균 사용량</th>
+              </tr>
+            </thead>
+            <tbody>
+              {qt.map((r) => (
+                <tr key={r.modelKey + r.kind}>
+                  <td>{r.label}</td>
+                  <td>{r.kindLabel}</td>
+                  <td>{r.tasks}</td>
+                  <td>{Math.round(r.firstPass * 100)}%</td>
+                  <td>{r.avgRuns.toFixed(1)}회</td>
+                  <td>{r.avgUsage.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </div>
   )
 }
