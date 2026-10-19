@@ -5,6 +5,7 @@ import { BubbleHold, bubbleFor, type Bubble } from '@shared/bubble'
 import { employeeState, progressOf, STATE_LABEL, type EmployeeState } from '@shared/office'
 import { jobLabel } from '@shared/company'
 import { handoffReasonLabel } from '@shared/handoff'
+import { groupByZone } from '@shared/zones'
 import { fmtElapsed, useNow } from '../store'
 import TaskDetail from './TaskDetail'
 
@@ -138,33 +139,38 @@ export default function WorkStatus({
       <div className="ws-grid">
         <section className="ws-floor">
           {!shown.length && <div className="ws-empty">{emptyLine()}</div>}
-          <div className="ws-people">
-            {shown.map((p) => {
-              const b = bubbleOf(p)
-              return (
-                <button
-                  key={p.r.id}
-                  className={`ws-person st-${p.v.state}`}
-                  onClick={() => p.v.task && setSel({ kind: 'task', id: p.v.task.id })}
-                  title={`${p.r.name} · ${STATE_LABEL[p.v.state]}${p.v.task ? ` · ${p.v.task.title}` : ''}`}
-                >
-                  <div className={`ws-bubble tone-${b.tone}`} key={b.text}>
-                    {b.text}
-                  </div>
-                  <div className="ws-avatar" style={{ background: colorOf(p.r.name) }}>
-                    <span className="ws-face">{JOB_FACE[p.r.job ?? ''] ?? '🙂'}</span>
-                    <span className="ws-prop" aria-hidden>
-                      {p.v.state === 'reviewing' ? '🔎' : p.v.state === 'waiting-approval' || p.v.state === 'waiting-input' ? '✋' : p.v.state === 'limit' ? 'z z' : p.v.state === 'error' ? '!' : '⌨'}
-                    </span>
-                  </div>
-                  <div className="ws-name">
-                    {p.r.name}
-                    <span className="muted small"> {jobLabel(p.r.job)}</span>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
+          {groupByZone(shown.map((p) => ({ ...p, job: p.r.job }))).map((g) => (
+            <div className="ws-zone" key={g.zone.id} data-zone={g.zone.id}>
+              <div className="ws-zone-label">{g.zone.label}</div>
+              <div className="ws-people">
+                {g.people.map((p) => {
+                  const b = bubbleOf(p)
+                  return (
+                    <button
+                      key={p.r.id}
+                      className={`ws-person st-${p.v.state}`}
+                      onClick={() => p.v.task && setSel({ kind: 'task', id: p.v.task.id })}
+                      title={`${p.r.name} · ${STATE_LABEL[p.v.state]}${p.v.task ? ` · ${p.v.task.title}` : ''}`}
+                    >
+                      <div className={`ws-bubble tone-${b.tone}`} key={b.text}>
+                        {b.text}
+                      </div>
+                      <div className="ws-avatar" style={{ background: colorOf(p.r.name) }}>
+                        <span className="ws-face">{JOB_FACE[p.r.job ?? ''] ?? '🙂'}</span>
+                        <span className="ws-prop" aria-hidden>
+                          {p.v.state === 'reviewing' ? '🔎' : p.v.state === 'waiting-approval' || p.v.state === 'waiting-input' ? '✋' : p.v.state === 'limit' ? 'z z' : p.v.state === 'error' ? '!' : '⌨'}
+                        </span>
+                      </div>
+                      <div className="ws-name">
+                        {p.r.name}
+                        <span className="muted small"> {jobLabel(p.r.job)}</span>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
           {!!resting.length && (
             <div className="ws-rest">
               <button className="sm ghost" onClick={() => setShowIdle(!showIdle)}>
