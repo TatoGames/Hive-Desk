@@ -36,6 +36,10 @@ export interface ChatModelInfo {
   note?: string
   /** Its usage limit is reached right now. */
   limitUntil?: string
+  /** A model of this PC: how well it fits this PC (B2). */
+  fit?: string
+  /** A model of this PC: how fast it answered when measured (B2). */
+  speed?: string
 }
 
 export interface LocalTurn {

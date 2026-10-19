@@ -325,3 +325,18 @@ export function sortCandidates(items: CandidateView[], by: CandidateSort): Candi
     .sort((a, b) => (by === 'size' ? sizeOf(a.v.c) - sizeOf(b.v.c) : rank(a.v) - rank(b.v)) || a.i - b.i)
     .map((x) => x.v)
 }
+
+/** B2 (챗-3): what the chat shows beside a model of this PC: how well it fits, and how fast it answered when it was measured. */
+export function speedLine(sp: Pick<SpeedResult, 'firstMs' | 'perSec' | 'estimated'> | undefined): string | undefined {
+  if (!sp) return undefined
+  const first = sp.firstMs < 1000 ? `${Math.round(sp.firstMs)}ms` : `${(sp.firstMs / 1000).toFixed(1)}초`
+  return `첫 응답 ${first} · 초당 ${sp.perSec.toFixed(1)}${sp.estimated ? '(추정)' : ''}`
+}
+
+/** Fit of an installed model by its listed size (parameters, or the size on disk). */
+export function installedFit(m: Pick<LocalModelInfo, 'name' | 'paramsB' | 'sizeBytes'>, advice: TierAdvice | undefined): PcFit | undefined {
+  const approxGB = m.sizeBytes ? m.sizeBytes / 1e9 : undefined
+  const paramsB = m.paramsB ?? guessParamsB(m.name)
+  if (paramsB === undefined && approxGB === undefined) return undefined
+  return pcFit({ paramsB: paramsB ?? 0, approxGB }, advice)
+}

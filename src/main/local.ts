@@ -4,6 +4,8 @@ import type { BenchSummary } from '../shared/bench'
 import DEFAULT_CANDIDATES from '../shared/local-models.default.json'
 import {
   fitNote,
+  installedFit,
+  speedLine,
   modelTier,
   normalizeUrl,
   parseCandidates,
@@ -208,7 +210,9 @@ export class LocalAi {
           weight: 0,
           where: 'local',
           ok: !!st?.ok,
-          note: st?.ok ? fitNote(m, advice) : (st?.error ?? '연결을 확인 중이에요')
+          note: st?.ok ? fitNote(m, advice) : (st?.error ?? '연결을 확인 중이에요'),
+          fit: installedFit(m, advice),
+          speed: speedLine(this.c.store().speed?.[key(e.id, m.name)])
         })
       }
     }
