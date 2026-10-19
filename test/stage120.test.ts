@@ -236,15 +236,22 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hivedesk-s120-'))
 })
 afterEach(async () => {
-  for (const e of engines) e.shutdown()
+  const mine = engines
   engines = []
+  for (const e of mine) e.shutdown()
+  // A test can end the moment a hand-over is recorded, while the employee who took over is still starting in the
+  // work folder. Windows refuses to remove a folder that is in use (EBUSY), so wait until nothing runs any more.
+  const t0 = Date.now()
+  const busy = (): boolean => mine.some((e) => e.hive.listTasks().some((t) => t.status === 'running'))
+  while (busy() && Date.now() - t0 < 15_000) await wait(50)
+  await wait(300)
   for (const f of fakes) {
     f.server.closeAllConnections()
     await new Promise((r) => f.server.close(r))
   }
   fakes = []
-  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-})
+  rmSync(dir, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 })
+}, 60_000)
 
 /** A work folder holding calc.js (no checks: the result waits for a person, which is fine here). */
 function folder(name: string): string {
