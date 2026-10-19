@@ -332,3 +332,20 @@ describe('v6 4단계: 예시 모으기 (옵트인)', () => {
     expect(parseAnswer('=== FILE: a.js ===\n```\n```').ok).toBe(false)
   })
 })
+
+describe('v6 4단계: 링크를 거친 작업 폴더', () => {
+  it('a new file is allowed in a work folder that is reached through a link (macOS /var → /private/var), a way out is not', () => {
+    const base = mkdtempSync(join(tmpdir(), 'hivedesk-link-'))
+    try {
+      const real = join(base, 'real')
+      const link = join(base, 'link')
+      mkdirSync(real)
+      symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir')
+      expect(safeTarget(link, 'new.js')).toMatchObject({ ok: true, rel: 'new.js' })
+      expect(safeTarget(link, 'sub/new.js')).toMatchObject({ ok: true })
+      expect(safeTarget(link, '../x.js')).toMatchObject({ ok: false })
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+})

@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Agent, CheckRun, HumanReview, PermissionLevel, RunDiff, RunRecord, RunResultKind, Task } from '../shared/types'
 import { LOCAL_SCOPE, SYSTEM_PROMPT, TOO_BIG, errorSummary, formatFix, parseAnswer, retryPrompt, workPrompt, type LocalExample, type PromptFile } from '../shared/localwork'
 import { rollback, createCheckpoint } from './checkpoint'
@@ -71,7 +71,9 @@ export function safeTarget(cwd: string, input: string): Target {
   if (rel0.split('/').some((p) => p === '..')) return { ok: false, reason: `${rel0}: 작업 폴더 밖으로 나가는 경로예요` }
   if (sensitivePath(rel0)) return { ok: false, reason: `${rel0}: 비밀번호·키가 들어갈 수 있는 파일이라 건드리지 않아요` }
   const abs = resolve(cwd, rel0)
-  if (!containsPath(cwd, abs)) return { ok: false, reason: `${rel0}: 작업 폴더 밖 경로예요` }
+  // a plain text check: containsPath resolves links only for paths that exist, so a new file would look "outside" in a folder reached through a link (macOS /var → /private/var). Links are checked below.
+  const lex = relative(cwd, abs)
+  if (lex === '..' || lex.startsWith('..' + sep) || isAbsolute(lex)) return { ok: false, reason: `${rel0}: 작업 폴더 밖 경로예요` }
   try {
     const root = realpathSync(cwd)
     // the deepest part that exists must really be inside (a link to the outside is a way out)
