@@ -751,6 +751,72 @@ describe('6-0.7: work trees let sub-tasks of one git project run at the same tim
   })
 })
 
+describe('C3: a bundle of a GitHub project goes out as one branch and one pull request', () => {
+  it('the sub-tasks are merged on the bundle branch (not into the folder) and, once the person approved, pushed as a single PR', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { existsSync } = await import('node:fs')
+    const repo = join(dir, 'repo')
+    mkdirSync(repo)
+    const g = (...a: string[]): string => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo }).toString()
+    g('init', '-b', 'main')
+    writeFileSync(join(repo, 'README.md'), 'hi\n')
+    g('add', '-A')
+    g('commit', '-m', 'init')
+    const s = makeScript({
+      // (in a project everybody works in the project folder, so the planner is told apart by the name in the prompt)
+      plan: (_who, _t, prompt) => {
+        const me = /You are "([^"]+)"/.exec(prompt)?.[1]
+        if (me === 'coo') return '[[SUBTASK: 서버 만들기 | assignee=alice-hq | done=서버 동작 | after=none]]\n[[ESTIMATE: 6]]'
+        if (me === 'hq') return '[[SUBTASK: 서버팀 작업 | assignee=alice-srv | done=API 완성 | after=none]]\n[[ESTIMATE: 5]]'
+        return '[[SUBTASK: 모델 | assignee=alice-dev1 | done=모델 | after=none | files=src/model]]\n[[SUBTASK: 라우터 | assignee=alice-dev2 | done=라우터 | after=none | files=src/router]]\n[[ESTIMATE: 4]]'
+      },
+      work: (_who, task, cwd) => {
+        writeFileSync(join(cwd, task + '.txt'), task + '\n')
+        return REPORT(task)
+      }
+    })
+    const { eng } = company(s)
+    eng.saveSettings({ parallelWorktrees: true, maxConcurrent: 4 })
+    const calls: string[][] = []
+    let prBody = ''
+    eng.exec = async (cmd, args, opts) => {
+      calls.push([cmd, ...args])
+      if (args.join(' ').startsWith('pr create')) prBody = `${args.join(' ')}\n${opts?.input ?? ''}`
+      const a = args.join(' ')
+      if (cmd === 'git' && args[0] === 'push') return { code: 0, out: '', err: '' }
+      if (a === '--version') return { code: 0, out: 'gh version 2.60.0', err: '' }
+      if (a.startsWith('auth status')) return { code: 0, out: 'Logged in to github.com account alice', err: '' }
+      if (a.startsWith('pr create')) return { code: 0, out: 'https://github.com/o/r/pull/9\n', err: '' }
+      if (a.startsWith('pr list')) return { code: 0, out: '[]', err: '' }
+      return { code: 0, out: '', err: '' }
+    }
+    const p = eng.saveProject({ name: '게임' })
+    eng.setProjectPath(p.id, repo)
+    eng.setProjectGithub(p.id, 'https://github.com/o/r.git', 'main')
+    eng.saveConnection({ kind: 'github', name: 'GitHub', github: { autoPr: true } })
+    const root = eng.createTask({ title: '게임 서버', delegate: true, projectId: p.id })
+    await settle(eng)
+    const done = task(eng, root.id)
+    expect(done.status).toBe('needs_review')
+    // the bundle has its own branch; the folder itself was not touched and no PR exists before the person looked
+    expect(done.github?.branch).toMatch(/^hive\//)
+    expect(existsSync(join(repo, '모델.txt'))).toBe(false)
+    expect(g('rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main')
+    expect(g('show', `${done.github!.branch}:모델.txt`)).toBe('모델\n')
+    expect(g('show', `${done.github!.branch}:라우터.txt`)).toBe('라우터\n')
+    expect(calls.some((c) => c[1] === 'pr' && c[2] === 'create')).toBe(false)
+    // the person approves the final report: one push, one PR, whose text lists the parts
+    eng.reviewTask(root.id, 'approve')
+    for (let i = 0; i < 300 && !task(eng, root.id).github?.pr; i++) await new Promise((r) => setTimeout(r, 20))
+    expect(task(eng, root.id).github?.pr?.number).toBe(9)
+    expect(calls.filter((c) => c[0] === 'git' && c[1] === 'push').length).toBe(1)
+    expect(prBody).toContain('## 하위 작업')
+    expect(prBody).toContain('- 모델')
+    expect(prBody).toContain('- 라우터')
+    eng.shutdown()
+  })
+})
+
 describe('6-0.7: approvals the app may answer itself', () => {
   it('a plan only a little over the limit is approved automatically (logged as 자동); a big one still goes to the board', async () => {
     const { eng } = company(makeScript({ plan: (who) => (who === 'coo' ? '[[SUBTASK: 일 | assignee=alice-hq | done=끝 | after=none]]\n[[ESTIMATE: 22]]' : '[[SELF: x]]') }))

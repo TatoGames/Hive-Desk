@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { TIER_LABEL } from '@shared/company'
-import { CANDIDATE_FILTERS, LICENSE_NOTICE, filterCandidates, fitNote, fmtBytes, modelTier, needsEasyOnly, pcFit, recommendState, sizeTag, sortCandidates, type CandidateFilter, type CandidateSort, type CandidateView, type LocalModelInfo } from '@shared/localai'
+import { CANDIDATE_FILTERS, LICENSE_NOTICE, REMOTE_NOTICE, SCOPE_LABEL, endpointProblem, endpointScope, normalizeUrl, filterCandidates, fitNote, fmtBytes, modelTier, needsEasyOnly, pcFit, recommendState, sizeTag, sortCandidates, type CandidateFilter, type CandidateSort, type CandidateView, type LocalModelInfo } from '@shared/localai'
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
 import OllamaEngineCard from './OllamaEngineCard'
+import { installChoices, isStaffCandidate, libraryUrl, type LibraryItem } from '@shared/ollamaLibrary'
 
 const key = (ep: string, m: string): string => `${ep}|${m}`
 
@@ -15,7 +16,13 @@ export default function LocalAi(): JSX.Element {
   const [showToken, setShowToken] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /** An address of another computer waiting for the person to confirm that what they send goes there. */
+  const [remoteOk, setRemoteOk] = useState<string | null>(null)
   const [custom, setCustom] = useState('')
+  /** J4: the library search. `null` after a search that could not be read; `undefined` before any search. */
+  const [found, setFound] = useState<LibraryItem[] | null | undefined>(undefined)
+  const [q, setQ] = useState('')
+  const [pick, setPick] = useState<Record<string, string>>({})
   const [agreed, setAgreed] = useState<Record<string, boolean>>({})
   const [filters, setFilters] = useState<CandidateFilter[]>([])
   const [sort, setSort] = useState<CandidateSort>('recommend')
@@ -58,11 +65,18 @@ export default function LocalAi(): JSX.Element {
     window.setTimeout(() => void load(), 80)
   }
 
-  const add = (u: string): void => {
+  const add = (u: string, acceptRemote = false): void => {
+    const norm = normalizeUrl(u)
+    if (norm && endpointScope(norm) !== 'this-pc') {
+      const problem = endpointProblem(norm, !!token.trim())
+      if (problem) return setErr(problem)
+      if (!acceptRemote) return setRemoteOk(u) // asked once, before the first connection to another computer
+    }
+    setRemoteOk(null)
     setBusy(true)
     void run(async () => {
       try {
-        await window.hive.localAdd({ url: u, token: token.trim() || undefined })
+        await window.hive.localAdd({ url: u, token: token.trim() || undefined, acceptRemote })
         setUrl('')
         setToken('')
       } finally {
@@ -132,12 +146,25 @@ export default function LocalAi(): JSX.Element {
           </div>
         </div>
       )}
+      {remoteOk && (
+        <div className="warn-box small" role="alert">
+          <b>{remoteOk}</b>는 이 PC가 아니에요. {REMOTE_NOTICE}
+          <div className="row">
+            <button className="sm primary" onClick={() => add(remoteOk, true)}>
+              알겠어요, 연결
+            </button>
+            <button className="sm ghost" onClick={() => setRemoteOk(null)}>
+              취소
+            </button>
+          </div>
+        </div>
+      )}
       {err && <div className="warn-text small">{err}</div>}
 
       {st.endpoints.map((e) => (
         <div key={e.id} className="local-ep">
           <div className="row">
-            <b>{e.name}</b> <span className="muted small">{e.url}</span>
+            <b>{e.name}</b> <span className="chip">{SCOPE_LABEL[endpointScope(e.url)]}</span> <span className="muted small">{e.url}</span>
             <span className={'chip ' + (e.state?.ok ? 'ok' : 'bad')}>{e.state ? (e.state.ok ? `연결됨${e.state.version ? ' · ' + e.state.version : ''}` : '연결 안 됨') : '확인 중'}</span>
             <ConfirmButton label="연결 끊기" onConfirm={() => run(() => window.hive.localRemove(e.id))} />
           </div>
@@ -234,6 +261,44 @@ export default function LocalAi(): JSX.Element {
             </div>
           )
         })}
+        {ollamaEp && (
+          <div className="local-find">
+            <div className="row">
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="다른 모델 찾기 (예: coder, gemma)" onKeyDown={(e) => e.key === 'Enter' && q.trim() && void window.hive.localSearchLibrary(q).then(setFound)} />
+              <button className="sm" disabled={!q.trim()} onClick={() => void window.hive.localSearchLibrary(q).then(setFound)}>
+                찾기
+              </button>
+            </div>
+            {found === null && <div className="muted small">목록을 읽지 못했어요. 인터넷 연결을 확인하거나 아래에 모델 이름을 직접 적어 주세요.</div>}
+            {found && (
+              <>
+                <div className="muted small">앱이 추천하는 모델이 아니에요. 설치 전에 조건 링크를 직접 읽어 주세요. 라이선스는 모두 &quot;확인 전&quot;이에요.</div>
+                {found.filter(isStaffCandidate).slice(0, 12).map((it) => {
+                  const choices = installChoices(it)
+                  const cur = pick[it.name] ?? choices[0]
+                  return (
+                    <div key={it.name} className="local-cand">
+                      <b>{it.name}</b> {it.caps.map((c) => <span key={c} className="chip">{c}</span>)} <span className="chip warn">라이선스 확인 전</span>
+                      <div className="muted small">{it.description}</div>
+                      <div className="row">
+                        <select value={cur} onChange={(e) => setPick({ ...pick, [it.name]: e.target.value })}>
+                          {choices.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        <a href={libraryUrl(it.name)} target="_blank" rel="noreferrer">조건 보기</a>
+                        <label className="small">
+                          <input type="checkbox" checked={!!agreed['f:' + it.name]} onChange={(e) => setAgreed({ ...agreed, ['f:' + it.name]: e.target.checked })} /> 조건을 직접 확인했어요
+                        </label>
+                        <button className="sm primary" disabled={!agreed['f:' + it.name]} onClick={() => job(() => window.hive.localPull(ollamaEp.id, cur))}>
+                          설치
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        )}
         {ollamaEp && (
           <div className="row">
             <input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="다른 모델 이름 (예: gemma2:9b)" />

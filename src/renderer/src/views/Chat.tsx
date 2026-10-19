@@ -221,12 +221,14 @@ export default function Chat({ snap, openId, goConnections, goBoard }: { snap: S
                     <option key={modelId(m.model)} value={modelId(m.model)}>
                       {m.label} · {TIER_LABEL[m.tier]}
                       {m.where === 'local' ? ' · 내 PC' : ''}
+                      {m.fit ? ` · ${m.fit}` : ''}
                       {m.limitUntil ? ' · 한도' : ''}
                       {!m.ok ? ' · 확인 전' : ''}
                     </option>
                   ))}
                 </select>
               </label>
+              {chat && info(chat.model)?.speed && <span className="muted small">⏱ {info(chat.model)!.speed}</span>}
               {chat && info(chat.model)?.note && <span className="muted small">⚠ {info(chat.model)!.note}</span>}
               {chat?.folderRefs.map((f) => (
                 <span key={f} className="chip" title={f}>

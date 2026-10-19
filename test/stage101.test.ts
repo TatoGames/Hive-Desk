@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Runner } from '../src/main/adapters'
 import { Engine } from '../src/main/engine'
-import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree } from '../src/main/worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree, worktreeCwd } from '../src/main/worktree'
 import { runChecks } from '../src/main/checks'
 import { lstatSync } from 'node:fs'
 
@@ -38,7 +38,7 @@ describe('a folder without git can become one (after the person agrees)', () => 
     expect((await initGitFolder(w)).message).toContain('이미')
   })
 
-  it('an empty repository (no commit) gets its first record; a sub-folder of a repository is refused', async () => {
+  it('an empty repository (no commit) gets its first record; a sub-folder of a repository works once the repository has one (C4)', async () => {
     const w = join(dir, 'e')
     mkdirSync(w)
     git(w, 'init', '-q', '-b', 'main')
@@ -48,11 +48,18 @@ describe('a folder without git can become one (after the person agrees)', () => 
     expect(await gitState(w)).toBe('ok')
     const sub = join(w, 'server')
     mkdirSync(sub)
-    expect(await gitState(sub)).toBe('not-top')
+    expect(await gitState(sub)).toBe('ok')
     const r = await initGitFolder(sub)
-    expect(r.ok).toBe(false)
-    expect(r.message).toContain('맨 위 폴더')
+    expect(r.message).toContain('이미')
     expect(existsSync(join(sub, '.git'))).toBe(false)
+    // …but a sub-folder of a repository without any record is not turned into the first record
+    const e2 = join(dir, 'e2')
+    mkdirSync(join(e2, 'server'), { recursive: true })
+    git(e2, 'init', '-q', '-b', 'main')
+    expect(await gitState(join(e2, 'server'))).toBe('no-commit')
+    const r2 = await initGitFolder(join(e2, 'server'))
+    expect(r2.ok).toBe(false)
+    expect(r2.message).toContain('맨 위 폴더')
   })
 })
 
@@ -91,7 +98,7 @@ describe('why a task waits for its folder, and the fix', () => {
     eng.shutdown()
   })
 
-  it('a git folder with the switch off only needs the switch; a sub-folder cannot be fixed', async () => {
+  it('a git folder with the switch off only needs the switch; a sub-folder of it works the same (C4)', async () => {
     const { eng, sub, w } = setup()
     await initGitFolder(w)
     const t = sub('라우터')
@@ -103,8 +110,8 @@ describe('why a task waits for its folder, and the fix', () => {
     const a2 = eng.saveAgent({ name: '서버', adapter: 'codex', workDir: inner, modelRef: { id: 'openai-gpt-6-1-sol', pin: 'pinned' } })
     const t2 = eng.hive.updateTask(eng.createTask({ title: '서버 일', assignee: a2.id }).id, { kind: 'work', parentId: 'p' })
     const adv = await eng.parallelAdvice(t2.id)
-    expect(adv.state).toBe('not-top')
-    expect((await eng.enableParallel(t2.id)).ok).toBe(false)
+    expect(adv.state).toBe('ok')
+    expect((await eng.enableParallel(t2.id)).ok).toBe(true)
     eng.shutdown()
   })
 })
@@ -199,5 +206,71 @@ describe('single tasks in one git folder run together, each in its own work tree
     expect(cwds).toEqual([w])
     expect(eng.hive.getTask(t.id)!.worktree).toBeUndefined()
     eng.shutdown()
+  })
+})
+
+describe('C4: a project folder inside a repository gets work trees too', () => {
+  it('the checkout is the whole repository, the task works in the same sub-folder of it, and the result merges back', async () => {
+    const repo = join(dir, 'mono')
+    mkdirSync(join(repo, 'server'), { recursive: true })
+    mkdirSync(join(repo, 'web'), { recursive: true })
+    writeFileSync(join(repo, 'server', 'a.txt'), 'a')
+    writeFileSync(join(repo, 'web', 'w.txt'), 'w')
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'init')
+    const server = join(repo, 'server')
+    const wt = (await addWorktree(server, 't1'))!
+    expect(wt).not.toBeNull()
+    expect(wt.sub).toBe('server')
+    expect(worktreeCwd(wt)).toBe(join(wt.path, 'server'))
+    expect(existsSync(join(worktreeCwd(wt), 'a.txt'))).toBe(true)
+    // the work tree lives inside the sub-folder and stays out of the project's own status
+    expect(git(repo, 'status', '--porcelain').trim()).toBe('')
+    writeFileSync(join(worktreeCwd(wt), 'new.txt'), 'n')
+    expect(await commitWorktree(wt, '서버 일')).toBe(true)
+    expect((await mergeWorktree(wt, '서버 일')).ok).toBe(true)
+    expect(readFileSync(join(server, 'new.txt'), 'utf8')).toBe('n')
+    await removeWorktree(wt)
+    expect(existsSync(wt.path)).toBe(false)
+    expect(git(repo, 'status', '--porcelain').trim()).toBe('')
+  })
+
+  it('installed packages of the sub-folder are linked at the right place and never saved', async () => {
+    const repo = join(dir, 'mono2')
+    mkdirSync(join(repo, 'server', 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(repo, 'server', 'node_modules', 'dep', 'index.js'), 'module.exports = 1')
+    writeFileSync(join(repo, 'server', 'package.json'), JSON.stringify({ scripts: { test: 'node t.js' } }))
+    writeFileSync(join(repo, 'server', 't.js'), 'require("dep")')
+    writeFileSync(join(repo, '.gitignore'), 'node_modules/\n.hive-worktrees/\n')
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'init')
+    const server = join(repo, 'server')
+    const wt = (await addWorktree(server, 't2'))!
+    expect(lstatSync(join(worktreeCwd(wt), 'node_modules')).isSymbolicLink()).toBe(true)
+    const run = await runChecks(worktreeCwd(wt), { app: false, shotDir: dir, shotName: 'x' })
+    expect(run.items.map((i) => [i.name, i.ok])).toEqual([['test', true]])
+    await removeWorktree(wt)
+    expect(existsSync(join(server, 'node_modules', 'dep', 'index.js'))).toBe(true)
+  })
+
+  it('two tasks of the same sub-folder run apart and both land', async () => {
+    const repo = join(dir, 'mono3')
+    mkdirSync(join(repo, 'server'), { recursive: true })
+    writeFileSync(join(repo, 'server', 'a.txt'), 'a')
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'init')
+    const server = join(repo, 'server')
+    const w1 = (await addWorktree(server, 'x1'))!
+    const w2 = (await addWorktree(server, 'x2'))!
+    writeFileSync(join(worktreeCwd(w1), 'one.txt'), '1')
+    writeFileSync(join(worktreeCwd(w2), 'two.txt'), '2')
+    await commitWorktree(w1, '1')
+    await commitWorktree(w2, '2')
+    expect((await mergeWorktree(w1, '1')).ok).toBe(true)
+    expect((await mergeWorktree(w2, '2')).ok).toBe(true)
+    expect(existsSync(join(server, 'one.txt')) && existsSync(join(server, 'two.txt'))).toBe(true)
   })
 })

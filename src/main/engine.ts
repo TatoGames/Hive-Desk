@@ -84,7 +84,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
-import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree, type GitState } from './worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeBranchInto, mergeWorktree, removeWorktree, worktreeCwd, type GitState } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
@@ -95,6 +95,8 @@ import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
 import { detectChecks, isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
+import { searchLibrary } from './ollamaLibrary'
+import type { LibraryItem } from '../shared/ollamaLibrary'
 import { LocalAi, type LocalJob, type LocalStatus } from './local'
 import { OllamaEngine, type EngineManifest, type EngineStatus } from './ollamaEngine'
 import ENGINE_MANIFEST from '../shared/ollama-engine.default.json'
@@ -1309,7 +1311,7 @@ export class Engine {
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
-    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree?.path)
+    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree ? worktreeCwd(t.worktree) : undefined)
   }
 
   /** Is another started task working in (or waiting for) the folder this task would use? */
@@ -1394,7 +1396,8 @@ export class Engine {
       const finished = this.hive.getTask(id)
       if (finished?.kind !== 'review' && finished?.worktree && !finished.worktree.merged && (finished.kind === 'work' || !finished.github?.branch)) await commitWorktree(finished.worktree, finished.title).catch(() => false)
       if (finished?.github?.branch) await this.github.commit(id)
-      if (finished?.status === 'done' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
+      // (a plan's top task goes out only after the board approved its final report, see reviewTask)
+      if (finished?.status === 'done' && finished.kind !== 'integrate' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
       // v5.1: the app checks the work itself before any AI review (still inside the folder lock)
       if (!ac.signal.aborted && finished?.kind === 'work' && finished.status === 'done' && !agent.localModel) await this.checkWork(agent, id)
       // delegation: what a plan / review / work run produced decides what happens next
@@ -1515,7 +1518,7 @@ export class Engine {
   localStatus(): Promise<LocalStatus> {
     return this.local.status()
   }
-  localAdd(o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> {
+  localAdd(o: { name?: string; url: string; token?: string; acceptRemote?: boolean }): Promise<LocalEndpoint> {
     return this.local.add(o)
   }
   localRemove(id: string): void {
@@ -1529,6 +1532,9 @@ export class Engine {
   }
   localBench(endpointId: string, model: string): Promise<LocalJob> {
     return this.local.bench(endpointId, model)
+  }
+  localSearchLibrary(q: string): Promise<LibraryItem[] | null> {
+    return searchLibrary(q)
   }
   localPull(endpointId: string, name: string): Promise<LocalJob> {
     return this.local.pull(endpointId, name)
@@ -1703,11 +1709,19 @@ export class Engine {
 
   /** Before the integration run: merge the sub-tasks' branches. A clash stops it and asks the person. */
   private async mergeBundle(id: string): Promise<boolean> {
-    const kids = this.hive.listTasks().filter((k) => k.parentId === id && k.status === 'done' && k.worktree && !k.worktree.merged)
+    const withTree = this.hive.listTasks().filter((k) => k.parentId === id && k.status === 'done' && k.worktree && !k.worktree.merged)
     const skipClash = /빼고 진행/.test(this.hive.getTask(id)?.reply ?? '')
+    // C3: the bundle of a GitHub project is merged on the branch of its top task (never into the project folder)
+    let top = this.hive.getTask(id)
+    while (top?.parentId) top = this.hive.getTask(top.parentId)
+    const own = withTree.length && top ? ((await this.github.ensureBundle(top.id).catch(() => null)) ?? undefined) : undefined
+    // a manager below the top reads the merged result there
+    if (own && id !== top!.id && !this.hive.getTask(id)?.worktree) this.hive.updateTask(id, { worktree: own })
+    // (a manager below that read the bundle folder shares it: that is not a branch to merge)
+    const kids = own ? withTree.filter((k) => k.worktree!.path !== own.path) : withTree
     for (const k of kids) {
       const wt = k.worktree!
-      const r = await mergeWorktree(wt, k.title)
+      const r = own ? await mergeBranchInto(own.path, wt.branch, k.title) : await mergeWorktree(wt, k.title)
       if (!r.ok && skipClash) {
         this.hive.addEvent(k.id, 'status', 'system', `충돌 때문에 이 작업의 변경은 합치지 않았어요 (브랜치 ${wt.branch}는 그대로 둬요).`)
         this.hive.updateTask(k.id, { worktree: { ...wt, merged: true } })
@@ -1716,7 +1730,7 @@ export class Engine {
       if (!r.ok) {
         this.hive.updateTask(id, {
           status: 'needs_input',
-          question: `"${k.title}"의 변경을 합치다가 충돌이 났어요. ${r.message}\n작업 폴더(${wt.base})에서 \`git merge ${wt.branch}\`로 직접 해결한 뒤 "해결했어요"라고 답해 주세요. 그 작업을 빼려면 답에 "빼고 진행"이라고 적어 주세요.`
+          question: `"${k.title}"의 변경을 합치다가 충돌이 났어요. ${r.message}\n작업 폴더(${own?.path ?? wt.base})에서 \`git merge ${wt.branch}\`로 직접 해결한 뒤 "해결했어요"라고 답해 주세요. 그 작업을 빼려면 답에 "빼고 진행"이라고 적어 주세요.`
         })
         this.hive.addEvent(id, 'status', 'system', `병합 충돌: ${r.message}`)
         this.notify('병합 충돌', `${k.title}: ${r.message}`)
@@ -1724,7 +1738,7 @@ export class Engine {
       }
       await removeWorktree(wt).catch(() => undefined)
       this.hive.updateTask(k.id, { worktree: { ...wt, merged: true } })
-      this.hive.addEvent(k.id, 'status', 'system', `작업 결과를 ${wt.base}에 합쳤어요.`)
+      this.hive.addEvent(k.id, 'status', 'system', own ? `작업 결과를 묶음 브랜치 ${own.branch}에 합쳤어요.` : `작업 결과를 ${wt.base}에 합쳤어요.`)
     }
     return true
   }
@@ -2118,7 +2132,7 @@ export class Engine {
     }
     const gh = this.github.repoFor(task)
     if (gh && this.sharesCompanyRepo(gh.repo)) add('warn', `프로젝트 코드 저장소(${gh.repo})가 팀 공유용 저장소와 같아요. 업무·메모리 파일과 코드가 섞이니 따로 두세요.`)
-    if (gh && !task.kind) add('ok', `GitHub ${gh.repo}: 업무 브랜치에서 실행하고, 사람 확인 뒤 ${this.github.connection()?.github?.autoPr === false ? '결재를 받아 ' : ''}PR을 만들어요 (머지는 항상 사람이).`)
+    if (gh && (!task.kind || (task.kind === 'integrate' && !task.parentId))) add('ok', `GitHub ${gh.repo}: 업무 브랜치에서 실행하고, 사람 확인 뒤 ${this.github.connection()?.github?.autoPr === false ? '결재를 받아 ' : ''}PR을 만들어요 (머지는 항상 사람이).`)
 
     // can we see what changed, and can it be undone?
     if (canRun) {

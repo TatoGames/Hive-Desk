@@ -4,6 +4,12 @@ import type { BenchSummary } from '../shared/bench'
 import DEFAULT_CANDIDATES from '../shared/local-models.default.json'
 import {
   fitNote,
+  endpointScope,
+  endpointProblem,
+  REMOTE_NOTICE,
+  SCOPE_LABEL,
+  installedFit,
+  speedLine,
   modelTier,
   normalizeUrl,
   parseCandidates,
@@ -107,12 +113,17 @@ export class LocalAi {
   }
 
   /** Check the address, then keep it. Throws a readable reason when nothing answers. */
-  async add(o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> {
+  async add(o: { name?: string; url: string; token?: string; acceptRemote?: boolean }): Promise<LocalEndpoint> {
     const url = normalizeUrl(o.url)
     if (!url) throw new Error('주소를 알아볼 수 없어요. 예: localhost:11434')
     if (this.endpoints().some((e) => e.url === url)) throw new Error('이미 연결된 주소예요.')
     const token = o.token?.trim() || undefined
     if (token && !this.c.cipher()?.available()) throw new Error('이 컴퓨터의 보안 저장소를 쓸 수 없어서 토큰을 저장하지 않았어요.')
+    // another computer: only after the person was told that what they send goes there (A5)
+    const scope = endpointScope(url)
+    if (scope !== 'this-pc' && !o.acceptRemote) throw new Error(REMOTE_NOTICE)
+    const problem = endpointProblem(url, !!token)
+    if (problem) throw new Error(problem)
     const r = await probe({ url, token, fetchFn: this.c.fetchFn })
     const id = 'lc-' + Math.random().toString(36).slice(2, 8)
     const e: LocalEndpoint = { id, name: o.name?.trim() || (r.kind === 'ollama' ? 'Ollama' : '내 PC AI'), url, kind: r.kind, hasToken: !!token }
@@ -203,12 +214,14 @@ export class LocalAi {
         if (/embed/i.test(m.name)) continue
         out.push({
           model: { kind: 'local', endpointId: e.id, model: m.name },
-          label: `${m.name} · ${e.name}`,
+          label: `${m.name} · ${e.name}${endpointScope(e.url) === 'this-pc' ? '' : ' · ' + SCOPE_LABEL[endpointScope(e.url)]}`,
           tier: modelTier(m) as Tier,
           weight: 0,
           where: 'local',
           ok: !!st?.ok,
-          note: st?.ok ? fitNote(m, advice) : (st?.error ?? '연결을 확인 중이에요')
+          note: st?.ok ? fitNote(m, advice) : (st?.error ?? '연결을 확인 중이에요'),
+          fit: installedFit(m, advice),
+          speed: speedLine(this.c.store().speed?.[key(e.id, m.name)])
         })
       }
     }

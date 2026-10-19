@@ -437,3 +437,5 @@ label.chip.on { border-color: var(--accent); color: inherit; }
 .local-filters button.chip { cursor: pointer; font-family: inherit; }
 .local-filters button.chip.on { border-color: var(--accent); color: inherit; }
 .local-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.ws-zone { margin-bottom: 18px; }
+.ws-zone-label { font-size: 12px; color: var(--muted, #8b93a1); border-bottom: 1px dashed var(--border, #3a3f4b); padding-bottom: 4px; margin-bottom: 14px; letter-spacing: .02em; }

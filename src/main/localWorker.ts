@@ -1,3 +1,4 @@
+import { worktreeCwd } from './worktree'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Agent, CheckRun, HumanReview, PermissionLevel, RunDiff, RunRecord, RunResultKind, Task } from '../shared/types'
@@ -308,7 +309,7 @@ export async function runLocalTask(agent: Agent, taskId: string, deps: LocalWork
     return 'awaiting_approval'
   }
 
-  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId), task.worktree?.path)
+  const cwd = resolveCwd(agent, deps.defaultCwd, hive.projectDir(task.projectId), task.worktree ? worktreeCwd(task.worktree) : undefined)
   if (holdsAppData(hive, cwd)) {
     const error = `작업 폴더(${cwd})에 회사 데이터가 들어 있어서 실행하지 않았어요. 다른 작업 폴더를 지정하세요.`
     hive.addEvent(task.id, 'run_finished', agent.id, '실행 안 함 · ' + error)

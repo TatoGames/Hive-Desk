@@ -2,7 +2,7 @@ import type { Approval, GithubAction, Task } from '../shared/types'
 import type { ExtConnection, GhStatus } from '../shared/external'
 import { commentIssue, createPr, ghStatus, listIssues, mergePr, prState, pushBranch, taskBranch, type Exec } from './github'
 import type { Hive } from './hive'
-import { addWorktree, commitWorktree, removeWorktree } from './worktree'
+import { addWorktree, commitWorktree, removeWorktree, type Worktree } from './worktree'
 
 export interface GithubCtx {
   readonly hive: Hive
@@ -66,6 +66,26 @@ export class GithubFlow {
     }
     h.updateTask(id, { worktree: wt, github: { ...(t.github ?? {}), repo: r.repo, branch } })
     h.addEvent(id, 'status', 'system', `GitHub 업무 브랜치 ${branch}에서 실행해요. 끝나면 보고서를 커밋 메시지로 커밋해요.`)
+  }
+
+  /**
+   * C3: the top task of a plan in a GitHub project gets one branch + work folder of its own, where the results of all
+   * its sub-tasks are merged. It goes out as one pull request after the person approved the final report.
+   * Null when the project is not a GitHub project (the results are then merged into the folder as before).
+   */
+  async ensureBundle(topId: string): Promise<Worktree | null> {
+    const h = this.c.hive
+    const top = h.getTask(topId)
+    if (!top || top.parentId) return null
+    if (top.github?.branch && top.worktree && !top.worktree.merged) return top.worktree
+    const r = this.repoFor(top, h)
+    if (!r) return null
+    const branch = top.github?.branch ?? taskBranch(top.title, top.id)
+    const wt = await addWorktree(r.dir, top.id, branch).catch(() => null)
+    if (!wt) return null
+    h.updateTask(topId, { worktree: wt, github: { ...(top.github ?? {}), repo: r.repo, branch } })
+    h.addEvent(topId, 'status', 'system', `GitHub 브랜치 ${branch}에 하위 작업 결과를 합쳐요. 사람 확인 뒤 한 개의 PR로 올려요.`)
+    return wt
   }
 
   /** After a run: what the AI changed is committed on the task branch, with the report as the message. */
@@ -276,13 +296,18 @@ export class GithubFlow {
 export function prBody(h: Hive, t: Task): string {
   const r = t.report
   const files = new Map<string, string>()
-  for (const run of h.listSharedRuns(t.id)) for (const f of run.files) files.set(f.path, f.status)
+  // a bundle: the files and the sub-tasks of every part
+  const all = h.listTasks()
+  const below = (id: string): Task[] => all.filter((k) => k.parentId === id).flatMap((k) => [k, ...below(k.id)])
+  const parts = t.kind === 'integrate' ? below(t.id).filter((k) => k.kind === 'work' && k.status === 'done') : []
+  for (const x of [t, ...parts]) for (const run of h.listSharedRuns(x.id)) for (const f of run.files) files.set(f.path, f.status)
   const review = t.reviewState?.note ? [`## 교차 검토`, `${t.reviewState.status === 'passed' ? '통과' : t.reviewState.status}: ${t.reviewState.note}`, ''] : []
   return [
     ...(t.description ? ['## 요청', t.description, ''] : []),
     '## 보고',
     ...(r ? [`- 한 일: ${r.did}`, `- 확인 방법: ${r.verify}`, ...(r.risks && r.risks !== 'none' ? [`- 남은 위험: ${r.risks}`] : [])] : ['(보고 없음)']),
     '',
+    ...(parts.length ? ['## 하위 작업', ...parts.map((k) => `- ${k.title}${k.report?.did ? `: ${k.report.did}` : ''}`), ''] : []),
     ...(files.size ? ['## 바뀐 파일', ...[...files].map(([p, s]) => `- ${s} ${p}`), ''] : []),
     ...review,
     ...(t.github?.issue ? [`Closes #${t.github.issue.number}`, ''] : []),

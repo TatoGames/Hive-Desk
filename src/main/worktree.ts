@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { git } from './gitdiff'
 
 export const WORKTREE_DIR = '.hive-worktrees'
@@ -9,6 +9,28 @@ export interface Worktree {
   branch: string
   /** The folder the work tree was made from (the project / work folder). */
   base: string
+  /**
+   * C4: the project folder is a sub-folder of its git repository. The checkout (`path`) is the whole repository, and the
+   * task works in `sub` inside it. Empty / missing = the project folder is the top of the repository.
+   */
+  sub?: string
+}
+
+/** Where the task works: the checkout, or the sub-folder of it that corresponds to the project folder. */
+export const worktreeCwd = (wt: Pick<Worktree, 'path' | 'sub'>): string => (wt.sub ? join(wt.path, wt.sub) : wt.path)
+
+/** The path of `dir` relative to the top of its repository ('' = it is the top). Null when it is not in a repository. */
+async function subOf(dir: string): Promise<string | null> {
+  const top = await git(dir, ['rev-parse', '--show-toplevel'])
+  if (!top.ok) return null
+  try {
+    // native: Windows short names (C:\Users\RUNNER~1) and git's long, forward-slash path must compare equal
+    const rel = relative(realpathSync.native(top.out.trim()), realpathSync.native(dir))
+    if (rel.startsWith('..')) return null
+    return rel.split(sep).join('/')
+  } catch {
+    return null
+  }
 }
 
 const ENV = { GIT_AUTHOR_NAME: 'HiveDesk', GIT_AUTHOR_EMAIL: 'hivedesk@localhost', GIT_COMMITTER_NAME: 'HiveDesk', GIT_COMMITTER_EMAIL: 'hivedesk@localhost' }
@@ -16,36 +38,18 @@ const ENV = { GIT_AUTHOR_NAME: 'HiveDesk', GIT_AUTHOR_EMAIL: 'hivedesk@localhost
 /** Is `dir` the top of a git repository with at least one commit? (Only then a work tree can be made from it.) */
 export async function canBranchFrom(dir: string): Promise<boolean> {
   if (!existsSync(dir)) return false
-  const top = await git(dir, ['rev-parse', '--show-toplevel'])
-  if (!top.ok) return false
-  try {
-    // native: Windows short names (C:\Users\RUNNER~1) and git's long, forward-slash path must compare equal
-    const same = (a: string, b: string): boolean => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
-    if (!same(realpathSync.native(top.out.trim()), realpathSync.native(dir))) return false
-  } catch {
-    return false
-  }
+  // C4: a sub-folder of a repository works too (the whole repository is checked out, the task works in the same sub-folder)
+  if ((await subOf(dir)) === null) return false
   return (await git(dir, ['rev-parse', '--verify', 'HEAD'])).ok
 }
 
 export type GitState = 'ok' | 'none' | 'not-top' | 'no-commit'
 
-/** What is missing before work trees can be made from `dir`. */
+/** What is missing before work trees can be made from `dir`. (`not-top` is no longer returned: a sub-folder works, see C4.) */
 export async function gitState(dir: string): Promise<GitState> {
   if (!existsSync(dir)) return 'none'
-  const top = await git(dir, ['rev-parse', '--show-toplevel'])
-  if (!top.ok) return 'none'
-  if (!(await canBranchFrom(dir))) {
-    // a repository, but `dir` is not its top (a sub-folder), or it has no commit yet
-    try {
-      const same = (a: string, b: string): boolean => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
-      if (!same(realpathSync.native(top.out.trim()), realpathSync.native(dir))) return 'not-top'
-    } catch {
-      return 'not-top'
-    }
-    return 'no-commit'
-  }
-  return 'ok'
+  if ((await subOf(dir)) === null) return 'none'
+  return (await canBranchFrom(dir)) ? 'ok' : 'no-commit'
 }
 
 /** More files than this: the first commit would be huge, so nothing is made (the person should add a .gitignore first). */
@@ -60,7 +64,8 @@ const IGNORE = ['node_modules/', 'dist/', 'out/', 'build/', '.venv/', '__pycache
 export async function initGitFolder(dir: string): Promise<{ ok: boolean; message: string }> {
   const state = await gitState(dir)
   if (state === 'ok') return { ok: true, message: '이미 git 폴더예요.' }
-  if (state === 'not-top') return { ok: false, message: '이 폴더는 다른 git 폴더 안에 있어요. 그 맨 위 폴더를 작업 폴더로 지정해 주세요.' }
+  // a sub-folder of a repository that has no record yet: the record would be the whole repository's, so it is left to the person
+  if (state === 'no-commit' && (await subOf(dir))) return { ok: false, message: '이 폴더는 다른 git 폴더 안에 있고 그 git에 아직 저장된 기록이 없어요. 그 맨 위 폴더를 작업 폴더로 지정해 첫 기록을 만들어 주세요.' }
   const created = state === 'none'
   if (created) {
     const r = await git(dir, ['init', '-q', '-b', 'main'])
@@ -88,7 +93,10 @@ export async function initGitFolder(dir: string): Promise<{ ok: boolean; message
 export async function addWorktree(base: string, taskId: string, branch = `hive/${taskId}`): Promise<Worktree | null> {
   if (!(await canBranchFrom(base))) return null
   const path = join(base, WORKTREE_DIR, taskId)
-  if (existsSync(path)) return { path, branch, base }
+  if (existsSync(path)) {
+    const sub = (await subOf(base)) ?? ''
+    return { path, branch, base, ...(sub ? { sub } : {}) }
+  }
   mkdirSync(join(base, WORKTREE_DIR), { recursive: true })
   // keep the folder out of the project's own `git status`
   const ex = await git(base, ['rev-parse', '--git-path', 'info/exclude'])
@@ -103,8 +111,10 @@ export async function addWorktree(base: string, taskId: string, branch = `hive/$
   }
   const r = await git(base, ['worktree', 'add', '-q', '-b', branch, path, 'HEAD'])
   if (!r.ok) return null
-  await linkPackages(base, path)
-  return { path, branch, base }
+  const sub = (await subOf(base)) ?? ''
+  const wt: Worktree = { path, branch, base, ...(sub ? { sub } : {}) }
+  await linkPackages(base, worktreeCwd(wt), sub)
+  return wt
 }
 
 /**
@@ -112,7 +122,7 @@ export async function addWorktree(base: string, taskId: string, branch = `hive/$
  * lets the tests / type check / app check run in the work tree too. The link is kept out of git (`/node_modules`
  * in the shared exclude file), so it is never saved on the task's branch or merged into the project.
  */
-async function linkPackages(base: string, path: string): Promise<void> {
+async function linkPackages(base: string, path: string, sub = ''): Promise<void> {
   const from = join(base, 'node_modules')
   const to = join(path, 'node_modules')
   try {
@@ -121,7 +131,8 @@ async function linkPackages(base: string, path: string): Promise<void> {
     if (ex.ok) {
       const f = join(base, ex.out.trim())
       const cur = existsSync(f) ? readFileSync(f, 'utf8') : ''
-      if (!cur.split(/\r?\n/).includes('/node_modules')) appendFileSync(f, (cur && !cur.endsWith('\n') ? '\n' : '') + '/node_modules\n')
+      const pattern = sub ? `/${sub}/node_modules` : '/node_modules' // (exclude patterns start at the top of the repository)
+      if (!cur.split(/\r?\n/).includes(pattern)) appendFileSync(f, (cur && !cur.endsWith('\n') ? '\n' : '') + pattern + '\n')
     }
     // a junction needs no special right on Windows
     symlinkSync(from, to, process.platform === 'win32' ? 'junction' : 'dir')
@@ -159,18 +170,23 @@ export interface MergeResult {
 
 /** Merge a task's branch into the folder it came from. A clash is undone (nothing half-merged is left behind). */
 export async function mergeWorktree(wt: Worktree, title: string): Promise<MergeResult> {
-  const ahead = await git(wt.base, ['rev-list', '--count', `HEAD..${wt.branch}`])
+  return mergeBranchInto(wt.base, wt.branch, title)
+}
+
+/** Merge `branch` into whatever is checked out in `dir` (the project folder, or a bundle's own work folder). */
+export async function mergeBranchInto(dir: string, branch: string, title: string): Promise<MergeResult> {
+  const ahead = await git(dir, ['rev-list', '--count', `HEAD..${branch}`])
   if (ahead.ok && ahead.out.trim() === '0') return { ok: true, files: [], message: '바뀐 것이 없어요.' }
-  const r = await git(wt.base, ['merge', '--no-ff', '-m', `HiveDesk: ${title}`, wt.branch], ENV)
+  const r = await git(dir, ['merge', '--no-ff', '-m', `HiveDesk: ${title}`, branch], ENV)
   if (r.ok) return { ok: true, files: [], message: '합쳤어요.' }
-  const conflicts = await git(wt.base, ['diff', '--name-only', '--diff-filter=U'])
-  await git(wt.base, ['merge', '--abort'])
+  const conflicts = await git(dir, ['diff', '--name-only', '--diff-filter=U'])
+  await git(dir, ['merge', '--abort'])
   const files = conflicts.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   return { ok: false, files, message: files.length ? `같은 파일을 서로 다르게 고쳤어요: ${files.join(', ')}` : r.err.split('\n')[0] || '합치지 못했어요.' }
 }
 
 export async function removeWorktree(wt: Worktree): Promise<void> {
-  unlinkPackages(wt.path)
+  unlinkPackages(worktreeCwd(wt))
   await git(wt.base, ['worktree', 'remove', '--force', wt.path])
   await git(wt.base, ['branch', '-D', wt.branch])
 }
