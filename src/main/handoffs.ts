@@ -289,7 +289,7 @@ export class Handoffs {
       errorKind: undefined,
       handoffs: [...(t.handoffs ?? []), rec]
     })
-    const why = handoffReasonLabel(reason)
+    const why = reason === 'limit' ? '한도' : handoffReasonLabel(reason)
     const cost = Math.abs(costX - 1) >= 0.15 ? `, ${tm.label} · ${costLine(costX)}` : ''
     h.addEvent(taskId, 'changed', reason === 'manual' ? this.c.me() : 'system', `${from.name} → ${to.name} (${why}${cost}). ${save ? `${save.done}/${save.plan.length}단계까지 한 것을 이어받아요.` : '지금까지 한 것을 요약해 넘겼어요.'}${rolledBack ? ' 진행 중이던 단계는 시작 상태로 되돌렸어요.' : ''}`)
     this.round.set(to.id, (this.round.get(to.id) ?? 0) + 1)
