@@ -1347,7 +1347,8 @@ export class Engine {
   private async mergeSolo(id: string): Promise<void> {
     const t = this.hive.getTask(id)
     const wt = t?.worktree
-    if (!t || !wt || wt.merged || t.parentId || t.reviewOf || t.kind === 'review' || t.status !== 'done') return
+    // a GitHub task works on its own branch and goes out as a pull request — it is never merged into the folder by the app
+    if (!t || !wt || wt.merged || t.parentId || t.reviewOf || t.kind === 'review' || t.github?.branch || t.status !== 'done') return
     const key = normPath(wt.base)
     const ac = new AbortController()
     const locked = await this.lockFolder(key, id, ac.signal)
