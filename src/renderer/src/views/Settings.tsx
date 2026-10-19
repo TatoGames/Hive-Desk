@@ -21,9 +21,10 @@ export default function Settings({
   const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [trial, setTrial] = useState(Math.round((c.quickTrialRate ?? 0.1) * 100))
   const [liveIn, setLiveIn] = useState(c.liveInstructions !== false)
-  const [worktrees, setWorktrees] = useState(!!c.parallelWorktrees)
+  const [worktrees, setWorktrees] = useState(firstRun ? true : !!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
   const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
+  const [snapOn, setSnapOn] = useState(c.projectSnapshot !== false)
   const [rv, setRv] = useState<ReviewSettings>({ ...DEFAULT_REVIEW, ...(c.review ?? {}) })
   const [samples, setSamples] = useState<{ at: string; adapter: string; text: string }[]>([])
   useEffect(() => {
@@ -55,6 +56,7 @@ export default function Settings({
       autoApprove: auto,
       handoff: hand,
       review: rv,
+      projectSnapshot: snapOn,
       staleBundleHours: Math.max(0, stale),
       approvalTimeoutHours: Math.max(0, timeout),
       discordWebhook: discord.trim() || undefined,
@@ -193,11 +195,22 @@ export default function Settings({
             <input type="checkbox" checked={rv.appCheck} onChange={(e) => setRv({ ...rv, appCheck: e.target.checked })} />
             Electron 앱이면 직접 띄워서 오류를 보고 화면을 찍어요 (찍은 화면은 검토자에게 보여 줘요)
           </label>
+          <label className="toggle">
+            <input type="checkbox" checked={snapOn} onChange={(e) => setSnapOn(e.target.checked)} />
+            직원이 일을 시작할 때 프로젝트 요약(폴더 구조·실행 스크립트·README·최근 끝낸 일)을 앱이 먼저 보여 줘요 — 매번 폴더를 훑는 토큰을 아껴요
+          </label>
           <label>
             AI 검토
             <select value={rv.policy} onChange={(e) => setRv({ ...rv, policy: e.target.value as ReviewSettings['policy'] })}>
               <option value="risk">필요할 때만 — 작고 안전한 변경이 검사를 통과하면 생략 (추천)</option>
               <option value="always">언제나 — 모든 변경을 다른 모델이 검토</option>
+            </select>
+          </label>
+          <label>
+            큰 일(묶음)의 하위 작업 검토
+            <select value={rv.bundle} disabled={rv.policy === 'always'} onChange={(e) => setRv({ ...rv, bundle: e.target.value as ReviewSettings['bundle'] })}>
+              <option value="once">통합한 뒤 한 번에 — 하위 작업마다 하지 않아요 (추천)</option>
+              <option value="each">하위 작업마다 따로</option>
             </select>
           </label>
           <label>

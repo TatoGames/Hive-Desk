@@ -54,4 +54,30 @@ describe('v0.6 UI: menus grouped by what people do, basic and advanced', () => {
     await ui.refresh()
     expect(ui.eng.hive.listTasks().map((t) => t.title)).toEqual(['단위 변환기 웹페이지를 만들어줘'])
   })
+
+  it('the start screen lets you pick the folder, offers git for a plain one, and says where the result goes', async () => {
+    let git: string = 'none'
+    ui = await mountApp(
+      (eng, dir) => {
+        eng.saveSettings({ memberName: 'alice', workspace: join(dir, 'ws'), uiMode: 'basic' })
+      },
+      {
+        pickFolder: () => '/tmp/my-app',
+        folderGit: () => git,
+        initFolderGit: () => ((git = 'ok'), { ok: true, message: 'git 폴더로 만들었어요 (파일 3개를 첫 기록으로 저장).' }),
+        startFirstTask: () => ({ ok: true, id: 'x', dir: '/tmp/my-app' })
+      }
+    )
+    fireEvent.click(screen.getByRole('button', { name: '폴더 고르기' }))
+    await ui.refresh()
+    expect(screen.getByText(/아직 git 폴더가 아니에요/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'git 폴더로 만들기' }))
+    fireEvent.click(screen.getByRole('button', { name: /^정말 git 폴더로 만들기/ }))
+    await ui.refresh()
+    expect(screen.getByText(/파일 3개를 첫 기록으로 저장/)).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText(/단위 변환기 웹페이지/), { target: { value: '계산기 만들어줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '맡기기' }))
+    await ui.refresh()
+    expect(screen.getByRole('button', { name: '결과가 생길 폴더 열기' })).toBeTruthy()
+  })
 })

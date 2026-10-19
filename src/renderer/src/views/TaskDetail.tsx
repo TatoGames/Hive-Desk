@@ -16,6 +16,7 @@ import type {
   TaskHistory
 } from '@shared/types'
 import { fmtTime } from '../store'
+import type { TaskCost } from '@shared/cost'
 import {
   ActivityFeed,
   ConfirmButton,
@@ -177,6 +178,7 @@ export default function TaskDetail({
         </div>
 
         {history && <TimeRow task={task} history={history} />}
+        <CostRow task={task} />
 
         {!running && (task.status === 'done' || task.status === 'needs_review' || task.status === 'failed') && (
           <ResultCard task={task} record={record} cwd={cwd} />
@@ -372,6 +374,27 @@ function TimeRow({ task, history }: { task: Task; history: TaskHistory }): JSX.E
   return (
     <div className="muted small" title="이 업무가 만들어진 뒤 걸린 시간을 나눠 본 거예요">
       ⏱ 전체 {fmtLong(b.total)} — {parts.filter(([, v]) => v >= 1000).map(([k, v]) => `${k} ${fmtLong(v)}`).join(' · ')}
+    </div>
+  )
+}
+
+/** v0.6.1: where the AI runs and time of this job went, by stage — what is worth turning down in the settings. */
+function CostRow({ task }: { task: Task }): JSX.Element | null {
+  const [c, setC] = useState<TaskCost | null>(null)
+  useEffect(() => {
+    let alive = true
+    void window.hive.taskCost(task.id).then((r) => alive && setC(r))
+    return () => {
+      alive = false
+    }
+  }, [task.id, task.updatedAt])
+  if (!c || !c.runs) return null
+  return (
+    <div className="muted small cost-row" title="AI가 일한 횟수와 시간이에요. 자동 검사는 AI를 쓰지 않아서 따로 적어요.">
+      💸 AI {c.runs}회 · {fmtLong(c.ms)} —{' '}
+      {c.stages.map((s) => `${s.label} ${s.runs}회 (${fmtLong(s.ms)})`).join(' · ')}
+      {c.checkRuns > 0 && ` · 자동 검사 ${c.checkRuns}건 ${fmtLong(c.checkMs)} (AI 아님)`}
+      {c.reviewsSaved > 0 && ` · AI 검토 ${c.reviewsSaved}건 생략`}
     </div>
   )
 }

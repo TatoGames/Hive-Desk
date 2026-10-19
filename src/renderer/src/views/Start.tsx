@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { AdapterInfo, Snapshot } from '@shared/types'
 import { CliSetup } from './Agents'
 import { QuickTeam } from './Teams'
+import { ConfirmButton } from './Materials'
 
 /** What is left to do before the company can work: an AI connected, a team, a first task. */
 export function startSteps(snap: Snapshot): { connected: boolean; team: boolean; task: boolean; done: boolean } {
@@ -29,11 +30,22 @@ export default function Start({ snap, go }: { snap: Snapshot; go: (tab: 'board' 
   }, [])
   const s = startSteps(snap)
   const [text, setText] = useState('')
-  const [sent, setSent] = useState(false)
+  const [sent, setSent] = useState<{ dir: string; preset?: string } | null>(null)
+  const [folder, setFolder] = useState('')
+  const [git, setGit] = useState<'ok' | 'none' | 'not-top' | 'no-commit' | null>(null)
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
+  const pick = async (): Promise<void> => {
+    const p = await window.hive.pickFolder()
+    if (!p) return
+    setFolder(p)
+    setNote(null)
+    setGit(await window.hive.folderGit(p))
+  }
   const give = async (): Promise<void> => {
     if (!text.trim()) return
-    await window.hive.createTask({ title: text.trim().split(/[.\n]/)[0].slice(0, 60), description: text.trim() })
-    setSent(true)
+    const r = await window.hive.startFirstTask(text, folder || undefined)
+    if (!r.ok) return setNote({ ok: false, text: r.warning ?? '업무를 만들지 못했어요.' })
+    setSent({ dir: r.dir, preset: r.preset })
     setText('')
   }
   const mark = (ok: boolean, n: number): string => (ok ? '✓' : String(n))
@@ -82,15 +94,55 @@ export default function Start({ snap, go }: { snap: Snapshot; go: (tab: 'board' 
           <span className="step-no">{mark(s.task, 3)}</span> 첫 일 맡기기
         </h2>
         <p className="muted small">하고 싶은 일을 평소 말하듯 적으면 돼요. 누구에게 맡길지, 나눠서 할지는 앱이 정해요.</p>
+        <div className="folder-pick">
+          <div className="row">
+            <b className="small">작업 폴더</b>
+            <button className="sm" onClick={() => void pick()}>
+              {folder ? '다른 폴더 고르기' : '폴더 고르기'}
+            </button>
+            {folder && (
+              <button className="sm ghost" onClick={() => (setFolder(''), setGit(null), setNote(null))}>
+                고르지 않기
+              </button>
+            )}
+          </div>
+          <div className="muted small">
+            {folder ? <span title={folder}>📂 {folder}</span> : `고르지 않으면 앱의 회사 폴더에서 작업해요 (${snap.companyRoot || snap.config.workspace}). 이미 만들어 둔 프로젝트 폴더를 고르는 걸 추천해요.`}
+          </div>
+          {folder && git && git !== 'ok' && (
+            <div className="small">
+              {git === 'not-top'
+                ? '이 폴더는 다른 git 폴더의 하위 폴더예요. 그대로도 쓸 수 있지만, 일이 동시에 돌려면 git의 맨 위 폴더를 고르세요.'
+                : '이 폴더는 아직 git 폴더가 아니에요. 그대로도 쓸 수 있지만, git 폴더로 만들면 변경 비교·정확한 되돌리기·동시 작업을 쓸 수 있어요.'}
+              {git !== 'not-top' && (
+                <ConfirmButton
+                  label="git 폴더로 만들기"
+                  onConfirm={async () => {
+                    const r = await window.hive.initFolderGit(folder)
+                    setNote({ ok: r.ok, text: r.message })
+                    setGit(await window.hive.folderGit(folder))
+                  }}
+                />
+              )}
+            </div>
+          )}
+          {note && <div className={note.ok ? 'ok-text small' : 'warn-text small'}>{note.text}</div>}
+        </div>
         <textarea rows={3} placeholder="예: 단위 변환기 웹페이지를 만들어줘…" value={text} onChange={(e) => setText(e.target.value)} />
         <div className="row">
           <button className="primary" disabled={!text.trim()} onClick={() => void give()}>
             맡기기
           </button>
+          {sent?.preset && <span className="ok-text small">{sent.preset}이라서 시작 규칙(보안 기본값·스크립트 등)을 프로젝트 브리핑에 넣었어요.</span>}
           {sent && (
-            <button className="ghost" onClick={() => go('board')}>
-              맡겼어요 — 진행 보러 가기
-            </button>
+            <>
+              <button className="ghost" onClick={() => go('board')}>
+                맡겼어요 — 진행 보러 가기
+              </button>
+              <button className="ghost" onClick={() => void window.hive.openPath(sent.dir)}>
+                결과가 생길 폴더 열기
+              </button>
+            </>
           )}
         </div>
         <div className="muted small">예시 (누르면 채워져요):</div>

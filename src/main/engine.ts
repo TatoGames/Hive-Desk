@@ -44,7 +44,7 @@ import { findSecrets } from './secrets'
 import { SHARED_DIRS } from './hive'
 import { loadConfig, makeAgent, saveConfig } from './config'
 import { diffSinceCheckpoint, rollback } from './checkpoint'
-import { containsPath, enableTracking, isInsideGit, normPath } from './gitdiff'
+import { containsPath, enableTracking, git as gitRun, isInsideGit, normPath } from './gitdiff'
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
 import { budgetProblem, holdsAppData, resolveCwd, runTask } from './runner'
@@ -80,7 +80,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
-import { addWorktree, commitWorktree, mergeWorktree, removeWorktree } from './worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeWorktree, removeWorktree, type GitState } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
@@ -89,8 +89,10 @@ import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
-import { runChecks } from './checks'
+import { isElectronApp, runChecks } from './checks'
+import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
+import { taskCost, type TaskCost } from '../shared/cost'
 import { freeName, summarize, type TeamMember, type TeamSummary, type TeamTemplate } from '../shared/team'
 import { domainOf, type ExtAccess, type ExtConnection, type ExtKind } from '../shared/external'
 import { companyDir, isLegacyLayout, listCompanyMetas, migrateLegacy, movedPath, readMeta, recordFolderMove, renameCompanyFolder, writeMeta, type MigrationResult } from './workspace'
@@ -146,6 +148,8 @@ export class Engine {
   /** One run per work folder at a time: folder → who has it and who waits. */
   private folders = new Map<string, { holder: string; queue: { taskId: string; grant: () => void; drop: () => void }[] }>()
   private waiting = new Map<string, string>()
+  /** The folder every started task works in (set when it starts, so two tasks starting together see each other). */
+  private runKeys = new Map<string, string>()
   /** CLIs (by adapter id) that are out of usage until a given time; kept across restarts. */
   private limits: Record<string, LimitInfo> = {}
   /** Finishing off runs that were cut short by the last shutdown (tests wait for it). */
@@ -1202,6 +1206,19 @@ export class Engine {
     return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree?.path)
   }
 
+  /** Is another started task working in (or waiting for) the folder this task would use? */
+  private folderShared(agent: Agent, taskId: string): boolean {
+    const key = normPath(this.cwdFor(agent, taskId))
+    for (const [other, k] of this.runKeys) if (other !== taskId && k === key) return true
+    return false
+  }
+
+  /** Could this task be given its own work tree when its folder is busy (a single task, with the switch on)? */
+  private mayRunApart(taskId: string): boolean {
+    const t = this.hive.getTask(taskId)
+    return !!this.config.parallelWorktrees && !!t && !t.parentId && !t.reviewOf && (!t.kind || t.kind === 'work')
+  }
+
   private folderBusy(agent: Agent, taskId: string): boolean {
     return this.folders.has(normPath(this.cwdFor(agent, taskId)))
   }
@@ -1226,6 +1243,7 @@ export class Engine {
     if (this.running.has(id)) return 'not_ready'
     let ac = new AbortController()
     this.running.set(id, ac)
+    this.runKeys.set(id, normPath(this.cwdFor(agent, id)))
     this.changed()
     // Sub-tasks of a git project get their own work tree, so they do not queue behind each other
     await this.prepareWorktree(id, agent)
@@ -1233,6 +1251,7 @@ export class Engine {
     await this.github.prepare(id).catch(() => undefined)
     // Two agents editing the same folder would overwrite each other and mix up their diffs.
     const key = normPath(this.cwdFor(agent, id))
+    this.runKeys.set(id, key)
     let locked = false
     let handedTo: string | null = null
     try {
@@ -1263,7 +1282,7 @@ export class Engine {
       if (outcome === 'limited' && !ac.signal.aborted) handedTo = await this.handoffs.onLimit(id).catch(() => null)
       // what a work-tree task changed is saved on its branch (it is merged when the bundle is integrated)
       const finished = this.hive.getTask(id)
-      if (finished?.kind === 'work' && finished.worktree && !finished.worktree.merged) await commitWorktree(finished.worktree, finished.title).catch(() => false)
+      if (finished?.kind !== 'review' && finished?.worktree && !finished.worktree.merged && (finished.kind === 'work' || !finished.github?.branch)) await commitWorktree(finished.worktree, finished.title).catch(() => false)
       if (finished?.github?.branch) await this.github.commit(id)
       if (finished?.status === 'done' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
       // v5.1: the app checks the work itself before any AI review (still inside the folder lock)
@@ -1278,6 +1297,7 @@ export class Engine {
       return outcome
     } finally {
       if (locked) this.unlockFolder(key)
+      this.runKeys.delete(id)
       this.running.delete(id)
       this.liveRuns.delete(id)
       this.changed()
@@ -1285,6 +1305,12 @@ export class Engine {
       if (handedTo && this.localAgent(handedTo)) {
         const h = this.hive
         queueMicrotask(() => void this.inCompany(h, () => this.runTask(id)))
+      }
+      // a single task in its own work tree is merged when it is done — or, for a reviewed one, when its review passed
+      const h = this.hive
+      const ended = h.getTask(id)
+      for (const target of [id, ended?.reviewOf].filter((x): x is string => !!x)) {
+        if (h.getTask(target)?.worktree && !h.getTask(target)?.worktree?.merged) queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(target)).catch(() => undefined))
       }
     }
   }
@@ -1299,12 +1325,135 @@ export class Engine {
       if (target?.worktree && !target.worktree.merged) this.hive.updateTask(id, { worktree: { ...target.worktree } })
       return
     }
-    if (t.kind !== 'work' || !t.parentId) return
+    // sub-tasks always; a single task (not a plan / integration / committee) only when its folder is busy right now
+    const sub = t.kind === 'work' && !!t.parentId
+    const solo = !t.parentId && (!t.kind || t.kind === 'work')
+    if (!sub && !(solo && this.folderShared(agent, id))) return
     const base = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
     const wt = await addWorktree(base, t.id).catch(() => null)
     if (!wt) return
     this.hive.updateTask(id, { worktree: wt })
-    this.hive.addEvent(id, 'status', 'system', `별도 작업 폴더에서 실행해요 (브랜치 ${wt.branch}). 다른 하위 작업과 동시에 돌 수 있어요.`)
+    this.hive.addEvent(
+      id,
+      'status',
+      'system',
+      sub
+        ? `별도 작업 폴더에서 실행해요 (브랜치 ${wt.branch}). 다른 하위 작업과 동시에 돌 수 있어요.`
+        : `같은 폴더를 쓰는 다른 업무가 있어서 별도 작업 폴더에서 동시에 실행해요 (브랜치 ${wt.branch}). 끝나면 자동으로 합쳐요.`
+    )
+  }
+
+  /** A single task that ran in its own work tree is merged into its folder once it is really finished (waits for the folder to be free). */
+  private async mergeSolo(id: string): Promise<void> {
+    const t = this.hive.getTask(id)
+    const wt = t?.worktree
+    // a GitHub task works on its own branch and goes out as a pull request — it is never merged into the folder by the app
+    if (!t || !wt || wt.merged || t.parentId || t.reviewOf || t.kind === 'review' || t.github?.branch || t.status !== 'done') return
+    const key = normPath(wt.base)
+    const ac = new AbortController()
+    const locked = await this.lockFolder(key, id, ac.signal)
+    try {
+      const cur = this.hive.getTask(id)
+      if (!cur?.worktree || cur.worktree.merged) return
+      // what the AI changed is saved on the branch first — a work tree is only removed after its changes are in the folder
+      await commitWorktree(wt, t.title).catch(() => false)
+      const r = await mergeWorktree(wt, t.title)
+      if (!r.ok) {
+        this.hive.addEvent(id, 'status', 'system', `결과를 폴더에 합치다가 충돌이 났어요: ${r.message}\n${wt.base} 폴더에서 \`git merge ${wt.branch}\`로 직접 해결해 주세요. 결과는 브랜치 ${wt.branch}에 그대로 있어요.`)
+        this.notify('합치기 충돌', `${t.title}: 폴더에서 직접 해결이 필요해요`)
+        return
+      }
+      // never remove a work tree that still holds changes nobody saved
+      const left = await gitRun(wt.path, ['status', '--porcelain'])
+      if (!left.ok || left.out.trim()) {
+        this.hive.addEvent(id, 'status', 'system', `작업 폴더에 저장되지 않은 변경이 남아 있어서 지우지 않았어요: ${wt.path}`)
+        return
+      }
+      await removeWorktree(wt).catch(() => undefined)
+      this.hive.updateTask(id, { worktree: { ...wt, merged: true } })
+      this.hive.addEvent(id, 'status', 'system', `작업 결과를 ${wt.base}에 합쳤어요.`)
+    } finally {
+      if (locked) this.unlockFolder(key)
+      this.changed()
+    }
+  }
+
+  /** v0.6.1: where the AI runs and time of a job went, by stage. */
+  taskCost(taskId: string): TaskCost {
+    return taskCost(this.hive.listTasks(), taskId, this.hive.listAptitude())
+  }
+
+  /** v0.6.1: what git state a folder is in (for the start screen). */
+  folderGit(dir: string): Promise<GitState> {
+    return gitState(dir)
+  }
+
+  /** The person agreed: make a folder a git folder (see initGitFolder). */
+  initFolderGit(dir: string): Promise<{ ok: boolean; message: string }> {
+    return initGitFolder(dir)
+  }
+
+  /**
+   * The first task from the start screen: in the folder the person picked (a project is made for it, or the
+   * existing project of that folder is used), or in the company folder when none is picked.
+   */
+  startFirstTask(text: string, folder?: string): { ok: boolean; id?: string; dir: string; warning?: string; preset?: string } {
+    const clean = text.trim()
+    let projectId: string | undefined
+    let preset: string | undefined
+    let dir = this.hive.ensureWorkspace()
+    if (folder && existsSync(folder)) {
+      const want = normPath(folder)
+      const paths = this.hive.projectPaths()
+      const known = this.hive.listProjects().find((p) => paths[p.id] && normPath(paths[p.id]) === want)
+      if (known) projectId = known.id
+      else {
+        // an Electron app gets the Electron starting rules in its briefing (visible and editable in 프로젝트)
+        const electron = isElectronApp(folder)
+        const p = this.hive.saveProject({
+          name: basename(folder) || '내 프로젝트',
+          folderName: basename(folder),
+          ...(electron ? { briefing: presetById('electron')!.briefing } : {}),
+          createdBy: this.config.memberName || 'me'
+        })
+        if (electron) preset = 'Electron 데스크톱 앱'
+        const r = this.setProjectPath(p.id, folder)
+        if (!r.ok) {
+          this.hive.deleteProject(p.id)
+          return { ok: false, dir: folder, warning: r.warning }
+        }
+        projectId = p.id
+      }
+      dir = folder
+    }
+    const t = this.createTask({ title: clean.split(/[.\n]/)[0].slice(0, 60), description: clean, ...(projectId ? { projectId } : {}) })
+    return { ok: true, id: t.id, dir, ...(preset ? { preset } : {}) }
+  }
+
+  /** Why this task cannot run next to others in its folder, and what the person can do about it. */
+  async parallelAdvice(taskId: string): Promise<{ state: 'ok' | 'single' | 'off' | 'none' | 'no-commit' | 'not-top'; dir: string; message: string }> {
+    const t = this.hive.getTask(taskId)
+    const agent = t ? this.localAgent(t.assignee) : undefined
+    if (!t || !agent) return { state: 'ok', dir: '', message: '' }
+    const dir = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
+    const g = await gitState(dir)
+    if (g === 'none') return { state: 'none', dir, message: '이 폴더는 git 폴더가 아니라서 업무가 순서대로만 돌아요.' }
+    if (g === 'no-commit') return { state: 'no-commit', dir, message: '이 폴더의 git에 아직 저장된 기록이 없어서 업무가 순서대로만 돌아요.' }
+    if (g === 'not-top') return { state: 'not-top', dir, message: '이 폴더는 git 폴더의 하위 폴더라서 동시에 돌 수 없어요. 프로젝트의 작업 폴더를 git 맨 위 폴더로 지정해 주세요.' }
+    if (!this.config.parallelWorktrees) return { state: 'off', dir, message: '병렬 작업 폴더가 꺼져 있어서 업무가 순서대로만 돌아요.' }
+    return { state: 'ok', dir, message: '' }
+  }
+
+  /** The person agreed: make the folder a git folder if it is not, and turn parallel work on. */
+  async enableParallel(taskId: string): Promise<{ ok: boolean; message: string }> {
+    const a = await this.parallelAdvice(taskId)
+    if (a.state === 'not-top') return { ok: false, message: a.message }
+    if (a.state === 'none' || a.state === 'no-commit') {
+      const r = await initGitFolder(a.dir)
+      if (!r.ok) return r
+    }
+    this.saveSettings({ parallelWorktrees: true })
+    return { ok: true, message: '이제 하위 업무는 폴더를 나눠 동시에 돌아요. 이미 기다리는 업무는 다음 실행부터 적용돼요.' }
   }
 
   /** Before the integration run: merge the sub-tasks' branches. A clash stops it and asks the person. */
@@ -1340,6 +1489,7 @@ export class Engine {
     return runTask(agent, id, {
       hive: this.hive,
       stripApiKeys: this.config.stripApiKeys,
+      projectSnapshot: this.config.projectSnapshot !== false,
       runner: this.runner,
       defaultCwd: this.hive.ensureWorkspace(),
       machine: this.config.memberName,
@@ -2047,6 +2197,10 @@ export class Engine {
     const by = this.config.memberName || 'me'
     if (decision === 'approve') {
       this.hive.updateTask(id, { status: 'done' })
+      if (t.worktree && !t.worktree.merged && !t.parentId) {
+        const h = this.hive
+        queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(id)).catch(() => undefined))
+      }
       this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
       this.noteTaskAptitude(t, { approved: 1 })
       this.delegation.recordDecision(id, true, by)
@@ -2793,7 +2947,7 @@ export class Engine {
           if (this.bundleCapped(h, all, t)) continue
           const agent = this.localAgent(t.assignee)
           if (!agent || busyAgents.has(agent.id) || !h.isReady(t, all)) continue
-          if (this.limitFor(agent.adapter) || this.folderBusy(agent, t.id)) continue
+          if (this.limitFor(agent.adapter) || (this.folderBusy(agent, t.id) && !this.mayRunApart(t.id))) continue
           // after the account ran into its usage limit, a lower-priority company waits while a higher one still has work for it
           if (scarce(agent.adapter)) {
             const prio = this.connectionOrder(agent.adapter)

@@ -729,7 +729,7 @@ describe('6-0.7: work trees let sub-tasks of one git project run at the same tim
       if (isWork) maxActive = Math.max(maxActive, ++active)
       // hold each work run until the other one has started too (or 5s pass), so a slow machine
       // that starts the second run late still shows they overlap; run one after another, they never do
-      for (let i = 0; isWork && i < 250 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
+      for (let i = 0; isWork && i < 600 && maxActive < 2; i++) await new Promise((r) => setTimeout(r, 20))
       try {
         return await inner(b, o)
       } finally {
@@ -836,3 +836,72 @@ describe('6-3: adjusting a running delegation', () => {
   })
 })
 
+
+describe('v0.6.1: a bundle is reviewed once, after integration', () => {
+  const plan = (who: string): string => {
+    if (who === 'coo') return '[[SUBTASK: 서버 만들기 | assignee=alice-hq | done=서버 동작 | after=none]]\n[[ESTIMATE: 6]]\n[[FLAGS: none]]'
+    if (who === 'hq') return '[[SUBTASK: 서버팀 작업 | assignee=alice-srv | done=API 완성 | after=none]]\n[[ESTIMATE: 5]]'
+    return '[[SUBTASK: 모델 | assignee=alice-dev1 | done=모델 테스트 | after=none]]\n[[SUBTASK: 라우터 | assignee=alice-dev2 | done=라우터 테스트 | after=none]]\n[[ESTIMATE: 4]]\n[[FLAGS: none]]'
+  }
+  const bundleOn = { policy: 'risk' as const, bundle: 'once' as const, checks: false, appCheck: false, maxRounds: 2 }
+  // code files (a .txt would count as documents and need no review at all)
+  const code = (who: string, task: string, cwd: string): string => (writeFileSync(join(cwd, who + '.js'), `// ${task}\n`), REPORT(who))
+
+  it('no review per sub-task; one cross review of the whole at the integration; the report shows it', async () => {
+    const s = makeScript({ plan, work: code })
+    const { eng } = company(s)
+    eng.saveSettings({ review: bundleOn })
+    const root = eng.createTask({ title: '게임 서버', delegate: true })
+    await settle(eng)
+    expect(task(eng, root.id).status).toBe('needs_review')
+    const reviews = s.log.filter((l) => l.startsWith('review:'))
+    expect(reviews.length).toBe(1) // one review of the two sub-tasks together (not one each, and not again at the levels above)
+    expect(reviews.every((l) => l.includes('[묶음 검토]'))).toBe(true)
+    const work = eng.hive.listTasks().filter((t) => t.kind === 'work' && t.parentId)
+    expect(work.length).toBe(2)
+    expect(work.every((t) => t.status === 'done' && t.reviewState?.status === 'skipped' && t.reviewState.deferred)).toBe(true)
+    const integ = eng.hive.listTasks().find((t) => t.kind === 'integrate' && t.title === '서버팀 작업')!
+    expect(integ.reviewState).toMatchObject({ status: 'passed' })
+    expect(eng.hive.getFinal(root.id)).toBeTruthy()
+    eng.shutdown()
+  })
+
+  it('remarks of the whole-bundle review land in the final report as remaining risks', async () => {
+    const s = makeScript({ plan, work: code, review: (_w, title) => (title.includes('[묶음 검토] 서버팀') ? '[[VERDICT: changes: 라우터에 오류 처리가 없어요]]' : '[[VERDICT: pass]]') })
+    const { eng } = company(s)
+    eng.saveSettings({ review: bundleOn })
+    const root = eng.createTask({ title: '게임 서버', delegate: true })
+    await settle(eng)
+    expect(task(eng, root.id).status).toBe('needs_review')
+    expect(eng.hive.getFinal(root.id)!.risks.join(' ')).toContain('묶음 검토 의견: 라우터에 오류 처리가 없어요')
+    eng.shutdown()
+  })
+
+  it('a risky sub-task (login / token files) is still reviewed on its own; "each" restores per-task reviews', async () => {
+    const s = makeScript({
+      plan,
+      work: (who, task, cwd) => {
+        mkdirSync(join(cwd, 'auth'), { recursive: true })
+        writeFileSync(join(cwd, 'auth', who + '.js'), task + '\n')
+        return REPORT(who)
+      }
+    })
+    const { eng } = company(s)
+    eng.saveSettings({ review: bundleOn })
+    const root = eng.createTask({ title: '로그인 서버', delegate: true })
+    await settle(eng)
+    expect(task(eng, root.id).status).toBe('needs_review')
+    expect(s.log.filter((l) => l.startsWith('review:') && l.includes('[검토]')).length).toBe(2)
+    eng.shutdown()
+
+    fresh()
+    const s2 = makeScript({ plan, work: code })
+    const { eng: e2 } = company(s2)
+    e2.saveSettings({ review: { ...bundleOn, bundle: 'each' } })
+    const r2 = e2.createTask({ title: '게임 서버', delegate: true })
+    await settle(e2)
+    expect(task(e2, r2.id).status).toBe('needs_review')
+    expect(s2.log.filter((l) => l.startsWith('review:') && l.includes('[검토]')).length).toBe(2)
+    e2.shutdown()
+  })
+})
