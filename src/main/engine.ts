@@ -48,7 +48,9 @@ import { containsPath, enableTracking, git as gitRun, isInsideGit, normPath } fr
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
 import { budgetProblem, holdsAppData, resolveCwd, runTask } from './runner'
-import { runLocalTask } from './localWorker'
+import { runLocalTask, localFit } from './localWorker'
+import { LocalQueue, modelKey } from './localQueue'
+import { LOCAL_BUSY_FOR_CHAT, LOCAL_QUEUE } from '../shared/localqueue'
 import { approveExamples, examplesDir, saveExample } from './examples'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
@@ -183,6 +185,10 @@ export class Engine {
   readonly github: GithubFlow
   /** v5: another connection's employee carries a task on when its connection runs out of usage. */
   readonly handoffs: Handoffs
+  /** A3: runs of one model on this PC go one after another (tasks wait; a chat turn takes a free place or is refused). */
+  readonly localQueue = new LocalQueue(() => LOCAL_QUEUE.perModel, () => this.changed())
+  /** A3: tasks whose local run could not happen here (memory / load / long wait): handed on after the run lets go. */
+  private localFail = new Map<string, 'memory' | 'load' | 'queue'>()
   /** Tasks whose hand-over is being worked out right now (the tick must not start a second one). */
   private handing = new Set<string>()
   /** OS secure storage for tokens (set by the Electron main process; tests set a fake one). */
@@ -240,6 +246,13 @@ export class Engine {
       isManager: (id) => self.delegation.isManager(id),
       usesExternal: (task, a) => self.external.grants(task, a).length > 0,
       isRunning: (id) => self.running.has(id),
+      localFit: (task, a) => {
+        const cwd = self.cwdFor(a, task.id)
+        const f = localFit(cwd, [task.title, task.description, task.reply ? `추가 설명: ${task.reply}` : ''].filter(Boolean).join('\n'), task.permission ?? a.permission ?? 'edit')
+        return f.ok ? null : f.reason
+      },
+      localReady: (a) => !!a.localModel && self.local.modelReady(a.localModel.endpointId, a.localModel.model),
+      localWaiting: (a) => (a.localModel ? self.localQueue.waiting(modelKey(a.localModel.endpointId, a.localModel.model)) : 0),
       excludesFor: (root) => self.excludesFor(root),
       changed: () => self.changed(),
       notify: (title, body) => self.notify(title, body),
@@ -255,7 +268,7 @@ export class Engine {
       secrets: () => self.machine.secretBlobs(),
       setSecret: (k, blob) => self.machine.setSecretBlob(k, blob),
       candidatesPath: join(dirname(self.configFile), 'local-models.json'),
-      busy: (id) => self.chats.usesLocal(id),
+      busy: (id) => self.chats.usesLocal(id) || self.localQueue.endpointBusy(id),
       changed: () => self.emit({ type: 'local' })
     })
     this.ollama = new OllamaEngine({
@@ -270,7 +283,17 @@ export class Engine {
       stripApiKeys: () => self.config.stripApiKeys,
       catalog: () => self.catalog(),
       localModels: () => self.local.models(),
-      localTurn: (m, t) => self.local.turn(m, t),
+      localTurn: async (m, t) => {
+        // a chat turn takes a free place of the model or is refused; it never waits behind (or jumps ahead of) tasks
+        const release = self.localQueue.tryAcquire(modelKey(m.endpointId, m.model))
+        if (!release) throw new Error(LOCAL_BUSY_FOR_CHAT)
+        try {
+          return await self.local.turn(m, t)
+        } finally {
+          release()
+        }
+      },
+      localBusy: (m) => self.localQueue.running(modelKey(m.endpointId, m.model)) >= LOCAL_QUEUE.perModel || self.localQueue.waiting(modelKey(m.endpointId, m.model)) > 0,
       cliModels: () =>
         self.machine
           .modelAgents()
@@ -1348,6 +1371,10 @@ export class Engine {
       }
       // v5: the connection ran out of usage — another connection's employee carries on from the last step
       if (outcome === 'limited' && !ac.signal.aborted) handedTo = await this.handoffs.onLimit(id).catch(() => null)
+      // A3: the model on this PC could not run (memory / load / long wait): another connection's employee may take it
+      const failKind = this.localFail.get(id)
+      this.localFail.delete(id)
+      if (failKind && !ac.signal.aborted) handedTo = await this.handoffs.onLocalFailure(id, failKind).catch(() => null)
       // what a work-tree task changed is saved on its branch (it is merged when the bundle is integrated)
       const finished = this.hive.getTask(id)
       if (finished?.kind !== 'review' && finished?.worktree && !finished.worktree.merged && (finished.kind === 'work' || !finished.github?.branch)) await commitWorktree(finished.worktree, finished.title).catch(() => false)
@@ -1701,12 +1728,15 @@ export class Engine {
       humanReview: this.config.humanReview,
       checksEnabled: s.checks,
       chat: (m, msgs, o) => this.local.complete(m, msgs, o),
+      queue: this.localQueue,
+      onFailure: ({ taskId, kind }) => this.localFail.set(taskId, kind),
       runChecks: (dir, taskId) =>
         runChecks(dir, { app: false, shotDir: join(hive.root, '.local', 'checks'), shotName: `${taskId}-${Date.now()}`, env: cleanEnv(process.env, this.config.stripApiKeys) }),
       excludes: (root) => this.excludesFor(root),
       collect: () => !!this.config.collectExamples,
       saveExample: (e) => saveExample(hive.root, e),
-      onRunEnd: ({ agent: a, taskId, ms, result }) => this.noteAptitude(a, taskId, { runs: 1, ms, approved: result === 'approved' ? 1 : 0, failed: result === 'failed' ? 1 : 0 })
+      // a PC that ran out of memory says nothing about how well the model works: not counted
+      onRunEnd: ({ agent: a, taskId, ms, result }) => result !== 'other' && this.noteAptitude(a, taskId, { runs: 1, ms, approved: result === 'approved' ? 1 : 0, failed: result === 'failed' ? 1 : 0 })
     })
   }
 

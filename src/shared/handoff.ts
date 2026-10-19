@@ -1,5 +1,5 @@
 import type { Tier } from './company'
-import type { AdapterId, PermissionLevel, StepSave, TaskKind } from './types'
+import type { AdapterId, HandoffReason, PermissionLevel, StepSave, TaskKind } from './types'
 
 /**
  * v5: who carries on a task when its employee's connection ran out of usage.
@@ -30,6 +30,10 @@ export interface HandoffCand {
   passRate?: number
   /** How many tasks this person was handed in the same round (spreads a bundle out). */
   taken?: number
+  /** A model on this PC (A1): only taken when no employee of an outside connection can. */
+  local?: boolean
+  /** Why this one cannot be used at all right now (a model on this PC that is not suited / not running / has a long line). */
+  blocked?: string
 }
 
 /** What the task needs from whoever takes it. */
@@ -71,6 +75,7 @@ export function whyNot(c: HandoffCand, from: { adapter: AdapterId; agentId: stri
   if (c.agentId === from.agentId) return '지금 담당'
   if (c.adapter === from.adapter) return '같은 연결(같은 한도)'
   if (need.triedAdapters.includes(c.adapter)) return '이미 거쳐 간 연결'
+  if (c.blocked) return c.blocked
   if (c.limited) return '한도·예산 소진'
   if (TIER_RANK[c.tier] < TIER_RANK[need.minTier]) return '체급이 모자람'
   if (need.kind && MANAGER_ONLY.includes(need.kind) && !c.isManager) return '관리자만 할 수 있는 업무'
@@ -91,6 +96,21 @@ export function pickHandoff(
   need: HandoffNeed,
   opts: { up?: boolean } = {}
 ): HandoffResult {
+  // A1: employees of outside connections first; a model on this PC only when none of them can (it saves usage, but may fail)
+  const outside = pickAmong(from, cands.filter((c) => !c.local), need, opts, false)
+  if (outside.pick || !cands.some((c) => c.local)) return outside
+  // a model on this PC is a lighter tier by nature: the tier steps do not apply, the task's own minimum tier does (`whyNot`)
+  const onPc = pickAmong(from, cands.filter((c) => c.local), need, opts, true)
+  return { pick: onPc.pick, skipped: [...outside.skipped, ...onPc.skipped] }
+}
+
+function pickAmong(
+  from: { agentId: string; adapter: AdapterId; tier: Tier; weight: number; rankLevel?: number },
+  cands: HandoffCand[],
+  need: HandoffNeed,
+  opts: { up?: boolean },
+  anyTier: boolean
+): HandoffResult {
   const skipped: HandoffResult['skipped'] = []
   const ok: HandoffCand[] = []
   for (const c of cands) {
@@ -99,8 +119,8 @@ export function pickHandoff(
       if (c.agentId !== from.agentId) skipped.push({ agentId: c.agentId, why })
     } else ok.push(c)
   }
-  const start = TIER_RANK[from.tier]
-  const tiers = [...new Set(ok.map((c) => TIER_RANK[c.tier]))].filter((t) => t >= start && (opts.up !== false || t === start)).sort((a, b) => a - b)
+  const start = anyTier ? 0 : TIER_RANK[from.tier]
+  const tiers = [...new Set(ok.map((c) => TIER_RANK[c.tier]))].filter((t) => t >= start && (opts.up !== false || anyTier || t === start)).sort((a, b) => a - b)
   const managerWork = !!need.kind && MANAGER_ONLY.includes(need.kind)
   for (const t of tiers) {
     const here = ok
@@ -153,7 +173,7 @@ export function costLine(costX: number): string {
 export function handoffNote(o: {
   fromName: string
   fromModel: string
-  reason: 'limit' | 'manual'
+  reason: HandoffReason
   save?: StepSave
   /** Files changed by the last run when there is no step saving point. */
   files?: string[]
@@ -162,7 +182,14 @@ export function handoffNote(o: {
   /** The step in progress was put back to how it was when it started. */
   rolledBack: boolean
 }): string {
-  const why = o.reason === 'limit' ? 'ran out of its usage limit' : 'was handed to you by a person'
+  const why =
+    o.reason === 'limit'
+      ? 'ran out of its usage limit'
+      : o.reason === 'memory'
+        ? 'could not run on this PC (the model ran out of memory or could not be loaded)'
+        : o.reason === 'queue'
+          ? 'waited too long for the model on this PC'
+          : 'was handed to you by a person'
   const out: string[] = [`This task was started by ${o.fromName} (${o.fromModel}), who ${why}. You carry it on — do not start over.`]
   const s = o.save
   if (s && s.plan.length) {
@@ -182,4 +209,9 @@ export function handoffNote(o: {
   const last = (s?.last || o.lastOutput || '').trim()
   if (last) out.push('Their last words:\n' + last.slice(-600))
   return out.join('\n\n').slice(0, 3800)
+}
+
+/** The reason of a hand-over as shown to people. */
+export function handoffReasonLabel(r: HandoffReason): string {
+  return r === 'limit' ? '구독 한도' : r === 'memory' ? 'PC 메모리 부족' : r === 'queue' ? '로컬 대기열' : '사람이 넘김'
 }

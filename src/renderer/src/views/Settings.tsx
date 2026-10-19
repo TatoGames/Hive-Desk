@@ -172,6 +172,10 @@ export default function Settings({
             <input type="checkbox" checked={hand.rollbackStep} onChange={(e) => setHand({ ...hand, rollbackStep: e.target.checked })} />
             진행 중이던 단계는 그 단계 시작 상태로 되돌리고 넘기기 (git 폴더)
           </label>
+          <label className="toggle">
+            <input type="checkbox" checked={hand.allowLocal !== false} onChange={(e) => setHand({ ...hand, allowLocal: e.target.checked })} />
+            한도가 찼을 때 쉬운 일은 내 PC AI가 이어받기 (다른 직원이 없을 때만)
+          </label>
           <p className="muted small">같은 연결의 직원은 같은 한도를 쓰기 때문에 언제나 제외해요. 이미 거쳐 간 연결로는 되돌아가지 않아요.</p>
           {!!samples.length && (
             <details>
