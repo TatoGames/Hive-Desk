@@ -238,6 +238,8 @@ export interface Task {
   stepSave?: StepSave
   /** v5.1: what the app checked by itself after the last work run (tests, types, lint, app start). */
   checks?: CheckRun
+  /** A3: waits in line for a model on this PC that another task is using (place 1 = next). */
+  localWait?: { position: number; since: string; model: string }
   /** Waits for its connection's usage limit (set when the run hit it; cleared when it runs again). */
   limitWait?: { adapter: AdapterId; since: string }
   /** External connections this task may use (ids). Absent = whatever the employee may use. */
@@ -563,12 +565,15 @@ export interface TaskHistory {
 export type ApprovalKind = 'risky-task' | 'budget' | 'agent-request' | 'plan' | 'failure' | 'bundle-cap' | 'stale-bundle' | 'external' | 'github' | 'handoff'
 
 /** One time a task changed hands because its employee's connection ran out of usage (or a person moved it on). */
+export type HandoffReason = 'limit' | 'manual' | 'memory' | 'queue'
+
 export interface Handoff {
   from: string
   to: string
   fromAdapter: AdapterId
   toAdapter: AdapterId
-  reason: 'limit' | 'manual'
+  /** limit = 구독 한도, memory = PC 메모리 부족, queue = 로컬 대기열 (older records only have limit / manual). */
+  reason: HandoffReason
   at: string
   /** Usage weight of the new model ÷ the old one (2 = about twice as expensive per run). */
   costX: number
@@ -618,7 +623,7 @@ export interface Approval {
   external?: import('./external').ExtRequest
   github?: GithubAction
   /** A hand-over that waits for a yes because the new model costs much more. */
-  handoff?: { to: string; costX: number; reason: 'limit' | 'manual' }
+  handoff?: { to: string; costX: number; reason: HandoffReason }
 }
 
 export interface Message {
@@ -713,6 +718,8 @@ export interface HandoffSettings {
   waitMinutes: number
   /** Put the step that was in progress back to how it was when it started (git folders; default on). */
   rollbackStep: boolean
+  /** A1: a model on this PC may take over when a connection ran out of usage and the task is easy enough (default on). */
+  allowLocal?: boolean
 }
 
 /** One check the app ran in the work folder (no AI, no tokens). */
@@ -757,7 +764,7 @@ export interface ReviewSettings {
 
 export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2, bundle: 'once' }
 
-export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
+export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, allowLocal: true }
 
 export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
 

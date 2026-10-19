@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { LOCAL_BUSY_FOR_CHAT } from '../shared/localqueue'
 import { existsSync } from 'node:fs'
 import type { Agent } from '../shared/types'
 import { resolveModelArg, tierRank, type ModelEntry, type Tier } from '../shared/company'
@@ -52,6 +53,8 @@ export interface ChatsCtx {
   /** Models of this PC (8-2): list and a turn. */
   localModels?: () => ChatModelInfo[]
   localTurn?: (m: Extract<ChatModel, { kind: 'local' }>, t: LocalTurn) => Promise<{ text: string }>
+  /** A task runs or waits for this model (A3): a chat turn on it is refused. */
+  localBusy?: (m: Extract<ChatModel, { kind: 'local' }>) => boolean
   limitFor: (adapter: Agent['adapter']) => LimitInfo | undefined
   noteLimit: (adapter: Agent['adapter'], info: LimitInfo) => void
   lastModel: () => ChatModel | undefined
@@ -249,6 +252,7 @@ export class Chats {
     if (this.turns.has(chat.id)) throw new Error('이 대화는 아직 답을 쓰는 중이에요.')
     const conn = connOf(chat.model)
     for (const t of this.turns.values()) if (t.conn === conn) throw new Error('다른 대화가 같은 AI를 쓰고 있어요. 끝나면 보내 주세요.')
+    if (chat.model.kind === 'local' && this.c.localBusy?.(chat.model)) throw new Error(LOCAL_BUSY_FOR_CHAT)
     if (this.turns.size >= MAX_CHAT_TURNS) throw new Error('지금 답을 쓰는 대화가 많아요. 하나가 끝나면 보내 주세요.')
   }
 

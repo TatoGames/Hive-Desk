@@ -1,4 +1,5 @@
 import type { EmployeeState } from './office'
+import { queueLine } from './localqueue'
 import type { ActivityKind, Task } from './types'
 
 /**
@@ -91,6 +92,8 @@ export function bubbleFor(o: {
   const t = o.task
   const clock = (iso: string): string => new Date(iso).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
   const fresh = t?.handoffs?.length ? t.handoffs[t.handoffs.length - 1] : undefined
+  // A3: in line for a model on this PC another task is using
+  if (t?.localWait && (o.state === 'working' || o.state === 'reviewing' || o.state === 'idle')) return { text: queueLine(t.localWait.position), tone: 'wait' }
   switch (o.state) {
     case 'waiting-approval':
       return { text: '이 작업 해도 될까요? (결재 요청)', tone: 'wait' }
