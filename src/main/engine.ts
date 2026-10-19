@@ -90,6 +90,10 @@ import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
 import { isElectronApp, runChecks } from './checks'
+import { Chats, type ChatModelInfo } from './chat'
+import { LocalAi, type LocalJob, type LocalStatus } from './local'
+import type { LocalEndpoint } from '../shared/localai'
+import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
 import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
 import { taskCost, type TaskCost } from '../shared/cost'
@@ -143,6 +147,9 @@ export class Engine {
   /** The promise of each run in progress (cancel waits for the process to end). */
   private pendingRuns = new Map<string, Promise<unknown>>()
   private liveRuns = new Map<string, LiveRun>()
+  readonly chats!: Chats
+  readonly local!: LocalAi
+  private chatsRecovered = new Set<string>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
   /** One run per work folder at a time: folder → who has it and who waits. */
@@ -229,6 +236,43 @@ export class Engine {
       changed: () => self.changed(),
       notify: (title, body) => self.notify(title, body),
       me: () => self.config.memberName || 'me'
+    })
+    this.local = new LocalAi({
+      store: () => self.config.local ?? {},
+      saveStore: (st) => {
+        self.config = { ...self.config, local: st }
+        saveConfig(self.configFile, self.config)
+      },
+      cipher: () => self.cipher,
+      secrets: () => self.machine.secretBlobs(),
+      setSecret: (k, blob) => self.machine.setSecretBlob(k, blob),
+      candidatesPath: join(dirname(self.configFile), 'local-models.json'),
+      busy: (id) => self.chats.usesLocal(id),
+      changed: () => self.emit({ type: 'local' })
+    })
+    this.chats = new Chats({
+      hive: () => self.hive,
+      runner: () => self.runner,
+      stripApiKeys: () => self.config.stripApiKeys,
+      catalog: () => self.catalog(),
+      localModels: () => self.local.models(),
+      localTurn: (m, t) => self.local.turn(m, t),
+      cliModels: () =>
+        self.machine
+          .modelAgents()
+          .map((ma) => ({ adapter: ma.adapter, modelId: ma.modelId, status: self.modelAgentStatus(ma).status }))
+          .filter((x) => x.status !== 'unavailable')
+          .map((x) => ({ adapter: x.adapter, modelId: x.modelId, ok: x.status === 'ok' })),
+      limitFor: (ad) => self.limitFor(ad),
+      noteLimit: (ad, info) => self.noteLimit(ad, info),
+      lastModel: () => self.config.chatModel,
+      setLastModel: (m) => {
+        self.config = { ...self.config, chatModel: m }
+        saveConfig(self.configFile, self.config)
+      },
+      confirmAtCostX: () => ({ ...DEFAULT_HANDOFF, ...(self.config.handoff ?? {}) }).confirmAtCostX,
+      changed: () => self.changed(),
+      onChat: (id) => self.emit({ type: 'chat', chatId: id })
     })
     this.github = new GithubFlow({
       get hive(): Hive {
@@ -1381,6 +1425,81 @@ export class Engine {
   /** v0.6.1: where the AI runs and time of a job went, by stage. */
   taskCost(taskId: string): TaskCost {
     return taskCost(this.hive.listTasks(), taskId, this.hive.listAptitude())
+  }
+
+  // ---- v6 8-2: models that run on this PC ----
+  localStatus(): Promise<LocalStatus> {
+    return this.local.status()
+  }
+  localAdd(o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> {
+    return this.local.add(o)
+  }
+  localRemove(id: string): void {
+    this.local.remove(id)
+  }
+  localRefresh(id?: string): Promise<void> {
+    return this.local.refresh(id)
+  }
+  localSpeed(endpointId: string, model: string): Promise<LocalJob> {
+    return this.local.speed(endpointId, model)
+  }
+  localBench(endpointId: string, model: string): Promise<LocalJob> {
+    return this.local.bench(endpointId, model)
+  }
+  localPull(endpointId: string, name: string): Promise<LocalJob> {
+    return this.local.pull(endpointId, name)
+  }
+  localDeleteModel(endpointId: string, name: string): Promise<void> {
+    return this.local.deleteModel(endpointId, name)
+  }
+  localStop(jobId: string): void {
+    this.local.stopJob(jobId)
+  }
+
+  // ---- v6 챗: conversations with a model the person picks (no file is ever changed) ----
+  chatModels(): ChatModelInfo[] {
+    return this.chats.models()
+  }
+  chatList(): ChatSummary[] {
+    if (!this.chatsRecovered.has(this.hive.id)) {
+      this.chatsRecovered.add(this.hive.id)
+      this.chats.recover()
+    }
+    return this.chats.list()
+  }
+  chatGet(id: string): Chat | null {
+    return this.chats.get(id)
+  }
+  chatCreate(o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }): Chat {
+    return this.chats.create(o)
+  }
+  /** Runs in the company the conversation belongs to, even when the person switches company meanwhile. */
+  chatSend(id: string, text: string): Promise<Chat> {
+    return this.als.run(this.hive, () => this.chats.send(id, text))
+  }
+  chatRetry(id: string, model?: ChatModel): Promise<Chat> {
+    return this.als.run(this.hive, () => this.chats.retry(id, model))
+  }
+  chatStop(id: string): void {
+    this.chats.stop(id)
+  }
+  chatSetModel(id: string, model: ChatModel): Chat {
+    return this.chats.setModel(id, model)
+  }
+  chatCostOfChange(id: string, to: ChatModel): { factor: number; confirmAt: number } {
+    return { factor: this.chats.costOfChange(id, to), confirmAt: this.chats.confirmFactor() }
+  }
+  chatRename(id: string, title: string): void {
+    this.chats.rename(id, title)
+  }
+  chatSetFolders(id: string, folders: string[]): void {
+    this.chats.setFolders(id, folders)
+  }
+  chatDelete(id: string): void {
+    this.chats.delete(id)
+  }
+  chatExport(id: string): string {
+    return this.chats.export(id)
   }
 
   /** v0.6.1: what git state a folder is in (for the start screen). */

@@ -1,7 +1,9 @@
 import { classifyInput } from '../shared/manage'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, safeStorage, shell, Tray } from 'electron'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, SubtaskSpec, Task } from '../shared/types'
+import type { ChatModel } from '../shared/chat'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
@@ -179,6 +181,34 @@ function registerIpc(): void {
   ipcMain.handle('conn:hire-seat', (_e, seatId: string, modelAgentId: string) => engine.hireToSeat(seatId, modelAgentId))
   ipcMain.handle('conn:auto-preview', () => engine.autoConnectPreview())
   ipcMain.handle('conn:auto-apply', (_e, rows) => engine.autoConnectApply(rows))
+  ipcMain.handle('local:status', () => engine.localStatus())
+  ipcMain.handle('local:add', (_e, o: { name?: string; url: string; token?: string }) => engine.localAdd(o))
+  ipcMain.handle('local:remove', (_e, id: string) => engine.localRemove(id))
+  ipcMain.handle('local:refresh', (_e, id?: string) => engine.localRefresh(id))
+  ipcMain.handle('local:speed', (_e, ep: string, model: string) => engine.localSpeed(ep, model))
+  ipcMain.handle('local:bench', (_e, ep: string, model: string) => engine.localBench(ep, model))
+  ipcMain.handle('local:pull', (_e, ep: string, name: string) => engine.localPull(ep, name))
+  ipcMain.handle('local:delete-model', (_e, ep: string, name: string) => engine.localDeleteModel(ep, name))
+  ipcMain.handle('local:stop', (_e, jobId: string) => engine.localStop(jobId))
+  ipcMain.handle('chat:models', () => engine.chatModels())
+  ipcMain.handle('chat:list', () => engine.chatList())
+  ipcMain.handle('chat:get', (_e, id: string) => engine.chatGet(id))
+  ipcMain.handle('chat:create', (_e, o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }) => engine.chatCreate(o))
+  ipcMain.handle('chat:send', (_e, id: string, text: string) => engine.chatSend(id, text))
+  ipcMain.handle('chat:retry', (_e, id: string, model?: ChatModel) => engine.chatRetry(id, model))
+  ipcMain.handle('chat:stop', (_e, id: string) => engine.chatStop(id))
+  ipcMain.handle('chat:set-model', (_e, id: string, model: ChatModel) => engine.chatSetModel(id, model))
+  ipcMain.handle('chat:cost-of-change', (_e, id: string, model: ChatModel) => engine.chatCostOfChange(id, model))
+  ipcMain.handle('chat:rename', (_e, id: string, title: string) => engine.chatRename(id, title))
+  ipcMain.handle('chat:set-folders', (_e, id: string, folders: string[]) => engine.chatSetFolders(id, folders))
+  ipcMain.handle('chat:delete', (_e, id: string) => engine.chatDelete(id))
+  ipcMain.handle('chat:export', async (_e, id: string) => {
+    const md = engine.chatExport(id)
+    const r = await dialog.showSaveDialog({ defaultPath: '대화.md', filters: [{ name: 'Markdown', extensions: ['md'] }] })
+    if (r.canceled || !r.filePath) return null
+    writeFileSync(r.filePath, md, 'utf8')
+    return r.filePath
+  })
   ipcMain.handle('task:cost', (_e, id: string) => engine.taskCost(id))
   ipcMain.handle('folder:git-state', (_e, dir: string) => engine.folderGit(dir))
   ipcMain.handle('folder:git-init', (_e, dir: string) => engine.initFolderGit(dir))
