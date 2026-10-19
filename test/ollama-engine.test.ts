@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Engine } from '../src/main/engine'
 import { OllamaEngine, extractZip, githubOnly, planFor, safeJoin, type EngineManifest } from '../src/main/ollamaEngine'
@@ -179,7 +179,7 @@ describe('install', () => {
     expect(() => safeJoin('/a/b', 'x/../../c')).toThrow()
     expect(() => safeJoin('/a/b', '/etc/passwd')).toThrow()
     expect(() => safeJoin('/a/b', 'C:\\x')).toThrow()
-    expect(safeJoin('/a/b', 'x/y.txt')).toBe(join('/a/b', 'x', 'y.txt'))
+    expect(safeJoin('/a/b', 'x/y.txt')).toBe(resolve('/a/b', 'x', 'y.txt'))
 
     for (const [name, buf, fmt] of [
       ['zip-dotdot', makeZip([{ name: 'ollama.exe', data: 'x' }, { name: '../evil.txt', data: 'x' }]), 'zip'],
