@@ -80,6 +80,7 @@ export default function LocalAi(): JSX.Element {
       <p className="muted small">
         Ollama나 LM Studio처럼 <b>이 PC(또는 같은 네트워크의 PC)에서 도는 AI</b>를 연결하면 챗에서 쓸 수 있어요. 키가 필요 없고 구독 한도도 쓰지 않아요. 대신 PC 성능만큼만 빨라요.
       </p>
+      <p className="muted small">Ollama는 따로 설치해야 해요(ollama.com).</p>
 
       <div className="local-pc">
         <b>이 PC</b>: 메모리 {st.pc.ramGB}GB · 코어 {st.pc.cores}개
@@ -98,10 +99,10 @@ export default function LocalAi(): JSX.Element {
         <button className="primary" disabled={busy || !url.trim()} onClick={() => add(url)}>
           연결
         </button>
-        <button className="sm" disabled={busy} onClick={() => add('localhost:11434')}>
+        <button className="sm primary" disabled={busy} onClick={() => add('localhost:11434')}>
           Ollama
         </button>
-        <button className="sm" disabled={busy} onClick={() => add('localhost:1234')}>
+        <button className="sm ghost" disabled={busy} onClick={() => add('localhost:1234')}>
           LM Studio
         </button>
         <button className="sm ghost" onClick={() => setShowToken((v) => !v)}>

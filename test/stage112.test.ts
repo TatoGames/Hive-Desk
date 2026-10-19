@@ -8,7 +8,7 @@ import { BENCH_TASKS, benchPrompt, extractCode } from '../src/shared/bench'
 import { fitNote, guessParamsB, normalizeUrl, parseCandidates, recommendTier, tierOfParams, type PcInfo } from '../src/shared/localai'
 import { runBench, runCheck } from '../src/main/bench'
 import { Engine } from '../src/main/engine'
-import { chatStream, ollamaDelete, ollamaPull, parsePullLine, probe, speedTest, SseParser } from '../src/main/openai'
+import { chatStream, explainFetchError, ollamaDelete, ollamaPull, parsePullLine, probe, speedTest, SseParser } from '../src/main/openai'
 import { diagnosePc, parseNvidia } from '../src/main/pcinfo'
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -185,6 +185,15 @@ describe('8-2: talking to an engine', () => {
     const gone = dead.url
     await new Promise((r) => dead.server.close(r))
     await expect(probe({ url: gone })).rejects.toThrow('연결할 수 없어요')
+  })
+
+  it('explains a refused connection by port', () => {
+    const e = { cause: { code: 'ECONNREFUSED' } }
+    expect(explainFetchError(e, 'http://localhost:11434')).toMatch(/연결할 수 없어요.*ollama\.com/)
+    expect(explainFetchError(e, 'localhost:1234')).toMatch(/연결할 수 없어요.*LM Studio/)
+    const other = explainFetchError(e, 'http://localhost:9999')
+    expect(other).toMatch(/연결할 수 없어요/)
+    expect(other).not.toMatch(/LM Studio|ollama\.com/)
   })
 
   it('streams the answer, reports it as it grows, and keeps what came when stopped', async () => {
