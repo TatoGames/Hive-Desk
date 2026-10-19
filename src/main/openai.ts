@@ -1,5 +1,5 @@
 import type { LocalModelInfo, EngineKind, SpeedResult } from '../shared/localai'
-import { guessParamsB } from '../shared/localai'
+import { guessParamsB, endpointScope } from '../shared/localai'
 
 /**
  * v6 8-2: a client for OpenAI-compatible engines on this PC (Ollama, LM Studio, ...) — no API key, a local address.
@@ -49,13 +49,18 @@ export function explainFetchError(e: unknown, url: string): string {
   const code = err.cause?.code
   if (code === 'ECONNREFUSED') {
     const port = portOf(url)
+    if (endpointScope(url) !== 'this-pc') return `${url}에 연결할 수 없어요. 그 PC는 켜져 있지만 AI 프로그램이 꺼져 있거나, 다른 PC의 접속을 받지 않게 닫혀 있어요(Ollama는 OLLAMA_HOST=0.0.0.0 으로 열어야 해요). 포트가 맞는지도 확인해 주세요.`
     const head = `${url}에 연결할 수 없어요.`
     if (port === 1234) return `${head} LM Studio의 Developer 탭에서 서버를 시작해 주세요(Start Server, 포트 1234).`
     if (port === 11434) return `${head} Ollama가 켜져 있나요? 설치 전이면 https://ollama.com 에서 설치한 뒤 앱을 한 번 실행해 주세요.`
     return `${head} 이 주소에서 AI 프로그램이 켜져 있는지, 포트가 맞는지 확인해 주세요.`
   }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `${url} 주소를 찾을 수 없어요.`
-  if (code === 'ETIMEDOUT' || code === 'EHOSTUNREACH') return `${url}에서 답이 없어요. 같은 네트워크인지, 방화벽이 막고 있지 않은지 확인해 주세요.`
+  if (code === 'ETIMEDOUT' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    // another computer: the usual reasons are that it is off, asleep or not on the same network
+    if (endpointScope(url) !== 'this-pc') return `${url}에서 답이 없어요. 그 PC가 꺼져 있거나 절전 중이거나, 같은 네트워크가 아닐 수 있어요. 그 PC에서 엔진이 다른 PC의 접속을 받도록 열려 있는지(Ollama는 OLLAMA_HOST 설정), 방화벽이 막고 있지 않은지도 확인해 주세요.`
+    return `${url}에서 답이 없어요. 같은 네트워크인지, 방화벽이 막고 있지 않은지 확인해 주세요.`
+  }
   if (err.name === 'AbortError' || err.name === 'TimeoutError') return err.message && !/aborted/i.test(err.message) ? err.message : '중지했어요.'
   if (err.message === 'fetch failed' || err.message === 'terminated') return `${url}와 연결이 끊겼어요.`
   return (err.message ?? String(e)).split('\n')[0].slice(0, 200)

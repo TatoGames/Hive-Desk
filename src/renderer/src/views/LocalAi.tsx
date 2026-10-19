@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { TIER_LABEL } from '@shared/company'
-import { CANDIDATE_FILTERS, LICENSE_NOTICE, filterCandidates, fitNote, fmtBytes, modelTier, needsEasyOnly, pcFit, recommendState, sizeTag, sortCandidates, type CandidateFilter, type CandidateSort, type CandidateView, type LocalModelInfo } from '@shared/localai'
+import { CANDIDATE_FILTERS, LICENSE_NOTICE, REMOTE_NOTICE, SCOPE_LABEL, endpointProblem, endpointScope, normalizeUrl, filterCandidates, fitNote, fmtBytes, modelTier, needsEasyOnly, pcFit, recommendState, sizeTag, sortCandidates, type CandidateFilter, type CandidateSort, type CandidateView, type LocalModelInfo } from '@shared/localai'
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
 import OllamaEngineCard from './OllamaEngineCard'
@@ -15,6 +15,8 @@ export default function LocalAi(): JSX.Element {
   const [showToken, setShowToken] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /** An address of another computer waiting for the person to confirm that what they send goes there. */
+  const [remoteOk, setRemoteOk] = useState<string | null>(null)
   const [custom, setCustom] = useState('')
   const [agreed, setAgreed] = useState<Record<string, boolean>>({})
   const [filters, setFilters] = useState<CandidateFilter[]>([])
@@ -58,11 +60,18 @@ export default function LocalAi(): JSX.Element {
     window.setTimeout(() => void load(), 80)
   }
 
-  const add = (u: string): void => {
+  const add = (u: string, acceptRemote = false): void => {
+    const norm = normalizeUrl(u)
+    if (norm && endpointScope(norm) !== 'this-pc') {
+      const problem = endpointProblem(norm, !!token.trim())
+      if (problem) return setErr(problem)
+      if (!acceptRemote) return setRemoteOk(u) // asked once, before the first connection to another computer
+    }
+    setRemoteOk(null)
     setBusy(true)
     void run(async () => {
       try {
-        await window.hive.localAdd({ url: u, token: token.trim() || undefined })
+        await window.hive.localAdd({ url: u, token: token.trim() || undefined, acceptRemote })
         setUrl('')
         setToken('')
       } finally {
@@ -132,12 +141,25 @@ export default function LocalAi(): JSX.Element {
           </div>
         </div>
       )}
+      {remoteOk && (
+        <div className="warn-box small" role="alert">
+          <b>{remoteOk}</b>는 이 PC가 아니에요. {REMOTE_NOTICE}
+          <div className="row">
+            <button className="sm primary" onClick={() => add(remoteOk, true)}>
+              알겠어요, 연결
+            </button>
+            <button className="sm ghost" onClick={() => setRemoteOk(null)}>
+              취소
+            </button>
+          </div>
+        </div>
+      )}
       {err && <div className="warn-text small">{err}</div>}
 
       {st.endpoints.map((e) => (
         <div key={e.id} className="local-ep">
           <div className="row">
-            <b>{e.name}</b> <span className="muted small">{e.url}</span>
+            <b>{e.name}</b> <span className="chip">{SCOPE_LABEL[endpointScope(e.url)]}</span> <span className="muted small">{e.url}</span>
             <span className={'chip ' + (e.state?.ok ? 'ok' : 'bad')}>{e.state ? (e.state.ok ? `연결됨${e.state.version ? ' · ' + e.state.version : ''}` : '연결 안 됨') : '확인 중'}</span>
             <ConfirmButton label="연결 끊기" onConfirm={() => run(() => window.hive.localRemove(e.id))} />
           </div>

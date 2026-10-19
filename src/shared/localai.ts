@@ -63,6 +63,45 @@ export function isLoopback(url: string): boolean {
   }
 }
 
+/** A5: where an address points. `this-pc` = this computer, `lan` = a computer on the same network, `internet` = anywhere else. */
+export type EndpointScope = 'this-pc' | 'lan' | 'internet'
+
+export function endpointScope(input: string): EndpointScope {
+  const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `http://${input}` // a bare `host:port` is read as http
+  if (isLoopback(url)) return 'this-pc'
+  let h: string
+  try {
+    h = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  } catch {
+    return 'internet'
+  }
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+    if (a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)) return 'lan'
+    if (a === 169 && b === 254) return 'lan' // link-local
+    if (a === 100 && b >= 64 && b <= 127) return 'lan' // shared address space used by Tailscale and the like
+    if (a === 127) return 'this-pc'
+    return 'internet'
+  }
+  if (h.includes(':')) return /^(fe80|fc|fd)/.test(h) ? 'lan' : h === '::1' ? 'this-pc' : 'internet' // IPv6
+  if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home.arpa') || !h.includes('.')) return 'lan' // a name only the home network knows
+  return 'internet'
+}
+
+export const SCOPE_LABEL: Record<EndpointScope, string> = { 'this-pc': '이 PC', lan: '다른 PC', internet: '인터넷 주소' }
+
+/** Why an address cannot be connected as it is. Undefined = fine (or fine once the person confirmed the notice). */
+export function endpointProblem(url: string, hasToken: boolean): string | undefined {
+  if (endpointScope(url) !== 'internet') return undefined
+  if (!url.startsWith('https://')) return '인터넷에 있는 주소는 https 주소만 연결할 수 있어요. 요청한 내용이 그대로 노출될 수 있어요.'
+  if (!hasToken) return '인터넷에 있는 주소는 토큰 없이 연결하지 않아요. 아무나 쓸 수 있는 주소일 수 있어요.'
+  return undefined
+}
+
+/** Shown once, before the first connection to another computer. */
+export const REMOTE_NOTICE = '이 연결을 쓰면 AI에게 보내는 내용(질문, 일의 설명, 고칠 파일의 글)이 이 PC가 아니라 그 PC로 가요. 그 PC가 믿을 수 있는 내 컴퓨터가 맞는지 확인해 주세요.'
+
 /** Parameters in billions from a model name: `qwen2.5-coder:7b`, `llama3.1-70b-instruct`, `mixtral-8x7b`, `phi3:mini` (unknown). */
 export function guessParamsB(name: string): number | undefined {
   const n = name.toLowerCase()

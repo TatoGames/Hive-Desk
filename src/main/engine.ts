@@ -1515,7 +1515,7 @@ export class Engine {
   localStatus(): Promise<LocalStatus> {
     return this.local.status()
   }
-  localAdd(o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> {
+  localAdd(o: { name?: string; url: string; token?: string; acceptRemote?: boolean }): Promise<LocalEndpoint> {
     return this.local.add(o)
   }
   localRemove(id: string): void {
