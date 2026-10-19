@@ -119,8 +119,8 @@ const mk = async (...a: Parameters<typeof fake>): Promise<Fake> => {
 
 describe('8-2: addresses, sizes and the tier of a PC', () => {
   it('addresses are read leniently; a bare host gets the usual port', () => {
-    expect(normalizeUrl('localhost')).toBe('http://localhost:11434')
-    expect(normalizeUrl('localhost:1234')).toBe('http://localhost:1234')
+    expect(normalizeUrl('localhost')).toBe('http://127.0.0.1:11434')
+    expect(normalizeUrl('localhost:1234')).toBe('http://127.0.0.1:1234')
     expect(normalizeUrl('http://192.168.0.5:1234/v1/')).toBe('http://192.168.0.5:1234')
     expect(normalizeUrl('https://box.example/ollama/v1')).toBe('https://box.example/ollama')
     expect(normalizeUrl('  ')).toBeUndefined()
