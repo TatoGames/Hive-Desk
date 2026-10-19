@@ -441,3 +441,18 @@ describe('J1 candidate tags and kind', () => {
     expect(f.models[2]).toMatchObject({ kind: 'text', tags: [], approxGB: undefined })
   })
 })
+
+describe('J2 curated list', () => {
+  it('the built-in list parses whole, every item is unchecked and marked, no embedding or vision-only', async () => {
+    const raw = (await import('../src/shared/local-models.default.json')).default
+    const f = parseCandidates(raw)
+    expect(f.models.length).toBe((raw as { models: unknown[] }).models.length)
+    expect(f.models.length).toBeGreaterThanOrEqual(20)
+    expect(new Set(f.models.map((m) => m.id)).size).toBe(f.models.length)
+    for (const m of f.models) {
+      expect(m.licenseStatus).toBe('unchecked')
+      expect(m.kind).toBe('text')
+      expect(m.tags).toContain('라이선스 확인 전')
+    }
+  })
+})
