@@ -392,13 +392,20 @@ describe('A3: 오류에 따른 처리', () => {
 const LIMIT: Runner = async (_b, _o: RunOptions) => ({ code: 1, stdout: '', stderr: 'Claude usage limit reached. try again in 5 hours', timedOut: false, aborted: false })
 
 describe('A1: 한도 때문에 로컬로 이어받기', () => {
-  async function limited(opts: { description?: string; permission?: 'read' | 'edit'; allowLocal?: boolean; modelOff?: boolean; fullLine?: boolean } = {}) {
+  async function limited(opts: { description?: string; permission?: 'read' | 'edit'; allowLocal?: boolean; modelOff?: boolean; fullLine?: boolean; scope?: 'off' | 'easy' | 'limit-only'; history?: { passed: number; failed: number } } = {}) {
     const f = await fake(() => ({ text: answerFor('calc.js') }))
     const { eng, ep } = await setup(f, LIMIT)
     const wd = folder('w1')
     if (opts.allowLocal === false) eng.saveSettings({ handoff: { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, allowLocal: false } })
+    if (opts.scope) eng.saveSettings({ handoff: { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, localScope: opts.scope } })
     const claude = eng.saveAgent({ name: '클로드', adapter: 'claude', workDir: wd, modelRef: { id: 'claude-sonnet-5-5', pin: 'pinned' } })
     const pc = localAgent(eng, ep, '작은손', wd)
+    // A2: an earlier record of the model on this PC (first-pass results)
+    const hist = opts.history
+    for (let i = 0; hist && i < hist.passed + hist.failed; i++) {
+      const pass = i < hist.passed
+      eng.hive.saveAptitude({ taskId: `old${i}`, modelKey: 'local:' + ep + '|qwen2.5-coder:7b', modelLabel: 'q', domain: 'general', runs: 1, ms: 1, approved: pass ? 1 : 0, changes: 0, failed: pass ? 0 : 1, updatedAt: '' })
+    }
     if (opts.modelOff) {
       f.server.closeAllConnections()
       await new Promise((r) => f.server.close(r))
@@ -458,4 +465,69 @@ describe('A1: 한도 때문에 로컬로 이어받기', () => {
   it('a long line for the model: not handed over', async () => {
     await stays(await limited({ fullLine: true }))
   }, 60_000)
+
+  it('A2 scope off: not handed over (same as allowLocal false)', async () => {
+    await stays(await limited({ scope: 'off' }))
+  }, 60_000)
+
+  it('A2 scope limit-only: a limit still hands the easy task over', async () => {
+    const { eng, t, pc } = await limited({ scope: 'limit-only' })
+    await waitFor(() => !!eng.hive.getTask(t)?.handoffs?.length)
+    expect(eng.hive.getTask(t)!.handoffs![0].to).toBe(pc)
+  }, 60_000)
+
+  it('A2 a good record: handed over', async () => {
+    const { eng, t, pc } = await limited({ history: { passed: 5, failed: 0 } })
+    await waitFor(() => !!eng.hive.getTask(t)?.handoffs?.length)
+    expect(eng.hive.getTask(t)!.handoffs![0].to).toBe(pc)
+  }, 60_000)
+
+  it('A2 a bad record: not handed over, and the reason is written on the task', async () => {
+    const r = await limited({ history: { passed: 1, failed: 4 } })
+    await stays(r)
+    const text = r.eng.hive.listEvents(r.t).map((e) => e.text).join('\n')
+    expect(text).toContain('내 PC AI에게 넘기지 않았어요')
+    expect(text).toContain('통과율 20%(5건)')
+    // the tick looks again: the line is not repeated
+    await r.eng.handoffs.onLimit(r.t)
+    expect(r.eng.hive.listEvents(r.t).filter((e) => e.text.includes('내 PC AI에게 넘기지 않았어요'))).toHaveLength(1)
+  }, 60_000)
+
+  it('A2 a thin record (2 tries, both failed) is only a hint: the default rate is used, so it is still handed over', async () => {
+    const { eng, t, pc } = await limited({ history: { passed: 0, failed: 2 } })
+    await waitFor(() => !!eng.hive.getTask(t)?.handoffs?.length)
+    expect(eng.hive.getTask(t)!.handoffs![0].to).toBe(pc)
+  }, 60_000)
+
+  describe('A2 hint when a person gives a task to the local employee', () => {
+    async function assigned(scope?: 'off' | 'easy' | 'limit-only') {
+      const f = await fake(() => ({ text: answerFor('calc.js') }))
+      const { eng, ep } = await setup(f, LIMIT)
+      const wd = folder('w1')
+      if (scope) eng.saveSettings({ handoff: { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, localScope: scope } })
+      const pc = localAgent(eng, ep, '작은손', wd)
+      const hard = eng.createTask({ title: 'add 고치기', description: 'a.js b.js c.js d.js 를 모두 고쳐 주세요.', assignee: pc })
+      const easy = eng.createTask({ title: 'add 고치기', description: 'calc.js의 add가 뺄셈을 해요. 더하기로 고쳐 주세요.', assignee: pc })
+      const texts = (id: string): string => eng.hive.listEvents(id).map((e) => e.text).join('\n')
+      return { easy: texts(easy.id), hard: texts(hard.id), eng }
+    }
+    it('easy scope (default): an easy task gets the hint, a hard one does not', async () => {
+      const r = await assigned()
+      expect(r.easy).toContain('이 일은 내 PC AI로 해도 괜찮아 보여요')
+      expect(r.easy).toContain('아직 이력이 적어요')
+      expect(r.hard).not.toContain('내 PC AI로 해도 괜찮아 보여요')
+    }, 60_000)
+    it.each(['off', 'limit-only'] as const)('%s: no hint', async (scope) => {
+      expect((await assigned(scope)).easy).not.toContain('내 PC AI로 해도 괜찮아 보여요')
+    }, 60_000)
+    it('the old setting allowLocal false: no hint', async () => {
+      const f = await fake(() => ({ text: answerFor('calc.js') }))
+      const { eng, ep } = await setup(f, LIMIT)
+      const wd = folder('w1')
+      eng.saveSettings({ handoff: { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, allowLocal: false } })
+      const pc = localAgent(eng, ep, '작은손', wd)
+      const t = eng.createTask({ title: 'add 고치기', description: 'calc.js의 add가 뺄셈을 해요.', assignee: pc })
+      expect(eng.hive.listEvents(t.id).map((e) => e.text).join('\n')).not.toContain('괜찮아 보여요')
+    }, 60_000)
+  })
 })

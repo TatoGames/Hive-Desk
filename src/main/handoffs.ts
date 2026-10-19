@@ -2,6 +2,7 @@ import type { ModelEntry } from '../shared/company'
 import { tierOfSlug } from '../shared/company'
 import { costLine, handoffNote, handoffReasonLabel, nearLimit, pickHandoff, shouldWait, whyNot, type HandoffCand, type HandoffNeed } from '../shared/handoff'
 import { readJob } from '../shared/quick'
+import { DEFAULT_EXTERNAL_WEIGHT, localBenefit, localHistory, localScopeOf, type LocalBenefit } from '../shared/localbenefit'
 import { LOCAL_QUEUE } from '../shared/localqueue'
 import { DEFAULT_HANDOFF, type Agent, type Handoff, type HandoffReason, type HandoffSettings, type Task } from '../shared/types'
 import { rollback } from './checkpoint'
@@ -26,6 +27,8 @@ export interface HandoffCtx {
   localFit?: (task: Task, agent: Agent) => string | null
   /** A1: the engine of this employee's model answered and lists the model. */
   localReady?: (agent: Agent) => boolean
+  /** A2: the project of this employee's folder has automatic checks (tests, typecheck …): a failure is found early. */
+  hasChecks?: (task: Task, agent: Agent) => boolean
   /** A3: tasks waiting in line for this employee's model. */
   localWaiting?: (agent: Agent) => number
   excludesFor: (root: string) => string[]
@@ -33,6 +36,9 @@ export interface HandoffCtx {
   notify: (title: string, body: string) => void
   me: () => string
 }
+
+/** A candidate left out because it is not worth it (A2) carries this at the start of its reason. */
+const BENEFIT_PREFIX = '기대 이익이 없어요: '
 
 export interface HandoffOption {
   agentId: string
@@ -71,17 +77,55 @@ export class Handoffs {
   }
 
   /** Why a model on this PC cannot take this task now (null = it can): A1 conditions 1, 3, 4 (condition 2, the permission, is `whyNot`). */
-  private localBlock(task: Task, a: Agent): string | null {
+  private localBlock(task: Task, a: Agent, ext?: { weight: number; limited: boolean }): string | null {
     if (!this.c.localFit || !this.c.localReady) return '내 PC AI 연결이 준비되지 않음'
     const fit = this.c.localFit(task, a)
     if (fit) return `내 PC AI에게는 어려운 일: ${fit}`
     if (!this.c.localReady(a)) return '내 PC의 모델이 떠 있지 않음'
     if ((this.c.localWaiting?.(a) ?? 0) >= LOCAL_QUEUE.maxWaiting) return '내 PC 모델의 대기열이 길음'
+    if (ext) {
+      // A2: all of the above and also worth it (AND)
+      const b = this.benefit(task, a, ext.weight, ext.limited)
+      if (!b.recommend) return `${BENEFIT_PREFIX}${b.reason}`
+    }
     return null
   }
 
+  /** A2: expected benefit of giving `task` to the local employee `a` instead of an outside model of this usage weight. */
+  private benefit(task: Task, a: Agent, externalWeight: number, limited: boolean): LocalBenefit {
+    const key = a.localModel ? `local:${a.localModel.endpointId}|${a.localModel.model}` : ''
+    const h = localHistory(this.c.hive.listAptitude(), key, task.jobKind)
+    return localBenefit({ kind: task.jobKind, risky: task.risky, ...h, externalWeight, hasChecks: this.safeChecks(task, a), limited })
+  }
+
+  private safeChecks(task: Task, a: Agent): boolean {
+    try {
+      return this.c.hasChecks?.(task, a) ?? false
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * A2, scope `easy`: a person gave this task to an employee on this PC. If it looks fine for it, say so (a hint only,
+   * nothing is moved). Null when not (other scope, not a local employee, too hard, or no benefit).
+   */
+  hint(taskId: string): string | null {
+    const t = this.c.hive.getTask(taskId)
+    const a = t?.assignee ? this.c.agents().find((x) => x.id === t.assignee) : undefined
+    if (!t || !a?.localModel || localScopeOf(this.c.settings()) !== 'easy') return null
+    if (this.localBlock(t, a)) return null
+    const b = this.benefit(t, a, this.localBaseWeight(), false)
+    return b.recommend ? `이 일은 내 PC AI로 해도 괜찮아 보여요 (${b.reason})` : null
+  }
+
+  /** What an outside run of an ordinary model uses, when there is no particular employee to compare with. */
+  private localBaseWeight(): number {
+    return DEFAULT_EXTERNAL_WEIGHT
+  }
+
   /** `local`: also the employees that use a model on this PC (only when a usage limit hands the task over). */
-  private candidates(task: Task, opts: { local?: boolean } = {}): HandoffCand[] {
+  private candidates(task: Task, opts: { local?: boolean; ext?: { weight: number; limited: boolean } } = {}): HandoffCand[] {
     const h = this.c.hive
     const all = h.listTasks()
     if (Date.now() - this.roundAt > 60_000) this.round.clear()
@@ -101,7 +145,7 @@ export class Handoffs {
           limited: this.c.budgetGone(a),
           taken: this.round.get(a.id) ?? 0,
           local: true,
-          blocked: this.localBlock(task, a) ?? undefined
+          blocked: this.localBlock(task, a, opts.ext) ?? undefined
         }
       }
       const m = this.model(a)
@@ -165,7 +209,7 @@ export class Handoffs {
     }
     if (!t.limitWait) h.updateTask(taskId, { limitWait: { adapter: from.adapter, since: new Date().toISOString() } })
     if (!s.auto || shouldWait(lim, s.waitMinutes)) return null
-    return this.proceed(t, from, s, 'limit', { local: s.allowLocal !== false })
+    return this.proceed(t, from, s, 'limit', { local: localScopeOf(s) !== 'off' })
   }
 
   /**
@@ -186,8 +230,16 @@ export class Handoffs {
     if (h.listApprovals().some((a) => a.taskId === t.id && a.kind === 'handoff' && a.status === 'pending')) return null
     const fm = this.model(from)
     const fromInfo = from.localModel ? { tier: 'light' as const, weight: 1 } : fm
-    const r = pickHandoff({ agentId: from.id, adapter: from.adapter, tier: fromInfo.tier, weight: fromInfo.weight, rankLevel: this.rankLevel(from) }, this.candidates(t, { local: o.local }), this.need(t, from), { up: s.up })
-    if (!r.pick) return null
+    const r = pickHandoff({ agentId: from.id, adapter: from.adapter, tier: fromInfo.tier, weight: fromInfo.weight, rankLevel: this.rankLevel(from) }, this.candidates(t, { local: o.local, ext: { weight: from.localModel ? DEFAULT_EXTERNAL_WEIGHT : fromInfo.weight, limited: reason === 'limit' } }), this.need(t, from), { up: s.up })
+    if (!r.pick) {
+      // A2: say why a model on this PC was not used (once; the tick looks again and again)
+      const why = r.skipped.map((x) => x.why).find((w) => w.startsWith(BENEFIT_PREFIX))
+      if (why) {
+        const line = `내 PC AI에게 넘기지 않았어요. ${why.slice(BENEFIT_PREFIX.length)}`
+        if (!h.listEvents(t.id).some((e) => e.text === line)) h.addEvent(t.id, 'status', 'system', line)
+      }
+      return null
+    }
     if (s.confirmAtCostX > 0 && r.pick.costX >= s.confirmAtCostX) {
       const to = this.c.agents().find((a) => a.id === r.pick!.cand.agentId)!
       const lead = reason === 'limit' ? `${from.name}의 연결이 한도에 걸렸어요.` : `${from.name}의 내 PC AI로는 할 수 없었어요(${handoffReasonLabel(reason)}).`

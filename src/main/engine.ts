@@ -93,7 +93,7 @@ import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
-import { isElectronApp, runChecks } from './checks'
+import { detectChecks, isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
 import { LocalAi, type LocalJob, type LocalStatus } from './local'
 import { OllamaEngine, type EngineManifest, type EngineStatus } from './ollamaEngine'
@@ -252,6 +252,7 @@ export class Engine {
         const f = localFit(cwd, [task.title, task.description, task.reply ? `추가 설명: ${task.reply}` : ''].filter(Boolean).join('\n'), task.permission ?? a.permission ?? 'edit')
         return f.ok ? null : f.reason
       },
+      hasChecks: (task, a) => detectChecks(self.cwdFor(a, task.id)).specs.length > 0,
       localReady: (a) => !!a.localModel && self.local.modelReady(a.localModel.endpointId, a.localModel.model),
       localWaiting: (a) => (a.localModel ? self.localQueue.waiting(modelKey(a.localModel.endpointId, a.localModel.model)) : 0),
       excludesFor: (root) => self.excludesFor(root),
@@ -740,7 +741,9 @@ export class Engine {
     if (!target) throw new Error('없는 직원이에요.')
     if (t.kind === 'plan' && !['lead', 'coo'].includes(target.job ?? '')) throw new Error('계획을 세우는 업무는 관리자에게만 맡길 수 있어요.')
     if (t.assignee === agentId) return t
-    return this.updateTask(id, { assignee: agentId, ...(t.status === 'failed' ? { status: 'todo' as const } : {}) })
+    const moved = this.updateTask(id, { assignee: agentId, ...(t.status === 'failed' ? { status: 'todo' as const } : {}) })
+    this.localHint(id)
+    return moved
   }
 
   /** The latest things that happened in this company, newest first (one line each). */
@@ -1159,8 +1162,19 @@ export class Engine {
         throw e
       }
     }
+    this.localHint(t.id)
     this.changed()
     return t
+  }
+
+  /** A2 (scope `easy`): a person gave a task to an employee on this PC: tell them when it looks fine (a hint, nothing moves). */
+  private localHint(taskId: string): void {
+    try {
+      const hint = this.handoffs.hint(taskId)
+      if (hint) this.hive.addEvent(taskId, 'status', 'system', hint)
+    } catch {
+      /* a hint is never worth breaking the assignment */
+    }
   }
 
   updateTask(id: string, patch: Partial<Task>): Task {
@@ -2871,6 +2885,8 @@ export class Engine {
   // ---- aptitude: how each model version does in each work area ----
   private aptitudeKey(agent: Agent): { key: string; label: string } {
     const cat = this.catalog()
+    // a model on this PC has its own record (A2 reads it): not mixed with the outside model of the same connection
+    if (agent.localModel) return { key: `local:${agent.localModel.endpointId}|${agent.localModel.model}`, label: `내 PC ${agent.localModel.model}` }
     const m = agent.modelRef ? cat.find((x) => x.id === agent.modelRef!.id) : undefined
     if (m) return { key: m.id, label: modelLabel(m) }
     const arg = agent.model ?? 'default'

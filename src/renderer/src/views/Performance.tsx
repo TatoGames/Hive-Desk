@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Snapshot } from '@shared/types'
 import { performance, type PerfRow } from '@shared/performance'
+import { localSavings } from '@shared/localbenefit'
 
 function Table({ title, rows, showLoad }: { title: string; rows: PerfRow[]; showLoad?: boolean }): JSX.Element {
   return (
@@ -66,6 +67,15 @@ export default function Performance({ snap }: { snap: Snapshot }): JSX.Element {
       alive = false
     }
   }, [snap.company.aptitude])
+  const saved = useMemo(() => {
+    // the outside model the task came from: the first hand-over's sender, else the first assignee on record
+    const weightOf = (taskId: string): number | undefined => {
+      const from = snap.tasks.find((t) => t.id === taskId)?.handoffs?.[0]?.from
+      const modelId = snap.roster.find((r) => r.id === from)?.modelId
+      return snap.company.catalog.find((m) => m.id === modelId)?.weight
+    }
+    return localSavings(snap.company.aptitude, weightOf)
+  }, [snap.tasks, snap.company, snap.roster])
   return (
     <div className="page">
       <header className="page-head">
@@ -75,6 +85,15 @@ export default function Performance({ snap }: { snap: Snapshot }): JSX.Element {
         누가·어느 팀이·어느 모델이 얼마나 했고 얼마나 잘했는지 보여줘요. &lsquo;한도 사용량&rsquo;은 AI 실행 횟수에 모델의 한도 가중치(큰 모델일수록
         큼)를 곱한 값이라, 구독 한도를 어디에 쓰고 있는지 비교할 수 있어요. 모델 × 분야 점수와 재배치 추천은 회사 탭에 있어요.
       </p>
+      <section className="panel" aria-label="내 PC AI가 아낀 양">
+        <h2>내 PC AI가 아낀 양</h2>
+        <div className="small">
+          {saved.tasks
+            ? `내 PC AI가 맡아 검사를 통과한 업무 ${saved.tasks}건 · 외부 AI였다면 한도 사용량 약 ${saved.usage} (추정)`
+            : '아직 없어요.'}
+        </div>
+        <div className="muted small">같은 일을 외부 AI가 한 번 했다면 썼을 사용량을 모델의 한도 가중치로 어림한 값이에요. 모델을 모르면 보통 모델(3)로 계산해요.</div>
+      </section>
       <Table title="에이전트별" rows={p.agents} />
       <Table title="조직(팀)별" rows={p.units} />
       <Table title="모델별" rows={p.models} showLoad />
