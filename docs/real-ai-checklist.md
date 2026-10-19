@@ -81,7 +81,7 @@
 
 ## 휴대용 빌드 (실제 확인)
 
-- [ ] 맥: mac-portable.zip을 풀어 `HiveDesk.app`과 `portable.flag`가 같은 폴더에 있는지, 실행하면 옆에 `HiveDesk-data/`가 생기고 `~/Library/Application Support`에 HiveDesk 폴더/`HiveDesk-bootstrap.json`이 새로 생기지 않는지
+- [ ] 맥: 맥용 zip(`HiveDesk-<버전>-<arch>-mac.zip`)을 풀어 `HiveDesk.app`과 `portable.flag`가 같은 폴더에 있는지, 실행하면 옆에 `HiveDesk-data/`가 생기고 `~/Library/Application Support`에 HiveDesk 폴더/`HiveDesk-bootstrap.json`이 새로 생기지 않는지
 - [ ] 맥: 다운로드 폴더에서 바로 열었을 때(격리/translocation) 휴대용으로 인식되는지, 안 되면 폴더로 옮기면 되는지
 - [ ] 맥: 설정 화면에 "휴대용 모드예요: 데이터는 …에만 있어요"가 보이고 한 폴더 모드가 잠겨 있는지
 - [ ] 맥: 읽기 전용 USB/디스크 이미지에서 실행하면 안내가 뜨고 일반 모드로 시작하는지

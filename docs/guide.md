@@ -173,7 +173,7 @@ AI는 **무엇을, 어떻게 되면 끝인지** 알면 잘해요.
 설치 없이 폴더째 들고 다니는 버전이에요. 데이터는 앱 옆의 `HiveDesk-data/`에만 쌓이고, 시스템 앱 데이터 폴더에는 아무것도 만들지 않아요(`HiveDesk-bootstrap.json`도 만들지 않아요). 폴더를 옮기거나 지우면 끝이에요.
 
 - **Windows**: 릴리스의 `HiveDesk-Portable-<버전>.exe`를 원하는 폴더에서 실행해요. 그 exe 옆에 `HiveDesk-data/`가 생겨요. 실행할 때마다 임시 폴더에 풀리는 방식이라(electron-builder portable 타깃) 첫 실행이 느릴 수 있어요. 설치용 exe와 같은 앱이라 기능은 같아요.
-- **macOS**: `HiveDesk-<버전>-<arm64|x64>-mac-portable.zip`을 폴더에 풀어요. 압축 안에 `HiveDesk.app`과 `portable.flag`가 같이 들어 있고, 둘을 같은 폴더에 두면 그 옆에 `HiveDesk-data/`가 생겨요. `.app`만 따로 꺼내 쓰려면 `.app` 옆에 `portable.flag` 파일(빈 파일이면 돼요) 또는 `HiveDesk-data` 폴더를 직접 만들어 주세요. 다운로드 폴더에서 바로 열면 macOS가 앱을 임시 위치로 옮겨 실행할 수 있으니(확인 필요) 먼저 폴더로 옮겨 주세요.
+- **macOS**: `.zip`(이름은 `HiveDesk-<버전>-arm64-mac.zip` 또는 `HiveDesk-<버전>-mac.zip`이고, dmg와 달리 압축 파일이에요)을 폴더에 풀어요. 압축 안에 `HiveDesk.app`과 `portable.flag`가 같이 들어 있고, 둘을 같은 폴더에 두면 그 옆에 `HiveDesk-data/`가 생겨요. `.app`만 따로 꺼내 쓰려면 `.app` 옆에 `portable.flag` 파일(빈 파일이면 돼요) 또는 `HiveDesk-data` 폴더를 직접 만들어 주세요. 다운로드 폴더에서 바로 열면 macOS가 앱을 임시 위치로 옮겨 실행할 수 있으니(확인 필요) 먼저 폴더로 옮겨 주세요.
 - **판정 규칙**: Windows portable exe가 설정하는 환경변수 `PORTABLE_EXECUTABLE_DIR`가 있으면 그 폴더, 아니면 앱(맥은 `.app`) 옆에 `portable.flag` 또는 `HiveDesk-data`가 있으면 휴대용이에요. 설정 화면의 한 폴더 모드는 항상 켜진 채 잠기고 "휴대용 모드예요: 데이터는 …에만 있어요"가 보여요.
 - **읽기 전용 USB**: 그 폴더에 쓸 수 없으면 안내를 띄우고 이번에는 일반 모드로 시작해요(데이터는 이 컴퓨터의 앱 데이터 폴더).
 - **폴더 밖에 남는 것**: Claude·Codex·Antigravity 로그인 정보(각 프로그램이 관리), OS 보안 저장소의 암호화 키, 프로젝트 옆 병렬 작업 폴더(`.hive-worktrees`).

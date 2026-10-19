@@ -16,8 +16,6 @@ mac:
     # portable: the .app plus portable.flag in a zip (portable.flag at the repo root, see extraDistFiles)
     - target: zip
       arch: [arm64, x64]
-  # only the zip target is affected (the dmg name is pinned by the dmg: block)
-  artifactName: ${productName}-${version}-${arch}-mac-portable.${ext}
   # copied next to the .app, only into the zip (the dmg is built from the .app alone)
   extraDistFiles:
     - portable.flag
@@ -37,9 +35,6 @@ nsis:
   allowToChangeInstallationDirectory: true
 portable:
   artifactName: HiveDesk-Portable-${version}.${ext}
-# dmg keeps its default name explicitly because mac.artifactName (below) names the zip
-dmg:
-  artifactName: ${productName}-${version}-${arch}.${ext}
 linux:
   target: [AppImage]
   category: Development
