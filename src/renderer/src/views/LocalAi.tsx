@@ -230,6 +230,7 @@ function ModelRow({
   const sp = st.speed[k]
   const bn = st.bench[k]
   const fit = fitNote(m, st.advice)
+  const [open, setOpen] = useState(false)
   return (
     <div className="local-model">
       <b>{m.name}</b> <span className="chip">{TIER_LABEL[modelTier(m)]}</span>{' '}
@@ -244,6 +245,21 @@ function ModelRow({
           {' '}
           · 실측 {bn.passed}/{bn.total}개 통과 (중간 {(bn.medianMs / 1000).toFixed(0)}초)
         </span>
+      )}
+      {bn && (
+        <button className="sm ghost" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? '결과 접기' : '결과 보기'}
+        </button>
+      )}
+      {bn && open && (
+        <ul className="bench-rows small">
+          {bn.rows.map((r) => (
+            <li key={r.id} className={r.ok ? 'muted' : 'warn-text'}>
+              {r.ok ? '통과' : '실패'} · {r.title} ({(r.ms / 1000).toFixed(0)}초)
+              {!r.ok && r.reason ? ` — ${r.reason}` : ''}
+            </li>
+          ))}
+        </ul>
       )}
       {fit && <div className="warn-text small">{fit}</div>}
       <div className="row">
