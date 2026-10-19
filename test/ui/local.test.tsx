@@ -58,7 +58,7 @@ describe('v6 UI: HiveDesk 전용 Ollama', () => {
       value: new OllamaEngine({
         homeDir: () => `${dir}/HiveDesk`,
         manifest: { version: '1.2.3', platforms: { [key]: { url, sha256: sha, format: 'tgz', exe: 'ollama', sizeBytes: 5_000_000 } } },
-        changed: () => eng.emit({ type: 'local' }),
+        changed: () => (eng as unknown as { emit: (e: { type: string }) => void }).emit({ type: 'local' }),
         connect: (u) => eng.local.ensure('HiveDesk Ollama', u),
         allowUrl: (u) => u.hostname === '127.0.0.1',
         defaultPort: 21434
