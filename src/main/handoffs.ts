@@ -67,7 +67,8 @@ export class Handoffs {
     const h = this.c.hive
     const all = h.listTasks()
     if (Date.now() - this.roundAt > 60_000) this.round.clear()
-    return this.c.agents().map((a) => {
+    // a model on this PC has no usage limit to wait out and takes no hand-over (v6 4단계: it only gets work given to it)
+    return this.c.agents().filter((a) => !a.localModel).map((a) => {
       const m = this.model(a)
       const busy = all.some((t) => t.id !== task.id && t.assignee === a.id && (t.status === 'running' || this.c.isRunning(t.id) || t.status === 'todo'))
       return {

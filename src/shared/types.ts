@@ -40,6 +40,11 @@ export interface Agent {
   modelRef?: ModelRef
   /** The permission level tasks get when they do not set their own. */
   permission?: PermissionLevel
+  /**
+   * v6 4단계: this employee is a model on this PC ("내 PC AI"). Its `adapter` is `custom` (no CLI, no usage limit) and
+   * the app leads the work (src/main/localWorker.ts) instead of a CLI.
+   */
+  localModel?: { endpointId: string; model: string }
 }
 
 /** What other team members see of an agent (no local paths). */
@@ -803,6 +808,8 @@ export interface AppConfig {
   chatModel?: import('./chat').ChatModel
   /** v6 8-2: connections to engines on this PC (or the network) and what was measured; kept per computer. */
   local?: import('./localai').LocalStore
+  /** v6 4단계: keep what the models on this PC did (request, files, result) in the company folder to learn from later. Off by default; never leaves this computer. */
+  collectExamples?: boolean
   /** v5.1: the app's own checks and when an AI review is needed. */
   review?: Partial<ReviewSettings>
   /** v0.6.1: put a snapshot of the work folder (structure, scripts, README, recent work) at the top of each prompt (default on). */
