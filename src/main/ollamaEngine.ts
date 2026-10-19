@@ -39,7 +39,7 @@ export function planFor(m: EngineManifest, key: string): Plan {
   if (!/^[0-9A-Za-z._-]+$/.test(m.version ?? '')) return { ok: false, reason: '내려받기 정보의 버전이 비어 있거나 올바르지 않아요.' }
   const f = m.platforms?.[key]
   if (!f) return { ok: false, reason: `이 PC(${key})용 Ollama 내려받기 정보가 아직 확인되지 않았어요.` }
-  if (typeof f.url !== 'string' || !/^https:\/\//i.test(f.url)) return { ok: false, reason: `이 PC(${key})용 내려받기 주소가 확인되지 않았어요.` }
+  if (typeof f.url !== 'string' || !/^https?:\/\//i.test(f.url)) return { ok: false, reason: `이 PC(${key})용 내려받기 주소가 확인되지 않았어요.` }
   if (typeof f.sha256 !== 'string' || !SHA256.test(f.sha256)) return { ok: false, reason: `이 PC(${key})용 파일의 sha256 값이 확인되지 않아서 설치할 수 없어요. 값을 검증하지 못한 파일은 받지 않아요.` }
   if (f.format !== 'tgz' && f.format !== 'zip') return { ok: false, reason: '압축 형식이 확인되지 않았어요.' }
   if (typeof f.exe !== 'string' || !f.exe || isAbsolute(f.exe) || f.exe.split(/[\\/]/).includes('..')) return { ok: false, reason: '실행 파일 위치가 확인되지 않았어요.' }
@@ -336,6 +336,11 @@ export class OllamaEngine {
     if (!plan.ok) {
       this.setJob({ state: 'failed', text: '설치할 수 없어요', error: plan.reason })
       throw new Error(plan.reason)
+    }
+    if (!(this.o.allowUrl ?? githubOnly)(new URL(plan.file.url))) {
+      const reason = `허용하지 않는 내려받기 주소예요 (${new URL(plan.file.url).hostname}). https로 된 GitHub 릴리스만 받아요.`
+      this.setJob({ state: 'failed', text: '설치할 수 없어요', error: reason })
+      throw new Error(reason)
     }
     const inst = this.installed()
     if (inst?.version === plan.version) throw new Error(`이미 설치되어 있어요 (${plan.version}).`)

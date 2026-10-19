@@ -44,9 +44,19 @@ export default function OllamaEngineCard({ onChanged }: { onChanged?: () => void
     }
   }
 
-  if (!st) return null
-  const job = st.job
+  const job = st?.job
   const working = job?.state === 'downloading' || job?.state === 'verifying' || job?.state === 'extracting'
+  // events can be missed: while something is going on, ask again now and then, and once more when it ends
+  useEffect(() => {
+    if (!working && !busy) return
+    const t = window.setInterval(() => void load(), 700)
+    return () => {
+      window.clearInterval(t)
+      void load()
+    }
+  }, [working, busy, load])
+
+  if (!st) return null
   const failure = err ?? st.lastError ?? (job?.state === 'failed' ? job.error : undefined)
 
   return (
