@@ -84,7 +84,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
-import { addWorktree, commitWorktree, gitState, initGitFolder, mergeBranchInto, mergeWorktree, removeWorktree, type GitState } from './worktree'
+import { addWorktree, commitWorktree, gitState, initGitFolder, mergeBranchInto, mergeWorktree, removeWorktree, worktreeCwd, type GitState } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
 import { nearLimit } from '../shared/handoff'
@@ -1311,7 +1311,7 @@ export class Engine {
   /** Is another task working in (or waiting for) this agent's folder right now? */
   private cwdFor(agent: Agent, taskId: string): string {
     const t = this.hive.getTask(taskId)
-    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree?.path)
+    return resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t?.projectId), t?.worktree ? worktreeCwd(t.worktree) : undefined)
   }
 
   /** Is another started task working in (or waiting for) the folder this task would use? */
