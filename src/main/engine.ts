@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   CompanySummary,
@@ -101,6 +101,7 @@ import ENGINE_MANIFEST from '../shared/ollama-engine.default.json'
 import { defaultHomeDir } from './paths'
 import type { LocalEndpoint } from '../shared/localai'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
+import { draftFromChat, type TaskDraft } from '../shared/chatTask'
 import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
 import { taskCost, type TaskCost } from '../shared/cost'
@@ -1540,9 +1541,51 @@ export class Engine {
     return this.chats.get(id)
   }
   chatCreate(o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }): Chat {
+    if (o?.aboutTask) {
+      // "이 업무에 대해 물어보기": only a task of this company
+      const t = this.hive.getTask(o.aboutTask)
+      if (!t) throw new Error('없는 업무예요. 지워졌거나 다른 회사의 업무일 수 있어요.')
+      return this.chats.create({ ...o, title: `업무: ${t.title}`.slice(0, 80), firstMessage: `"${t.title}" 업무에 대해 묻는 대화예요. 보고서·바뀐 파일·검사 결과를 보고 답해요. 파일은 바꾸지 않아요.` })
+    }
     return this.chats.create(o)
   }
   /** Runs in the company the conversation belongs to, even when the person switches company meanwhile. */
+  /** 챗-2: the draft of a task from a conversation (plain rules, nothing is made). */
+  chatTaskDraft(id: string, messageIds?: string[]): TaskDraft & { projectId?: string; folders: string[] } {
+    const c = this.chats.get(id)
+    if (!c) throw new Error('없는 대화예요.')
+    const folders = c.folderRefs
+    const paths = this.hive.projectPaths()
+    const norm = (p: string): string => resolve(p)
+    const projectId = this.hive.listProjects().find((p) => paths[p.id] && folders.some((f) => norm(f) === norm(paths[p.id])))?.id
+    return { ...draftFromChat(c.messages, messageIds), folders, ...(projectId ? { projectId } : {}) }
+  }
+
+  /** 챗-2 (optional): the model of the chat words the draft. Nothing is made or saved. */
+  chatPolishDraft(id: string, draft: TaskDraft): Promise<{ title: string; description: string }> {
+    return this.als.run(this.hive, () => this.chats.polishDraft(id, draft))
+  }
+
+  /**
+   * 챗-2: hand a confirmed draft over as a task (the usual quick assignment: the app picks the employee unless one is named).
+   * `confirmed` must be true: a chat never makes a task by itself.
+   */
+  chatMakeTask(id: string, o: { confirmed: boolean; title: string; description?: string; projectId?: string; agentId?: string; refDirs?: string[] }): Task {
+    if (o.confirmed !== true) throw new Error('먼저 내용을 확인해 주세요.')
+    const c = this.chats.get(id)
+    if (!c) throw new Error('없는 대화예요.')
+    const title = o.title.trim()
+    if (!title) throw new Error('업무 제목을 적어 주세요.')
+    if (o.projectId && !this.hive.listProjects().some((p) => p.id === o.projectId)) throw new Error('없는 프로젝트예요.')
+    let t = this.quickAssign({ title, description: o.description?.trim() ?? '', agentId: o.agentId || undefined, projectId: o.projectId || undefined })
+    const refDirs = (o.refDirs ?? []).filter((d) => existsSync(d))
+    t = this.hive.updateTask(t.id, { fromChat: id, ...(refDirs.length ? { refDirs } : {}) })
+    this.hive.addEvent(t.id, 'created', this.config.memberName || 'me', `챗에서 만든 업무예요: "${c.title}" 대화의 초안을 확인하고 맡겼어요.`)
+    this.chats.noteMadeTask(id, t.id)
+    this.changed()
+    return t
+  }
+
   chatSend(id: string, text: string): Promise<Chat> {
     return this.als.run(this.hive, () => this.chats.send(id, text))
   }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import type { LiveSummary, Snapshot } from '@shared/types'
 
 /** Keeps a fresh snapshot of the hive and a live output buffer per running task. */
@@ -90,3 +90,6 @@ export function fmtSize(n: number): string {
   if (n >= 1024) return Math.round(n / 1024) + ' KB'
   return n + ' B'
 }
+
+/** Screens that can send the person to another screen (e.g. a task's "이 업무에 대해 물어보기" opens that chat). */
+export const NavContext = createContext<{ openChat: (chatId: string) => void }>({ openChat: () => undefined })

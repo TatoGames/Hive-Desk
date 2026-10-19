@@ -1,7 +1,7 @@
 import { HandoffPanel, RunExternal, TaskExternal, UrlAttach } from './TaskExternal'
 import { fmtDuration as fmtLong, timeBreakdown } from '@shared/timing'
 import { InstructionList, PlanAdjust, TaskControls } from './Controls'
-import { useEffect, useState } from 'react'
+import { useContext, useEffect, useState } from 'react'
 import type {
   AdapterId,
   Report,
@@ -15,7 +15,7 @@ import type {
   TaskEventKind,
   TaskHistory
 } from '@shared/types'
-import { fmtTime } from '../store'
+import { fmtTime, NavContext } from '../store'
 import type { TaskCost } from '@shared/cost'
 import {
   ActivityFeed,
@@ -110,6 +110,8 @@ export default function TaskDetail({
   const [extra, setExtra] = useState('')
   const [mode, setMode] = useState<'live' | 'interrupt' | 'after'>('live')
   const running = task.status === 'running'
+  const nav = useContext(NavContext)
+  const [askErr, setAskErr] = useState<string | null>(null)
 
   // Reload whenever the task changes on disk (updatedAt moves on every status/result change).
   useEffect(() => {
@@ -166,8 +168,22 @@ export default function TaskDetail({
               </button>
             </div>
           </div>
-          <button onClick={onClose}>{embedded ? '← 목록' : '닫기'}</button>
+          <div className="row">
+            <button
+              title="이 업무의 보고서·바뀐 파일·검사 결과를 보고 답하는 읽기 전용 대화를 열어요"
+              onClick={() =>
+                void window.hive
+                  .chatCreate({ aboutTask: task.id })
+                  .then((c) => (setAskErr(null), nav.openChat(c.id)))
+                  .catch((e: Error) => setAskErr(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')))
+              }
+            >
+              이 업무에 대해 물어보기
+            </button>
+            <button onClick={onClose}>{embedded ? '← 목록' : '닫기'}</button>
+          </div>
         </div>
+        {askErr && <div className="warn-text small">{askErr}</div>}
         <div className="sticky-bar">
           <TaskControls task={task} />
           {task.stoppedBy && (

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useHive } from './store'
+import { NavContext, useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
 import Connections from './views/Connections'
@@ -63,6 +63,7 @@ type Tab = 'start' | 'boardroom' | 'collab' | 'connections' | 'chat' | 'external
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
   const [tab, setTab] = useState<Tab>('board')
+  const [chatTarget, setChatTarget] = useState<string | null>(null)
   const routed = useRef(false)
   const update = useUpdateNotice()
 
@@ -123,6 +124,7 @@ export default function App(): JSX.Element {
   const shown = (t: Item): boolean => !basic || !t.advanced || !!t.badge || current === t.id
 
   return (
+    <NavContext.Provider value={{ openChat: (id) => (setChatTarget(id), setTab('chat')) }}>
     <div className="app">
       <aside className="side">
         <div className="brand">
@@ -199,7 +201,7 @@ export default function App(): JSX.Element {
         {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
         {current === 'collab' && <Collab snap={snap} />}
         {current === 'connections' && <Connections snap={snap} />}
-        {current === 'chat' && <Chat snap={snap} goConnections={() => setTab('connections')} />}
+        {current === 'chat' && <Chat snap={snap} openId={chatTarget} goConnections={() => setTab('connections')} goBoard={() => setTab('board')} />}
         {current === 'external' && <External snap={snap} />}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
         {current === 'company' && <Company snap={snap} />}
@@ -213,5 +215,6 @@ export default function App(): JSX.Element {
         {current === 'settings' && <Settings snap={snap} firstRun={needsSetup} onSaved={refresh} />}
       </main>
     </div>
+    </NavContext.Provider>
   )
 }

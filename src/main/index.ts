@@ -4,6 +4,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdapterId, Agent, AppConfig, EngineEvent, Project, SubtaskSpec, Task } from '../shared/types'
 import type { ChatModel } from '../shared/chat'
+import type { TaskDraft } from '../shared/chatTask'
 import { detectAll } from './adapters'
 import { cleanEnv } from './adapters'
 import { Engine } from './engine'
@@ -234,6 +235,9 @@ function registerIpc(): void {
   ipcMain.handle('chat:list', () => engine.chatList())
   ipcMain.handle('chat:get', (_e, id: string) => engine.chatGet(id))
   ipcMain.handle('chat:create', (_e, o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }) => engine.chatCreate(o))
+  ipcMain.handle('chat:task-draft', (_e, id: string, messageIds?: string[]) => engine.chatTaskDraft(id, messageIds))
+  ipcMain.handle('chat:polish-draft', (_e, id: string, draft: TaskDraft) => engine.chatPolishDraft(id, draft))
+  ipcMain.handle('chat:make-task', (_e, id: string, o: Parameters<typeof engine.chatMakeTask>[1]) => engine.chatMakeTask(id, o))
   ipcMain.handle('chat:send', (_e, id: string, text: string) => engine.chatSend(id, text))
   ipcMain.handle('chat:retry', (_e, id: string, model?: ChatModel) => engine.chatRetry(id, model))
   ipcMain.handle('chat:stop', (_e, id: string) => engine.chatStop(id))

@@ -214,6 +214,8 @@ export interface Task {
   /** The running AI takes messages right now (live mode). */
   liveInput?: boolean
   staleOkAt?: string
+  /** Made from this chat ("챗에서 만든 업무"); the person confirmed a draft first. */
+  fromChat?: string
   /** The readable report file, relative to the company folder (`보고서/2026-10-18_…md`). */
   reportFile?: string
   attachments?: Attachment[]
