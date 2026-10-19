@@ -36,7 +36,7 @@ export function useHive(): {
         setOutput((o) => ({ ...o, [id]: ((o[id] ?? '') + (e.chunk ?? '')).slice(-20000) }))
         return
       }
-      if (e.type === 'setup') return
+      if (e.type === 'setup' || e.type === 'chat') return
       if (e.type === 'activity') {
         if (e.taskId && e.summary) {
           const id = e.taskId

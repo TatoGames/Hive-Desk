@@ -3,6 +3,7 @@ import { useHive } from './store'
 import Board from './views/Board'
 import Agents from './views/Agents'
 import Connections from './views/Connections'
+import Chat from './views/Chat'
 import External from './views/External'
 import Boardroom from './views/Boardroom'
 import Collab from './views/Collab'
@@ -57,7 +58,7 @@ function useUpdateNotice(): {
   }
 }
 
-type Tab = 'start' | 'boardroom' | 'collab' | 'connections' | 'external' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
+type Tab = 'start' | 'boardroom' | 'collab' | 'connections' | 'chat' | 'external' | 'board' | 'company' | 'projects' | 'reports' | 'committee' | 'performance' | 'agents' | 'inbox' | 'approvals' | 'settings'
 
 export default function App(): JSX.Element {
   const { snap, output, live, refresh } = useHive()
@@ -92,6 +93,7 @@ export default function App(): JSX.Element {
       items: [
         ...(!steps.done ? [{ id: 'start' as Tab, label: '시작하기', hint: 'AI 연결 → 팀 꾸리기 → 첫 일 맡기기' }] : []),
         { id: 'approvals', label: '내가 할 일', badge: pending, hint: '결재, 질문, 확인할 결과가 모여요' },
+        { id: 'chat', label: '챗', hint: 'AI와 바로 대화 — 모델을 골라 물어보세요' },
         { id: 'board', label: '업무', hint: '맡긴 일과 진행 상황 (오피스 · 작업 현황 · 목록)' },
         { id: 'reports', label: '보고서함', badge: snap.tasks.filter((t) => t.kind === 'integrate' && !t.parentId && t.status === 'needs_review').length, hint: '끝난 일의 결과 보고서' },
         { id: 'projects', label: '프로젝트', hint: '작업 폴더와 프로젝트 설명' }
@@ -197,6 +199,7 @@ export default function App(): JSX.Element {
         {current === 'boardroom' && <Boardroom snap={snap} goBoard={() => setTab('board')} />}
         {current === 'collab' && <Collab snap={snap} />}
         {current === 'connections' && <Connections snap={snap} />}
+        {current === 'chat' && <Chat snap={snap} goConnections={() => setTab('connections')} />}
         {current === 'external' && <External snap={snap} />}
         {current === 'board' && <Board snap={snap} output={output} live={live} onGoAgents={() => setTab('agents')} />}
         {current === 'company' && <Company snap={snap} />}

@@ -799,6 +799,8 @@ export interface AppConfig {
   externalApprovalMinutes?: number
   /** v5: when a connection runs out of usage, another connection's employee carries the task on. */
   handoff?: HandoffSettings
+  /** v6 챗: the model of the last conversation (a new one starts with it). */
+  chatModel?: import('./chat').ChatModel
   /** v5.1: the app's own checks and when an AI review is needed. */
   review?: Partial<ReviewSettings>
   /** v0.6.1: put a snapshot of the work folder (structure, scripts, README, recent work) at the top of each prompt (default on). */
@@ -858,8 +860,10 @@ export interface Snapshot {
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify'
+  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify' | 'chat'
   taskId?: string
+  /** For `chat`: the conversation that changed (the open screen reads it again). */
+  chatId?: string
   /** For `activity`: new feed lines and the up-to-date numbers. */
   events?: ActivityEvent[]
   summary?: LiveSummary

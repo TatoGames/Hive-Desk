@@ -24,6 +24,8 @@ import type {
   SubtaskSpec
 } from '../shared/types'
 import type { TeamSummary } from '../shared/team'
+import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
+import type { ChatModelInfo } from '../main/chat'
 
 const api = {
   snapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot'),
@@ -108,6 +110,19 @@ const api = {
   hireToSeat: (seatId: string, modelAgentId: string): Promise<Agent> => ipcRenderer.invoke('conn:hire-seat', seatId, modelAgentId),
   autoConnectPreview: (): Promise<AutoRow[]> => ipcRenderer.invoke('conn:auto-preview'),
   autoConnectApply: (rows?: { seatId: string; modelAgentId: string }[]): Promise<number> => ipcRenderer.invoke('conn:auto-apply', rows),
+  chatModels: (): Promise<ChatModelInfo[]> => ipcRenderer.invoke('chat:models'),
+  chatList: (): Promise<ChatSummary[]> => ipcRenderer.invoke('chat:list'),
+  chatGet: (id: string): Promise<Chat | null> => ipcRenderer.invoke('chat:get', id),
+  chatCreate: (o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }): Promise<Chat> => ipcRenderer.invoke('chat:create', o),
+  chatSend: (id: string, text: string): Promise<Chat> => ipcRenderer.invoke('chat:send', id, text),
+  chatRetry: (id: string, model?: ChatModel): Promise<Chat> => ipcRenderer.invoke('chat:retry', id, model),
+  chatStop: (id: string): Promise<void> => ipcRenderer.invoke('chat:stop', id),
+  chatSetModel: (id: string, model: ChatModel): Promise<Chat> => ipcRenderer.invoke('chat:set-model', id, model),
+  chatCostOfChange: (id: string, model: ChatModel): Promise<{ factor: number; confirmAt: number }> => ipcRenderer.invoke('chat:cost-of-change', id, model),
+  chatRename: (id: string, title: string): Promise<void> => ipcRenderer.invoke('chat:rename', id, title),
+  chatSetFolders: (id: string, folders: string[]): Promise<void> => ipcRenderer.invoke('chat:set-folders', id, folders),
+  chatDelete: (id: string): Promise<void> => ipcRenderer.invoke('chat:delete', id),
+  chatExport: (id: string): Promise<string | null> => ipcRenderer.invoke('chat:export', id),
   taskCost: (id: string): Promise<import('../shared/cost').TaskCost> => ipcRenderer.invoke('task:cost', id),
   folderGit: (dir: string): Promise<'ok' | 'none' | 'not-top' | 'no-commit'> => ipcRenderer.invoke('folder:git-state', dir),
   initFolderGit: (dir: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('folder:git-init', dir),

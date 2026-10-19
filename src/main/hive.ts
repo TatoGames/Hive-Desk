@@ -13,6 +13,7 @@ import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import type { AptitudeRecord } from '../shared/aptitude'
+import type { Chat } from '../shared/chat'
 import type { ModelAgent } from '../shared/connections'
 import type { ExternalItem } from '../shared/collab'
 import type { ExtConnection, ExtLogEntry } from '../shared/external'
@@ -253,6 +254,28 @@ export class Hive {
     const next: Task = { ...cur, ...patch, id: cur.id, updatedAt: now() }
     writeJson(this.p('tasks', id + '.json'), next)
     return next
+  }
+
+  // ---- chats (conversations stay on this computer: `.local` is never synced) ----
+  listChats(): Chat[] {
+    return listJson<Chat>(this.p('.local', 'chats')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+  getChat(id: string): Chat | null {
+    return /^[\w-]+$/.test(id) ? readJson<Chat>(this.p('.local', 'chats', id + '.json')) : null
+  }
+  saveChat(c: Chat): void {
+    if (!/^[\w-]+$/.test(c.id)) throw new Error('잘못된 대화 번호예요.')
+    mkdirSync(this.p('.local', 'chats'), { recursive: true })
+    writeJson(this.p('.local', 'chats', c.id + '.json'), c)
+  }
+  deleteChat(id: string): void {
+    if (/^[\w-]+$/.test(id)) rmSync(this.p('.local', 'chats', id + '.json'), { force: true })
+  }
+  /** An empty folder the chat runs in, so it can never touch a project. */
+  chatDir(): string {
+    const d = this.p('.local', 'chat-work')
+    mkdirSync(d, { recursive: true })
+    return d
   }
 
   deleteTask(id: string): void {
