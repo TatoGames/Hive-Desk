@@ -31,6 +31,11 @@ export function writeBootstrap(file: string, b: Bootstrap): void {
 
 export const dataDirOf = (homeDir: string): string => join(homeDir, 'data')
 export const tmpDirOf = (homeDir: string): string => join(homeDir, 'tmp')
+/** Ollama's program files (one folder per version) and its models. New folders: nothing to migrate, so they are used even when one-folder mode is off. */
+export const engineDirOf = (homeDir: string): string => join(homeDir, 'engine', 'ollama')
+export const modelsDirOf = (homeDir: string): string => join(homeDir, 'models')
+/** The HiveDesk folder when one-folder mode is off. */
+export const defaultHomeDir = (userHome: string): string => join(userHome, 'HiveDesk')
 
 /** Where userData should point: the HiveDesk folder's data/ when the mode is on, else Electron's default. */
 export function resolveUserData(b: Bootstrap | null, defaultUserData: string): string {
