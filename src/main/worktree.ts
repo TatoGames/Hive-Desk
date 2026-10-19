@@ -159,12 +159,17 @@ export interface MergeResult {
 
 /** Merge a task's branch into the folder it came from. A clash is undone (nothing half-merged is left behind). */
 export async function mergeWorktree(wt: Worktree, title: string): Promise<MergeResult> {
-  const ahead = await git(wt.base, ['rev-list', '--count', `HEAD..${wt.branch}`])
+  return mergeBranchInto(wt.base, wt.branch, title)
+}
+
+/** Merge `branch` into whatever is checked out in `dir` (the project folder, or a bundle's own work folder). */
+export async function mergeBranchInto(dir: string, branch: string, title: string): Promise<MergeResult> {
+  const ahead = await git(dir, ['rev-list', '--count', `HEAD..${branch}`])
   if (ahead.ok && ahead.out.trim() === '0') return { ok: true, files: [], message: '바뀐 것이 없어요.' }
-  const r = await git(wt.base, ['merge', '--no-ff', '-m', `HiveDesk: ${title}`, wt.branch], ENV)
+  const r = await git(dir, ['merge', '--no-ff', '-m', `HiveDesk: ${title}`, branch], ENV)
   if (r.ok) return { ok: true, files: [], message: '합쳤어요.' }
-  const conflicts = await git(wt.base, ['diff', '--name-only', '--diff-filter=U'])
-  await git(wt.base, ['merge', '--abort'])
+  const conflicts = await git(dir, ['diff', '--name-only', '--diff-filter=U'])
+  await git(dir, ['merge', '--abort'])
   const files = conflicts.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   return { ok: false, files, message: files.length ? `같은 파일을 서로 다르게 고쳤어요: ${files.join(', ')}` : r.err.split('\n')[0] || '합치지 못했어요.' }
 }
