@@ -51,6 +51,49 @@ describe('8-2 UI: 내 PC AI', () => {
   })
 })
 
+describe('J3 UI: 태그, 필터, 정렬', () => {
+  it('tags show, filters narrow the list, size sort puts the small first, and models without tool calls say so', async () => {
+    const server = createServer((req, res) => {
+      if (req.url === '/api/version') return void res.end(JSON.stringify({ version: '0.5.0' }))
+      if (req.url === '/api/tags') return void res.end(JSON.stringify({ models: [{ name: 'qwen2.5-coder:7b', size: 4_700_000_000, details: { parameter_size: '7.6B', quantization_level: 'Q4_K_M' } }] }))
+      res.writeHead(404).end()
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const addr = `127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      ui = await mountApp((eng, dir) => {
+        ready(eng, dir)
+        eng.saveSettings({ uiMode: 'basic' })
+      })
+      fireEvent.click(screen.getAllByRole('button', { name: 'AI 연결' })[0])
+      await ui.refresh()
+      fireEvent.change(screen.getByPlaceholderText(/주소/), { target: { value: addr } })
+      fireEvent.click(screen.getByRole('button', { name: '연결' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: '설치됨' })).toBeTruthy())
+      const cands = (): string[] => Array.from(document.querySelectorAll('.local-cand > b')).map((e) => e.textContent ?? '')
+      expect(cands()).toContain('Llama 3.2 3B')
+      expect(screen.getAllByText('라이선스 확인 전').length).toBeGreaterThan(3)
+      expect(screen.getAllByText(/쉬운 일만 범위에서만 직원으로 쓸 수 있어요/).length).toBeGreaterThan(0)
+      expect(screen.getByText(/추천 후보/, { selector: '.local-filters div' })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole('button', { name: '설치됨' }))
+      expect(cands()).toEqual(['Qwen2.5 Coder 7B'])
+      fireEvent.click(screen.getByRole('button', { name: '설치됨' }))
+      fireEvent.click(screen.getByRole('button', { name: '코딩' }))
+      expect(cands().every((n) => /Coder|Qwen3|Devstral|Mistral|Phi-4|gpt-oss/.test(n))).toBe(true)
+      expect(cands()).not.toContain('Llama 3.2 3B')
+      fireEvent.click(screen.getByRole('button', { name: '코딩' }))
+
+      fireEvent.change(screen.getByLabelText(/정렬/), { target: { value: 'size' } })
+      expect(cands()[0]).toMatch(/3B|4B|3.8B/) // the small ones first
+      expect(cands()[cands().length - 1]).toMatch(/Coder 32B|30B/) // the biggest last
+    } finally {
+      server.closeAllConnections()
+      server.close()
+    }
+  })
+})
+
 describe('v6 UI: HiveDesk 전용 Ollama', () => {
   const key = `${process.platform}-${process.arch}`
   const swap = (eng: import('../../src/main/engine').Engine, dir: string, url: string, sha: string | undefined): void => {

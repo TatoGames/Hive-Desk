@@ -433,3 +433,7 @@ label.chip.on { border-color: var(--accent); color: inherit; }
 .local-add { margin-top: 12px; }
 .chip.ok { border-color: #3a9; }
 .chip.bad, .chip.warn { border-color: #c95; }
+.local-filters { margin: 8px 0; }
+.local-filters button.chip { cursor: pointer; font-family: inherit; }
+.local-filters button.chip.on { border-color: var(--accent); color: inherit; }
+.local-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }

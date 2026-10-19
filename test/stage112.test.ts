@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BENCH_TASKS, benchPrompt, extractCode } from '../src/shared/bench'
-import { fitNote, guessParamsB, normalizeUrl, parseCandidates, recommendTier, tierOfParams, type PcInfo } from '../src/shared/localai'
+import { RECOMMEND_MIN_PASSED, filterCandidates, fitNote, guessParamsB, needsEasyOnly, normalizeUrl, parseCandidates, pcFit, recommendState, recommendTier, sizeTag, sortCandidates, tierOfParams, type CandidateTag, type CandidateView, type LocalCandidate, type PcInfo } from '../src/shared/localai'
 import { runBench, runCheck } from '../src/main/bench'
 import { Engine } from '../src/main/engine'
 import { chatStream, explainFetchError, ollamaDelete, ollamaPull, parsePullLine, probe, speedTest, SseParser } from '../src/main/openai'
@@ -422,5 +422,83 @@ describe('8-2: the whole thing in the engine', () => {
     writeFileSync(join(dir, 'local-models.json'), '{broken')
     expect((await eng.localStatus()).candidates.models.length).toBeGreaterThan(1)
     eng.shutdown()
+  })
+})
+
+describe('J1 candidate tags and kind', () => {
+  it('reads tags and kind, drops what is not allowed, and keeps old files working', () => {
+    const f = parseCandidates({
+      models: [
+        { id: 'a:7b', paramsB: 7, kind: 'embedding', tags: ['코딩', '코딩', '설치됨', '잘 맞아요', 5, '검색용'], approxGB: 4.7 },
+        { id: 'b:3b', paramsB: 3, kind: 'weird', tags: 'x', approxGB: -1 },
+        { id: 'c:3b', paramsB: 3 }
+      ]
+    })
+    expect(f.models[0].kind).toBe('embedding')
+    expect(f.models[0].tags).toEqual(['코딩', '검색용'])
+    expect(f.models[0].approxGB).toBe(4.7)
+    expect(f.models[1]).toMatchObject({ kind: 'text', tags: [], approxGB: undefined })
+    expect(f.models[2]).toMatchObject({ kind: 'text', tags: [], approxGB: undefined })
+  })
+})
+
+describe('J2 curated list', () => {
+  it('the built-in list parses whole, every item is unchecked and marked, no embedding or vision-only', async () => {
+    const raw = (await import('../src/shared/local-models.default.json')).default
+    const f = parseCandidates(raw)
+    expect(f.models.length).toBe((raw as { models: unknown[] }).models.length)
+    expect(f.models.length).toBeGreaterThanOrEqual(20)
+    expect(new Set(f.models.map((m) => m.id)).size).toBe(f.models.length)
+    for (const m of f.models) {
+      expect(m.licenseStatus).toBe('unchecked')
+      expect(m.kind).toBe('text')
+      expect(m.tags).toContain('라이선스 확인 전')
+    }
+  })
+})
+
+describe('J3 tags, filters, sorting', () => {
+  const pc = (ramGB: number): PcInfo => ({ platform: 'linux', arch: 'x64', ramGB, cores: 8, appleSilicon: false, gpu: { name: 'G', vramGB: ramGB } })
+  const adv = recommendTier(pc(12)) // (12-1.5)/0.6 = 17.5B
+  const m = (id: string, paramsB: number, tags: CandidateTag[] = ['일반'], extra: Partial<LocalCandidate> = {}): LocalCandidate => ({ id, label: id, paramsB, tier: tierOfParams(paramsB), kind: 'text', tags, licenseName: '-', licenseStatus: 'unchecked', ...extra })
+
+  it('pcFit thresholds', () => {
+    expect(adv.maxParamsB).toBe(17.5)
+    expect(pcFit(m('a', 14), adv)).toBe('잘 맞아요') // 14 / 17.5 = 0.8
+    expect(pcFit(m('a', 14.1), adv)).toBe('빠듯해요')
+    expect(pcFit(m('a', 20), adv)).toBe('빠듯해요') // 1.14
+    expect(pcFit(m('a', 20.2), adv)).toBe('이 PC엔 무거워요')
+    expect(pcFit(m('a', 8, [], { approxGB: 15 }), adv)).toBe('이 PC엔 무거워요') // the size on disk counts too
+    expect(pcFit(m('a', 8), undefined)).toBeUndefined()
+    expect(sizeTag({ approxGB: 4, tier: 'top' })).toBe('경량')
+    expect(sizeTag({ approxGB: 10, tier: 'light' })).toBe('균형')
+    expect(sizeTag({ approxGB: 20, tier: 'light' })).toBe('상위')
+    expect(sizeTag({ approxGB: undefined, tier: 'balanced' })).toBe('균형')
+  })
+
+  it('the recommended tag needs a fit, a use and a passed real test', () => {
+    const c = m('a', 7, ['코딩'])
+    const b = (passed: number): { passed: number; total: number } => ({ passed, total: 10 })
+    expect(recommendState(c, adv, undefined)).toBe('candidate')
+    expect(recommendState(c, adv, b(RECOMMEND_MIN_PASSED - 1))).toBeUndefined()
+    expect(recommendState(c, adv, b(RECOMMEND_MIN_PASSED))).toBe('recommended')
+    expect(recommendState(m('a', 18), adv, b(10))).toBeUndefined() // too big for this PC
+    expect(recommendState(m('a', 7, ['짧은 대화']), adv, b(10))).toBeUndefined() // not coding or general
+    expect(recommendState(m('a', 7, ['코딩'], { kind: 'embedding' }), adv, b(10))).toBeUndefined()
+    expect(recommendState(c, undefined, b(10))).toBeUndefined()
+  })
+
+  it('filters combine, kinds are hidden by default, sorting is stable', () => {
+    const v = (c: LocalCandidate, installed = false): CandidateView => ({ c, installed, fit: pcFit(c, adv), rec: recommendState(c, adv, undefined) })
+    const items = [v(m('big', 30, ['코딩'])), v(m('code7', 7, ['코딩', '도구 호출'], { approxGB: 4.7 }), true), v(m('chat3', 3)), v(m('emb', 1, ['검색용'], { kind: 'embedding' }))]
+    expect(filterCandidates(items, []).map((x) => x.c.id)).toEqual(['big', 'code7', 'chat3'])
+    expect(filterCandidates(items, [], true).map((x) => x.c.id)).toContain('emb')
+    expect(filterCandidates(items, ['코딩', '이 PC에 맞음']).map((x) => x.c.id)).toEqual(['code7'])
+    expect(filterCandidates(items, ['설치됨']).map((x) => x.c.id)).toEqual(['code7'])
+    expect(filterCandidates(items, ['도구 호출']).map((x) => x.c.id)).toEqual(['code7'])
+    expect(sortCandidates(items, 'size').map((x) => x.c.id)).toEqual(['emb', 'chat3', 'code7', 'big'])
+    expect(sortCandidates(items, 'recommend').map((x) => x.c.id)[3]).toBe('big')
+    expect(needsEasyOnly(m('x', 3))).toBe(true)
+    expect(needsEasyOnly(m('x', 3, ['도구 호출']))).toBe(false)
   })
 })
