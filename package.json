@@ -1,6 +1,6 @@
 {
   "name": "hivedesk",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "여러 AI CLI(Claude Code, Codex, Antigravity/Gemini)를 각자 계정으로 팀처럼 돌리는 데스크톱 앱. 칸반 보드, 공유 메모리, 메시지함, 승인 큐, 예산 제한. API 키 불필요.",
   "main": "./out/main/index.js",
   "author": "TatoGames",

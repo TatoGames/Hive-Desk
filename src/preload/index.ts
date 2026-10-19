@@ -25,6 +25,7 @@ import type {
 } from '../shared/types'
 import type { TeamSummary } from '../shared/team'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
+import type { TaskDraft } from '../shared/chatTask'
 import type { ChatModelInfo } from '../main/chat'
 import type { LocalEndpoint } from '../shared/localai'
 import type { LocalJob, LocalStatus } from '../main/local'
@@ -117,6 +118,9 @@ const api = {
   chatList: (): Promise<ChatSummary[]> => ipcRenderer.invoke('chat:list'),
   chatGet: (id: string): Promise<Chat | null> => ipcRenderer.invoke('chat:get', id),
   chatCreate: (o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }): Promise<Chat> => ipcRenderer.invoke('chat:create', o),
+  chatTaskDraft: (id: string, messageIds?: string[]): Promise<TaskDraft & { projectId?: string; folders: string[] }> => ipcRenderer.invoke('chat:task-draft', id, messageIds),
+  chatPolishDraft: (id: string, draft: TaskDraft): Promise<{ title: string; description: string }> => ipcRenderer.invoke('chat:polish-draft', id, draft),
+  chatMakeTask: (id: string, o: { confirmed: boolean; title: string; description?: string; projectId?: string; agentId?: string; refDirs?: string[] }): Promise<Task> => ipcRenderer.invoke('chat:make-task', id, o),
   chatSend: (id: string, text: string): Promise<Chat> => ipcRenderer.invoke('chat:send', id, text),
   chatRetry: (id: string, model?: ChatModel): Promise<Chat> => ipcRenderer.invoke('chat:retry', id, model),
   chatStop: (id: string): Promise<void> => ipcRenderer.invoke('chat:stop', id),

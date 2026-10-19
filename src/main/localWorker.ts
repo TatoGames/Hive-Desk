@@ -10,6 +10,8 @@ import type { ChatMsg } from './openai'
 import { DEFAULT_MAX_MINUTES, holdsAppData, needsReview, resolveCwd, shareRun, type RunOutcome } from './runner'
 import { looksSecret } from './secrets'
 import { writeTaskReport } from './reportfile'
+import { LOCAL_ERROR_LABEL, LOCAL_QUEUE, classifyLocalError, localErrorPolicy, queueLine, type LocalErrorKind } from '../shared/localqueue'
+import { QueueWaitTimeout, modelKey, type LocalQueue } from './localQueue'
 
 /**
  * v6 4단계: one task done by a model on this PC. The app leads (design 4-5): it picks at most a few small files,
@@ -40,6 +42,25 @@ export interface LocalWorkDeps {
   onRunEnd?: (e: { agent: Agent; taskId: string; ms: number; result: 'approved' | 'pending' | 'failed' | 'limit' | 'other' }) => void
   /** Give up on a model that says nothing for this long (default: the agent's no-response limit). */
   idleMs?: number
+  /** A3: runs of one model go one after another through this line (absent = no limit, as before). */
+  queue?: LocalQueue
+  /** A3: wait at most this long for a turn (default LOCAL_QUEUE.maxWaitMinutes). */
+  maxWaitMs?: number
+  /** A3: pause before asking again after a dropped connection (default LOCAL_QUEUE.retryDelayMs). */
+  retryDelayMs?: number
+  /** A3: this PC could not do the task (memory / model load / waited too long): the task now asks for a person; another employee may take it. */
+  onFailure?: (e: { agent: Agent; taskId: string; kind: 'memory' | 'load' | 'queue' }) => void
+}
+
+/**
+ * Is this task one a model on this PC may do? Same guard the run uses (also used by the hand-over on a usage limit):
+ * not read-only, and a few small files whose text the app can pick. Pure but for reading the folder.
+ */
+export function localFit(cwd: string, request: string, level: PermissionLevel): { ok: true; pick: Extract<Pick, { ok: true }> } | { ok: false; reason: string; read?: boolean } {
+  if (level === 'read') return { ok: false, read: true, reason: '이 업무는 "읽기만" 권한이라 내 PC AI가 파일을 고치지 않았어요. 권한을 "파일 수정"으로 바꾸거나 다른 직원에게 맡겨 주세요.' }
+  const pick = pickFiles(cwd, request)
+  if (!pick.ok) return { ok: false, reason: `${pick.reason}. 이 일은 사람이나 다른 직원에게 맡겨 주세요 (내 PC AI는 파일 ${LOCAL_SCOPE.maxFiles}개 이하의 쉬운 수정만 해요).` }
+  return { ok: true, pick }
 }
 
 // ---- which files ----
@@ -304,10 +325,66 @@ export async function runLocalTask(agent: Agent, taskId: string, deps: LocalWork
     return 'needs_input'
   }
 
-  if (level === 'read') return handBack('이 업무는 "읽기만" 권한이라 내 PC AI가 파일을 고치지 않았어요. 권한을 "파일 수정"으로 바꾸거나 다른 직원에게 맡겨 주세요.')
-  const pick = pickFiles(cwd, request)
-  if (!pick.ok) return handBack(`${pick.reason}. 이 일은 사람이나 다른 직원에게 맡겨 주세요 (내 PC AI는 파일 ${LOCAL_SCOPE.maxFiles}개 이하의 쉬운 수정만 해요).`)
+  const fit = localFit(cwd, request, level)
+  if (!fit.ok) return handBack(fit.reason)
+  const pick = fit.pick
 
+  // A3: one model serves one run at a time; the others wait in line (the task shows "로컬 대기 중")
+  let release: (() => void) | undefined
+  if (deps.queue) {
+    const key = modelKey(lm.endpointId, lm.model)
+    const since = nowFn().toISOString()
+    let told = false
+    try {
+      release = await deps.queue.acquire(key, {
+        signal: deps.signal,
+        maxWaitMs: deps.maxWaitMs ?? LOCAL_QUEUE.maxWaitMinutes * 60_000,
+        onPosition: (n) => {
+          hive.updateTask(task.id, { localWait: { position: n, since, model: lm.model } })
+          if (!told) {
+            told = true
+            hive.addEvent(task.id, 'status', 'system', `같은 모델(${lm.model})을 다른 업무가 쓰고 있어서 기다려요. ${queueLine(n)}`)
+          }
+        }
+      })
+    } catch (e) {
+      hive.updateTask(task.id, { localWait: undefined })
+      if (e instanceof QueueWaitTimeout) {
+        const q = `${lm.model} 차례를 ${LOCAL_QUEUE.maxWaitMinutes}분 넘게 기다렸지만 오지 않아서 시작하지 못했어요. 사람이 정하거나, 다른 직원에게 맡겨 주세요.`
+        hive.addEvent(task.id, 'status', 'system', '오류 분류: 로컬 대기열 — ' + q)
+        const out = handBack(q)
+        deps.onFailure?.({ agent, taskId: task.id, kind: 'queue' })
+        return out
+      }
+      // cancelled or held while waiting: nothing has run, nothing to undo
+      const why = typeof deps.signal?.reason === 'string' ? deps.signal.reason : 'hold'
+      const cancel = why === 'cancel'
+      const at = nowFn().toISOString()
+      hive.addEvent(task.id, 'status', 'system', '대기열에서 빠졌어요.')
+      hive.updateTask(task.id, { status: cancel ? 'cancelled' : 'held', stoppedBy: { by: deps.machine || 'me', at, kind: why === 'emergency' ? 'emergency' : cancel ? 'cancel' : 'hold' }, error: cancel ? '취소했어요.' : '사용자가 중지했어요.', finishedAt: at })
+      return 'cancelled'
+    }
+    hive.updateTask(task.id, { localWait: undefined })
+  }
+  try {
+    return await runLocalBody(agent, task, lm, level, cwd, request, pick, deps)
+  } finally {
+    release?.()
+  }
+}
+
+async function runLocalBody(
+  agent: Agent,
+  task: Task,
+  lm: NonNullable<Agent['localModel']>,
+  level: PermissionLevel,
+  cwd: string,
+  request: string,
+  pick: Extract<Pick, { ok: true }>,
+  deps: LocalWorkDeps
+): Promise<RunOutcome> {
+  const { hive } = deps
+  const nowFn = deps.now ?? (() => new Date())
   const checksOn = deps.checksEnabled !== false
   const hasChecks = checksOn && (deps.hasChecks ? deps.hasChecks(cwd) : detectChecks(cwd, { app: false }).specs.length > 0)
 
@@ -350,12 +427,27 @@ export async function runLocalTask(agent: Agent, taskId: string, deps: LocalWork
   let lastError = ''
   let passed = false
   let lastChecks: CheckRun | undefined
-  let hard: { error: string; kind?: 'timeout' | 'network' | 'permission' | 'unknown' } | undefined
+  let hard: { error: string; kind?: 'timeout' | 'network' | 'permission' | 'unknown' | 'memory' | 'load' } | undefined
 
   const ask = async (): Promise<string> => {
-    const r = await deps.chat(lm, messages, { signal: ac.signal, idleMs })
-    transcript.push(r.text)
-    return r.text
+    for (let tries = 0; ; tries++) {
+      try {
+        const r = await deps.chat(lm, messages, { signal: ac.signal, idleMs })
+        transcript.push(r.text)
+        return r.text
+      } catch (e) {
+        if (ac.signal.aborted) throw e
+        // only a dropped connection is asked again, a few times; memory / load problems repeat for sure
+        const kind = classifyLocalError((e as Error).message)
+        if (tries >= localErrorPolicy(kind).retries) throw e
+        log(`${LOCAL_ERROR_LABEL[kind]}: 잠시 뒤 다시 연결해 봐요 (${tries + 1}/${localErrorPolicy(kind).retries}번째).`)
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, deps.retryDelayMs ?? LOCAL_QUEUE.retryDelayMs)
+          ac.signal.addEventListener('abort', () => { clearTimeout(t); resolve() }, { once: true })
+        })
+        if (ac.signal.aborted) throw e
+      }
+    }
   }
 
   try {
@@ -425,7 +517,10 @@ export async function runLocalTask(agent: Agent, taskId: string, deps: LocalWork
   } catch (e) {
     if (!ac.signal.aborted) {
       const msg = (e as Error).message.split('\n')[0]
-      hard = { error: `내 PC AI가 응답하지 않았어요: ${msg}`, kind: /시간|응답|idle|timeout/i.test(msg) ? 'timeout' : 'network' }
+      const kind: LocalErrorKind = classifyLocalError(msg)
+      log(`오류 분류: ${LOCAL_ERROR_LABEL[kind]} — ${clip(msg, 160)}${localErrorPolicy(kind).passOn ? ' (다시 시도하지 않고 사람·다른 직원에게 넘겨요)' : ''}`)
+      if (kind === 'memory' || kind === 'load') hard = { error: `내 PC AI를 쓸 수 없어요 (${LOCAL_ERROR_LABEL[kind]}): ${msg}`, kind }
+      else hard = { error: `내 PC AI가 응답하지 않았어요: ${msg}`, kind: kind === 'timeout' || /시간|응답|idle|timeout/i.test(msg) ? 'timeout' : 'network' }
     }
   } finally {
     clearTimeout(deadline)
@@ -498,6 +593,20 @@ export async function runLocalTask(agent: Agent, taskId: string, deps: LocalWork
     deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: 'failed' })
     hive.updateTask(task.id, { status: 'failed', error: error + (had ? ' 고친 파일은 원래대로 돌려놨어요.' : ''), errorKind: timedOut || hard?.kind === 'timeout' ? 'timeout' : 'network', finishedAt, lastRunId: saveRun('failed', { error, rolledBack: had }) })
     return 'failed'
+  }
+
+  if (hard?.kind === 'memory' || hard?.kind === 'load') {
+    // the PC cannot run this model now: no second try, a person (or another employee) takes over
+    const had = touched.size > 0
+    await undo()
+    log('실패: ' + hard.error)
+    deps.onRunEnd?.({ agent, taskId: task.id, ms: elapsed, result: 'other' })
+    const lastRunId = saveRun('failed', { error: hard.error, rolledBack: had })
+    const question = `${hard.error}. 같은 시도를 되풀이하지 않았어요. 모델을 더 작은 것으로 바꾸거나 다른 프로그램을 닫은 뒤 다시 하거나, 다른 직원에게 맡겨 주세요.`
+    hive.addEvent(task.id, 'need', agent.id, question, runId)
+    hive.updateTask(task.id, { status: 'needs_input', question, error: undefined, errorKind: undefined, finishedAt, lastRunId })
+    deps.onFailure?.({ agent, taskId: task.id, kind: hard.kind })
+    return 'needs_input'
   }
 
   if (passed) {

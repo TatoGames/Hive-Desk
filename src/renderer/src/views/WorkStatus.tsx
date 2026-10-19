@@ -4,6 +4,7 @@ import type { LiveSummary, Snapshot, Task } from '@shared/types'
 import { BubbleHold, bubbleFor, type Bubble } from '@shared/bubble'
 import { employeeState, progressOf, STATE_LABEL, type EmployeeState } from '@shared/office'
 import { jobLabel } from '@shared/company'
+import { handoffReasonLabel } from '@shared/handoff'
 import { fmtElapsed, useNow } from '../store'
 import TaskDetail from './TaskDetail'
 
@@ -209,7 +210,7 @@ export default function WorkStatus({
                     </div>
                     <div className="muted small">
                       {nameOf(t.assignee)}
-                      {ho && ` · ${nameOf(ho.from)} → ${nameOf(ho.to)} (${ho.reason === 'limit' ? '한도' : '넘김'})`}
+                      {ho && ` · ${nameOf(ho.from)} → ${nameOf(ho.to)} (${handoffReasonLabel(ho.reason)})`}
                       {g === 1 && (t.limitWait ? ' · 한도 대기' : t.status === 'needs_input' ? ' · 자료 대기' : ' · 결재 대기')}
                       {g === 2 && ' · 방금 끝남'}
                     </div>

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { LOCAL_BUSY_FOR_CHAT } from '../shared/localqueue'
 import { existsSync } from 'node:fs'
 import type { Agent } from '../shared/types'
 import { resolveModelArg, tierRank, type ModelEntry, type Tier } from '../shared/company'
@@ -14,6 +15,7 @@ import {
   type ChatModel,
   type ChatSummary
 } from '../shared/chat'
+import { buildTaskContext, parsePolished, POLISH_PROMPT, TASK_GONE_CONTEXT, taskStatusLine, type TaskContext, type TaskDraft } from '../shared/chatTask'
 import { adapterAccess, buildCommand, cleanEnv, defaultExtraArgs, type Runner } from './adapters'
 import { createParser } from './activity'
 import { detectLimit, type LimitInfo } from './limits'
@@ -52,6 +54,8 @@ export interface ChatsCtx {
   /** Models of this PC (8-2): list and a turn. */
   localModels?: () => ChatModelInfo[]
   localTurn?: (m: Extract<ChatModel, { kind: 'local' }>, t: LocalTurn) => Promise<{ text: string }>
+  /** A task runs or waits for this model (A3): a chat turn on it is refused. */
+  localBusy?: (m: Extract<ChatModel, { kind: 'local' }>) => boolean
   limitFor: (adapter: Agent['adapter']) => LimitInfo | undefined
   noteLimit: (adapter: Agent['adapter'], info: LimitInfo) => void
   lastModel: () => ChatModel | undefined
@@ -223,8 +227,9 @@ export class Chats {
     const user: ChatMessage = { id: newId(), role: 'user', text: clean, at: now, status: 'done' }
     const next: Chat = {
       ...chat,
-      title: chat.messages.some((m) => m.role === 'user') ? chat.title : chatTitle(clean),
-      messages: [...chat.messages, user]
+      // a chat about a task keeps its name ("업무: …")
+      title: chat.aboutTask || chat.messages.some((m) => m.role === 'user') ? chat.title : chatTitle(clean),
+      messages: [...chat.messages, ...this.materialMark(chat), user]
     }
     this.save(next)
     return this.runTurn(id, clean, chat.messages)
@@ -249,6 +254,7 @@ export class Chats {
     if (this.turns.has(chat.id)) throw new Error('이 대화는 아직 답을 쓰는 중이에요.')
     const conn = connOf(chat.model)
     for (const t of this.turns.values()) if (t.conn === conn) throw new Error('다른 대화가 같은 AI를 쓰고 있어요. 끝나면 보내 주세요.')
+    if (chat.model.kind === 'local' && this.c.localBusy?.(chat.model)) throw new Error(LOCAL_BUSY_FOR_CHAT)
     if (this.turns.size >= MAX_CHAT_TURNS) throw new Error('지금 답을 쓰는 대화가 많아요. 하나가 끝나면 보내 주세요.')
   }
 
@@ -290,7 +296,7 @@ export class Chats {
         state = r.state
       } else {
         if (!this.c.localTurn) throw new Error('내 PC AI 연결이 아직 준비되지 않았어요.')
-        const prompt = chatPrompt(earlier, text, { budget: 12_000, folders: chat.folderRefs }).text
+        const prompt = chatPrompt(earlier, text, { budget: 12_000, folders: chat.folderRefs, ...this.taskMaterial(chat, true) }).text
         const r = await this.c.localTurn(model, { prompt, signal: ac.signal, onText: (t) => update(t) })
         live = r.text
       }
@@ -337,7 +343,7 @@ export class Chats {
     const resume = access.resume === 'session' && !!chat.sessionId
     const folders = chat.folderRefs
     const built = buildCommand(agent, { stream: true, permission: 'read', refDirs: folders, effort: 'medium', ...(resume ? { resumeSession: chat.sessionId } : {}) })
-    const prompt = chatPrompt(earlier, text, { resumed: built.resumed, folders: access.refDirs === 'prompt' || !built.resumed ? folders : [] })
+    const prompt = chatPrompt(earlier, text, { resumed: built.resumed, folders: access.refDirs === 'prompt' || !built.resumed ? folders : [], ...this.taskMaterial(chat, !built.resumed) })
     const parser = createParser(built.stream ?? 'text')
     let raw = ''
     const res = await this.c.runner()(built, {
@@ -373,6 +379,98 @@ export class Chats {
       return { text: textOut, sessionId, state: { status: 'failed', error: line ? line.slice(0, 300) : '답을 받지 못했어요. AI 연결을 확인해 주세요.' } }
     }
     return { text: textOut, sessionId, state: { status: 'done' } }
+  }
+
+  // ---- 챗-2: a chat about a task ----
+  /** What the app puts in front of the model for a chat about a task: the material (first turn / no session) and a status line. */
+  private taskMaterial(chat: Chat, full: boolean): { taskContext?: string; taskStatus?: string } {
+    if (!chat.aboutTask) return {}
+    const t = this.hive.getTask(chat.aboutTask)
+    return { taskStatus: taskStatusLine(t), ...(full ? { taskContext: this.contextOf(chat.aboutTask).text } : {}) }
+  }
+
+  /** The material of a task from this company's files only (a task of another company is never read). */
+  contextOf(taskId: string): TaskContext {
+    const t = this.hive.getTask(taskId)
+    if (!t) return { text: TASK_GONE_CONTEXT, truncated: false }
+    const last = this.hive.listRuns(taskId).slice(-1)[0]
+    const run = last ? this.hive.getRun(taskId, last.id) : null
+    return buildTaskContext({
+      title: t.title,
+      description: t.description,
+      status: t.status,
+      updatedAt: t.updatedAt,
+      error: t.error,
+      result: t.result,
+      report: t.report,
+      checks: t.checks,
+      events: this.hive.listEvents(taskId).map((e) => ({ at: e.at, text: e.text })),
+      diff: run?.diff
+    })
+  }
+
+  /** The first message of a chat about a task: tell the person when the material is cut or missing (as a mark, not a person's words). */
+  private materialMark(chat: Chat): ChatMessage[] {
+    if (!chat.aboutTask || chat.messages.some((m) => m.role === 'user')) return []
+    const t = this.hive.getTask(chat.aboutTask)
+    const text = !t ? '이 업무를 찾지 못했어요. 지워졌거나 읽을 수 없어서 AI도 자료를 못 봐요.' : this.contextOf(chat.aboutTask).truncated ? '업무 자료가 길어서 일부만 AI에게 보내요 (잘렸어요). 보고서와 파일 목록은 먼저 들어가요.' : ''
+    return text ? [{ id: newId(), role: 'system', text, at: new Date().toISOString(), status: 'done' }] : []
+  }
+
+  /** A task was handed over from this conversation. */
+  noteMadeTask(id: string, taskId: string): void {
+    const c = this.must(id)
+    this.save({ ...c, madeTasks: [...new Set([...(c.madeTasks ?? []), taskId])] })
+  }
+
+  /**
+   * "AI로 정리하기": the model of this chat words the draft as a task. One read-only question outside the conversation:
+   * nothing is saved in the chat and no task is made; the person reads the result and confirms.
+   */
+  async polishDraft(id: string, draft: TaskDraft): Promise<{ title: string; description: string }> {
+    const chat = this.must(id)
+    this.canStart(chat)
+    const model = chat.model
+    const prompt = `${POLISH_PROMPT}\n\nDraft title: ${draft.title}\nDraft description:\n${draft.description}`
+    const ac = new AbortController()
+    this.turns.set(id, { ac, conn: connOf(model) })
+    try {
+      let out = ''
+      if (model.kind === 'local') {
+        if (!this.c.localTurn) throw new Error('내 PC AI 연결이 아직 준비되지 않았어요.')
+        out = (await this.c.localTurn(model, { prompt, signal: ac.signal, onText: () => undefined })).text
+      } else {
+        const entry = this.c.catalog().find((x) => x.id === model.modelId)
+        if (!entry) throw new Error('카탈로그에 없는 모델이에요.')
+        const agent = { id: 'chat', name: '챗', owner: '', adapter: model.adapter, role: '', workDir: '', model: resolveModelArg(entry, 'pinned'), extraArgs: defaultExtraArgs(model.adapter), dailyRunLimit: 0, dailyMinuteLimit: 0, timeoutMinutes: 15, requireApproval: false } as Agent
+        const built = buildCommand(agent, { stream: true, permission: 'read', refDirs: [], effort: 'low' })
+        const parser = createParser(built.stream ?? 'text')
+        let raw = ''
+        const res = await this.c.runner()(built, {
+          cwd: this.hive.chatDir(),
+          prompt,
+          timeoutMs: 5 * 60_000,
+          idleTimeoutMs: TURN_IDLE_MS,
+          env: cleanEnv(process.env, this.c.stripApiKeys()),
+          signal: ac.signal,
+          onOutput: (chunk) => {
+            raw += chunk
+            parser.push(chunk)
+          }
+        })
+        if (!raw && res.stdout) parser.push(res.stdout)
+        parser.end()
+        out = (parser.finalText(res.stdout || raw) || '').trim()
+        if (res.code !== 0 || !out) {
+          const limit = detectLimit(`${res.stderr}\n${res.stdout}`)
+          if (limit) this.c.noteLimit(model.adapter, limit)
+          throw new Error(limit ? '이 AI는 지금 사용 한도예요. 기본 초안을 그대로 쓰거나 나중에 다시 눌러 주세요.' : '정리하지 못했어요. 기본 초안을 고쳐 쓰셔도 돼요.')
+        }
+      }
+      return parsePolished(out) ?? (() => { throw new Error('정리한 내용을 읽지 못했어요. 기본 초안을 고쳐 쓰셔도 돼요.') })()
+    } finally {
+      this.turns.delete(id)
+    }
   }
 
   // ---- helpers ----

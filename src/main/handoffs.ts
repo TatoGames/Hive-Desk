@@ -1,8 +1,10 @@
 import type { ModelEntry } from '../shared/company'
 import { tierOfSlug } from '../shared/company'
-import { costLine, handoffNote, nearLimit, pickHandoff, shouldWait, whyNot, type HandoffCand, type HandoffNeed } from '../shared/handoff'
+import { costLine, handoffNote, handoffReasonLabel, nearLimit, pickHandoff, shouldWait, whyNot, type HandoffCand, type HandoffNeed } from '../shared/handoff'
 import { readJob } from '../shared/quick'
-import { DEFAULT_HANDOFF, type Agent, type Handoff, type HandoffSettings, type Task } from '../shared/types'
+import { DEFAULT_EXTERNAL_WEIGHT, localBenefit, localHistory, localScopeOf, type LocalBenefit } from '../shared/localbenefit'
+import { LOCAL_QUEUE } from '../shared/localqueue'
+import { DEFAULT_HANDOFF, type Agent, type Handoff, type HandoffReason, type HandoffSettings, type Task } from '../shared/types'
 import { rollback } from './checkpoint'
 import type { Hive } from './hive'
 import type { LimitInfo } from './limits'
@@ -21,11 +23,22 @@ export interface HandoffCtx {
   /** Does this task use external connections with this employee (web, MCP)? */
   usesExternal: (task: Task, agent: Agent) => boolean
   isRunning: (taskId: string) => boolean
+  /** A1: null = a model on this PC may do this task (easy enough, permission fits); otherwise why not. Uses the same guard as the local run. */
+  localFit?: (task: Task, agent: Agent) => string | null
+  /** A1: the engine of this employee's model answered and lists the model. */
+  localReady?: (agent: Agent) => boolean
+  /** A2: the project of this employee's folder has automatic checks (tests, typecheck …): a failure is found early. */
+  hasChecks?: (task: Task, agent: Agent) => boolean
+  /** A3: tasks waiting in line for this employee's model. */
+  localWaiting?: (agent: Agent) => number
   excludesFor: (root: string) => string[]
   changed: () => void
   notify: (title: string, body: string) => void
   me: () => string
 }
+
+/** A candidate left out because it is not worth it (A2) carries this at the start of its reason. */
+const BENEFIT_PREFIX = '기대 이익이 없어요: '
 
 export interface HandoffOption {
   agentId: string
@@ -63,12 +76,78 @@ export class Handoffs {
     return n.filter((r) => r.approved > 0 && r.changes + r.failed === 0).length / n.length
   }
 
-  private candidates(task: Task): HandoffCand[] {
+  /** Why a model on this PC cannot take this task now (null = it can): A1 conditions 1, 3, 4 (condition 2, the permission, is `whyNot`). */
+  private localBlock(task: Task, a: Agent, ext?: { weight: number; limited: boolean }): string | null {
+    if (!this.c.localFit || !this.c.localReady) return '내 PC AI 연결이 준비되지 않음'
+    const fit = this.c.localFit(task, a)
+    if (fit) return `내 PC AI에게는 어려운 일: ${fit}`
+    if (!this.c.localReady(a)) return '내 PC의 모델이 떠 있지 않음'
+    if ((this.c.localWaiting?.(a) ?? 0) >= LOCAL_QUEUE.maxWaiting) return '내 PC 모델의 대기열이 길음'
+    if (ext) {
+      // A2: all of the above and also worth it (AND)
+      const b = this.benefit(task, a, ext.weight, ext.limited)
+      if (!b.recommend) return `${BENEFIT_PREFIX}${b.reason}`
+    }
+    return null
+  }
+
+  /** A2: expected benefit of giving `task` to the local employee `a` instead of an outside model of this usage weight. */
+  private benefit(task: Task, a: Agent, externalWeight: number, limited: boolean): LocalBenefit {
+    const key = a.localModel ? `local:${a.localModel.endpointId}|${a.localModel.model}` : ''
+    const h = localHistory(this.c.hive.listAptitude(), key, task.jobKind)
+    return localBenefit({ kind: task.jobKind, risky: task.risky, ...h, externalWeight, hasChecks: this.safeChecks(task, a), limited })
+  }
+
+  private safeChecks(task: Task, a: Agent): boolean {
+    try {
+      return this.c.hasChecks?.(task, a) ?? false
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * A2, scope `easy`: a person gave this task to an employee on this PC. If it looks fine for it, say so (a hint only,
+   * nothing is moved). Null when not (other scope, not a local employee, too hard, or no benefit).
+   */
+  hint(taskId: string): string | null {
+    const t = this.c.hive.getTask(taskId)
+    const a = t?.assignee ? this.c.agents().find((x) => x.id === t.assignee) : undefined
+    if (!t || !a?.localModel || localScopeOf(this.c.settings()) !== 'easy') return null
+    if (this.localBlock(t, a)) return null
+    const b = this.benefit(t, a, this.localBaseWeight(), false)
+    return b.recommend ? `이 일은 내 PC AI로 해도 괜찮아 보여요 (${b.reason})` : null
+  }
+
+  /** What an outside run of an ordinary model uses, when there is no particular employee to compare with. */
+  private localBaseWeight(): number {
+    return DEFAULT_EXTERNAL_WEIGHT
+  }
+
+  /** `local`: also the employees that use a model on this PC (only when a usage limit hands the task over). */
+  private candidates(task: Task, opts: { local?: boolean; ext?: { weight: number; limited: boolean } } = {}): HandoffCand[] {
     const h = this.c.hive
     const all = h.listTasks()
     if (Date.now() - this.roundAt > 60_000) this.round.clear()
-    // a model on this PC has no usage limit to wait out and takes no hand-over (v6 4단계: it only gets work given to it)
-    return this.c.agents().filter((a) => !a.localModel).map((a) => {
+    return this.c.agents().filter((a) => !a.localModel || opts.local).map((a) => {
+      if (a.localModel) {
+        const busy = all.some((t) => t.id !== task.id && t.assignee === a.id && (t.status === 'running' || this.c.isRunning(t.id) || t.status === 'todo'))
+        return {
+          agentId: a.id,
+          name: a.name,
+          adapter: a.adapter,
+          modelKey: `local:${a.localModel.endpointId}|${a.localModel.model}`,
+          tier: 'light' as const,
+          weight: 0.1,
+          rankLevel: this.rankLevel(a),
+          isManager: this.c.isManager(a.id),
+          idle: !busy,
+          limited: this.c.budgetGone(a),
+          taken: this.round.get(a.id) ?? 0,
+          local: true,
+          blocked: this.localBlock(task, a, opts.ext) ?? undefined
+        }
+      }
       const m = this.model(a)
       const busy = all.some((t) => t.id !== task.id && t.assignee === a.id && (t.status === 'running' || this.c.isRunning(t.id) || t.status === 'todo'))
       return {
@@ -130,23 +209,51 @@ export class Handoffs {
     }
     if (!t.limitWait) h.updateTask(taskId, { limitWait: { adapter: from.adapter, since: new Date().toISOString() } })
     if (!s.auto || shouldWait(lim, s.waitMinutes)) return null
-    if (h.listApprovals().some((a) => a.taskId === taskId && a.kind === 'handoff' && a.status === 'pending')) return null
+    return this.proceed(t, from, s, 'limit', { local: localScopeOf(s) !== 'off' })
+  }
+
+  /**
+   * A3: a task of a model on this PC could not run here (out of memory / model would not load / waited too long in line).
+   * Not tried again on this PC: an employee of another connection takes it when settings allow, else it stays with a person.
+   */
+  async onLocalFailure(taskId: string, kind: 'memory' | 'load' | 'queue'): Promise<string | null> {
+    const s = { ...DEFAULT_HANDOFF, ...this.c.settings() }
+    const t = this.c.hive.getTask(taskId)
+    const from = t?.assignee ? this.c.agents().find((a) => a.id === t.assignee) : undefined
+    if (!t || !from?.localModel || t.status !== 'needs_input' || !s.auto) return null
+    if (this.c.hive.listApprovals().some((a) => a.taskId === taskId && a.kind === 'handoff' && a.status === 'pending')) return null
+    return this.proceed(t, from, s, kind === 'queue' ? 'queue' : 'memory', { local: false })
+  }
+
+  private async proceed(t: Task, from: Agent, s: HandoffSettings, reason: HandoffReason, o: { local: boolean }): Promise<string | null> {
+    const h = this.c.hive
+    if (h.listApprovals().some((a) => a.taskId === t.id && a.kind === 'handoff' && a.status === 'pending')) return null
     const fm = this.model(from)
-    const r = pickHandoff({ agentId: from.id, adapter: from.adapter, tier: fm.tier, weight: fm.weight, rankLevel: this.rankLevel(from) }, this.candidates(t), this.need(t, from), { up: s.up })
-    if (!r.pick) return null
+    const fromInfo = from.localModel ? { tier: 'light' as const, weight: 1 } : fm
+    const r = pickHandoff({ agentId: from.id, adapter: from.adapter, tier: fromInfo.tier, weight: fromInfo.weight, rankLevel: this.rankLevel(from) }, this.candidates(t, { local: o.local, ext: { weight: from.localModel ? DEFAULT_EXTERNAL_WEIGHT : fromInfo.weight, limited: reason === 'limit' } }), this.need(t, from), { up: s.up })
+    if (!r.pick) {
+      // A2: say why a model on this PC was not used (once; the tick looks again and again)
+      const why = r.skipped.map((x) => x.why).find((w) => w.startsWith(BENEFIT_PREFIX))
+      if (why) {
+        const line = `내 PC AI에게 넘기지 않았어요. ${why.slice(BENEFIT_PREFIX.length)}`
+        if (!h.listEvents(t.id).some((e) => e.text === line)) h.addEvent(t.id, 'status', 'system', line)
+      }
+      return null
+    }
     if (s.confirmAtCostX > 0 && r.pick.costX >= s.confirmAtCostX) {
       const to = this.c.agents().find((a) => a.id === r.pick!.cand.agentId)!
+      const lead = reason === 'limit' ? `${from.name}의 연결이 한도에 걸렸어요.` : `${from.name}의 내 PC AI로는 할 수 없었어요(${handoffReasonLabel(reason)}).`
       const a = h.createApproval({
         kind: 'handoff',
-        taskId,
+        taskId: t.id,
         agentId: from.id,
-        reason: `${from.name}의 연결이 한도에 걸렸어요. ${to.name}(${this.model(to).label})에게 넘길까요? ${costLine(r.pick.costX)}. 거절하면 한도가 풀릴 때까지 기다려요.`
+        reason: `${lead} ${to.name}(${this.model(to).label})에게 넘길까요? ${costLine(r.pick.costX)}. 거절하면 ${reason === 'limit' ? '한도가 풀릴 때까지 기다려요' : '사람이 정할 때까지 기다려요'}.`
       })
-      h.saveApproval({ ...a, handoff: { to: to.id, costX: r.pick.costX, reason: 'limit' } })
+      h.saveApproval({ ...a, handoff: { to: to.id, costX: r.pick.costX, reason } })
       this.c.changed()
       return null
     }
-    return this.perform(taskId, r.pick.cand.agentId, 'limit', r.pick.costX)
+    return this.perform(t.id, r.pick.cand.agentId, reason, r.pick.costX)
   }
 
   /** The employees a person could hand this task to, with why the others cannot (for [다른 직원에게 넘기기]). */
@@ -191,12 +298,12 @@ export class Handoffs {
       return null
     }
     const t = h.getTask(a.taskId)
-    if (!t || t.status !== 'todo') return null
+    if (!t || (t.status !== 'todo' && !(a.handoff.reason !== 'limit' && t.status === 'needs_input'))) return null
     return this.perform(a.taskId, a.handoff.to, a.handoff.reason, a.handoff.costX)
   }
 
   /** Move the task: note from the last step saving point, the step in progress put back (git), recorded and told. */
-  private async perform(taskId: string, toId: string, reason: 'limit' | 'manual', costX: number): Promise<string | null> {
+  private async perform(taskId: string, toId: string, reason: HandoffReason, costX: number): Promise<string | null> {
     const h = this.c.hive
     const t = h.getTask(taskId)
     const from = t?.assignee ? this.c.agents().find((a) => a.id === t.assignee) : undefined
@@ -234,12 +341,12 @@ export class Handoffs {
       errorKind: undefined,
       handoffs: [...(t.handoffs ?? []), rec]
     })
-    const why = reason === 'limit' ? '한도' : '사람이 넘김'
+    const why = reason === 'limit' ? '한도' : handoffReasonLabel(reason)
     const cost = Math.abs(costX - 1) >= 0.15 ? `, ${tm.label} · ${costLine(costX)}` : ''
-    h.addEvent(taskId, 'changed', reason === 'limit' ? 'system' : this.c.me(), `${from.name} → ${to.name} (${why}${cost}). ${save ? `${save.done}/${save.plan.length}단계까지 한 것을 이어받아요.` : '지금까지 한 것을 요약해 넘겼어요.'}${rolledBack ? ' 진행 중이던 단계는 시작 상태로 되돌렸어요.' : ''}`)
+    h.addEvent(taskId, 'changed', reason === 'manual' ? this.c.me() : 'system', `${from.name} → ${to.name} (${why}${cost}). ${save ? `${save.done}/${save.plan.length}단계까지 한 것을 이어받아요.` : '지금까지 한 것을 요약해 넘겼어요.'}${rolledBack ? ' 진행 중이던 단계는 시작 상태로 되돌렸어요.' : ''}`)
     this.round.set(to.id, (this.round.get(to.id) ?? 0) + 1)
     this.roundAt = Date.now()
-    if (reason === 'limit') this.c.notify('한도 이어받기', `${t.title}: ${from.name} → ${to.name}${cost ? ` (${costLine(costX)})` : ''}`)
+    if (reason !== 'manual') this.c.notify(reason === 'limit' ? '한도 이어받기' : '다른 직원이 이어받기', `${t.title}: ${from.name} → ${to.name}${cost ? ` (${costLine(costX)})` : ''}`)
     this.c.changed()
     return to.id
   }

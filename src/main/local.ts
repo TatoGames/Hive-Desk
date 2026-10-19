@@ -187,6 +187,12 @@ export class LocalAi {
   }
 
   // ---- for the chat ----
+  /** The engine answered at its last check and lists this model (A1: only then it may take over work). */
+  modelReady(endpointId: string, model: string): boolean {
+    const st = this.states.get(endpointId)
+    return !!st?.ok && st.models.some((m) => m.name === model)
+  }
+
   models(): ChatModelInfo[] {
     const advice = this.pc ? this.advice() : undefined
     const out: ChatModelInfo[] = []

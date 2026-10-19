@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AutoApprove, HandoffSettings, HumanReview, ReviewSettings, Snapshot, SyncResult } from '@shared/types'
 import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF, DEFAULT_REVIEW } from '@shared/types'
+import { LOCAL_SCOPE_HELP, LOCAL_SCOPE_LABEL, localScopeOf, type LocalScope } from '@shared/localbenefit'
 import HomeFolder from './HomeFolder'
 import { Glossary, resetHints } from './Help'
 
@@ -172,6 +173,17 @@ export default function Settings({
             <input type="checkbox" checked={hand.rollbackStep} onChange={(e) => setHand({ ...hand, rollbackStep: e.target.checked })} />
             진행 중이던 단계는 그 단계 시작 상태로 되돌리고 넘기기 (git 폴더)
           </label>
+          <label>
+            내 PC AI 사용 범위
+            <select aria-label="내 PC AI 사용 범위" value={localScopeOf(hand)} onChange={(e) => setHand({ ...hand, localScope: e.target.value as LocalScope, allowLocal: e.target.value !== 'off' })}>
+              {(['off', 'easy', 'limit-only'] as LocalScope[]).map((k) => (
+                <option key={k} value={k}>
+                  {LOCAL_SCOPE_LABEL[k]}{k === 'easy' ? ' (기본)' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="muted small">{LOCAL_SCOPE_HELP[localScopeOf(hand)]} 이력이 쌓인 만큼 따져서, 이득이 없는 일은 넘기지 않아요.</p>
           <p className="muted small">같은 연결의 직원은 같은 한도를 쓰기 때문에 언제나 제외해요. 이미 거쳐 간 연결로는 되돌아가지 않아요.</p>
           {!!samples.length && (
             <details>

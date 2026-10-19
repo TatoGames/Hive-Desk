@@ -40,6 +40,8 @@ export interface Chat {
   folderRefs: string[]
   /** The chat was opened from this task ("이 업무에 대해 물어보기"). */
   aboutTask?: string
+  /** Tasks the person handed over from this conversation (after confirming a draft). */
+  madeTasks?: string[]
   messages: ChatMessage[]
 }
 
@@ -82,7 +84,8 @@ export const REPLAY_CHARS = 24_000
 const PREAMBLE = [
   'You are a helpful AI assistant in the chat of the HiveDesk app. Answer in the language of the person\'s last message.',
   'This is a conversation only: you cannot create, change or delete files here, and you must not try. If the person wants files changed, tell them to hand it to a task (the "업무" screen).',
-  'Be direct and concise; use short paragraphs or lists when they help. If you are not sure, say so.'
+  'Be direct and concise; use short paragraphs or lists when they help. If you are not sure, say so.',
+  'If "Task material" is given below, answer from that material only; if it does not cover the question, say you do not know instead of guessing.'
 ].join('\n')
 
 export interface ChatPromptOptions {
@@ -92,6 +95,10 @@ export interface ChatPromptOptions {
   budget?: number
   /** Folders the model may read (told to it in words; the CLI enforces it where it can). */
   folders?: string[]
+  /** The material of the task this chat is about (a first turn, or a turn of a model that does not continue a session). */
+  taskContext?: string
+  /** One short line with the task's state now (every turn, also when the session continues). */
+  taskStatus?: string
 }
 
 export interface ChatPrompt {
@@ -110,12 +117,16 @@ export function chatPrompt(history: ChatMessage[], text: string, o: ChatPromptOp
   if (o.resumed) {
     // the session already knows the rest
     if (folders.length) lines.push(`(Folders you may read: ${folders.join(', ')} — read only.)`, '')
+    if (o.taskContext) lines.push(o.taskContext, '')
+    if (o.taskStatus) lines.push(o.taskStatus, '')
     lines.push(text)
     return { text: lines.join('\n'), omitted: 0 }
   }
   lines.push(PREAMBLE)
   if (folders.length) lines.push('', 'Folders you may read to answer (read only, never change anything there):', ...folders.map((f) => `- ${f}`))
   const usable = history.filter((m) => (m.role === 'user' || m.role === 'assistant') && m.text.trim() && m.status !== 'failed' && m.status !== 'streaming')
+  if (o.taskContext) lines.push('', o.taskContext)
+  if (o.taskStatus) lines.push('', o.taskStatus)
   let budget = o.budget ?? REPLAY_CHARS
   const kept: ChatMessage[] = []
   for (let i = usable.length - 1; i >= 0; i--) {

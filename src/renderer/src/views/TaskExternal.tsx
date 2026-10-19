@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { RunRecord, Snapshot, Task } from '@shared/types'
+import { handoffReasonLabel } from '@shared/handoff'
 
 /** Web page by address: the app reads it and attaches the text (any AI can use it). */
 export function UrlAttach({ task }: { task: Task }): JSX.Element {
@@ -215,7 +216,7 @@ export function HandoffPanel({ snap, task }: { snap?: Snapshot; task: Task }): J
           {task.handoffs.map((h, i) => (
             <li key={i}>
               <span>
-                {name(h.from)} → {name(h.to)} ({h.reason === 'limit' ? '한도' : '사람이 넘김'})
+                {name(h.from)} → {name(h.to)} ({handoffReasonLabel(h.reason)})
               </span>
               <span className="muted small">
                 {new Date(h.at).toLocaleString('ko-KR', { hour12: false })}

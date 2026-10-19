@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   CompanySummary,
@@ -48,7 +48,9 @@ import { containsPath, enableTracking, git as gitRun, isInsideGit, normPath } fr
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
 import { budgetProblem, holdsAppData, resolveCwd, runTask } from './runner'
-import { runLocalTask } from './localWorker'
+import { runLocalTask, localFit } from './localWorker'
+import { LocalQueue, modelKey } from './localQueue'
+import { LOCAL_BUSY_FOR_CHAT, LOCAL_QUEUE } from '../shared/localqueue'
 import { approveExamples, examplesDir, saveExample } from './examples'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
@@ -91,7 +93,7 @@ import { GithubFlow } from './githubflow'
 import { execTool, parseRepo, type Exec } from './github'
 import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
-import { isElectronApp, runChecks } from './checks'
+import { detectChecks, isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
 import { LocalAi, type LocalJob, type LocalStatus } from './local'
 import { OllamaEngine, type EngineManifest, type EngineStatus } from './ollamaEngine'
@@ -99,6 +101,7 @@ import ENGINE_MANIFEST from '../shared/ollama-engine.default.json'
 import { defaultHomeDir } from './paths'
 import type { LocalEndpoint } from '../shared/localai'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
+import { draftFromChat, type TaskDraft } from '../shared/chatTask'
 import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
 import { taskCost, type TaskCost } from '../shared/cost'
@@ -183,6 +186,10 @@ export class Engine {
   readonly github: GithubFlow
   /** v5: another connection's employee carries a task on when its connection runs out of usage. */
   readonly handoffs: Handoffs
+  /** A3: runs of one model on this PC go one after another (tasks wait; a chat turn takes a free place or is refused). */
+  readonly localQueue = new LocalQueue(() => LOCAL_QUEUE.perModel, () => this.changed())
+  /** A3: tasks whose local run could not happen here (memory / load / long wait): handed on after the run lets go. */
+  private localFail = new Map<string, 'memory' | 'load' | 'queue'>()
   /** Tasks whose hand-over is being worked out right now (the tick must not start a second one). */
   private handing = new Set<string>()
   /** OS secure storage for tokens (set by the Electron main process; tests set a fake one). */
@@ -240,6 +247,14 @@ export class Engine {
       isManager: (id) => self.delegation.isManager(id),
       usesExternal: (task, a) => self.external.grants(task, a).length > 0,
       isRunning: (id) => self.running.has(id),
+      localFit: (task, a) => {
+        const cwd = self.cwdFor(a, task.id)
+        const f = localFit(cwd, [task.title, task.description, task.reply ? `추가 설명: ${task.reply}` : ''].filter(Boolean).join('\n'), task.permission ?? a.permission ?? 'edit')
+        return f.ok ? null : f.reason
+      },
+      hasChecks: (task, a) => detectChecks(self.cwdFor(a, task.id)).specs.length > 0,
+      localReady: (a) => !!a.localModel && self.local.modelReady(a.localModel.endpointId, a.localModel.model),
+      localWaiting: (a) => (a.localModel ? self.localQueue.waiting(modelKey(a.localModel.endpointId, a.localModel.model)) : 0),
       excludesFor: (root) => self.excludesFor(root),
       changed: () => self.changed(),
       notify: (title, body) => self.notify(title, body),
@@ -255,7 +270,7 @@ export class Engine {
       secrets: () => self.machine.secretBlobs(),
       setSecret: (k, blob) => self.machine.setSecretBlob(k, blob),
       candidatesPath: join(dirname(self.configFile), 'local-models.json'),
-      busy: (id) => self.chats.usesLocal(id),
+      busy: (id) => self.chats.usesLocal(id) || self.localQueue.endpointBusy(id),
       changed: () => self.emit({ type: 'local' })
     })
     this.ollama = new OllamaEngine({
@@ -270,7 +285,17 @@ export class Engine {
       stripApiKeys: () => self.config.stripApiKeys,
       catalog: () => self.catalog(),
       localModels: () => self.local.models(),
-      localTurn: (m, t) => self.local.turn(m, t),
+      localTurn: async (m, t) => {
+        // a chat turn takes a free place of the model or is refused; it never waits behind (or jumps ahead of) tasks
+        const release = self.localQueue.tryAcquire(modelKey(m.endpointId, m.model))
+        if (!release) throw new Error(LOCAL_BUSY_FOR_CHAT)
+        try {
+          return await self.local.turn(m, t)
+        } finally {
+          release()
+        }
+      },
+      localBusy: (m) => self.localQueue.running(modelKey(m.endpointId, m.model)) >= LOCAL_QUEUE.perModel || self.localQueue.waiting(modelKey(m.endpointId, m.model)) > 0,
       cliModels: () =>
         self.machine
           .modelAgents()
@@ -716,7 +741,9 @@ export class Engine {
     if (!target) throw new Error('없는 직원이에요.')
     if (t.kind === 'plan' && !['lead', 'coo'].includes(target.job ?? '')) throw new Error('계획을 세우는 업무는 관리자에게만 맡길 수 있어요.')
     if (t.assignee === agentId) return t
-    return this.updateTask(id, { assignee: agentId, ...(t.status === 'failed' ? { status: 'todo' as const } : {}) })
+    const moved = this.updateTask(id, { assignee: agentId, ...(t.status === 'failed' ? { status: 'todo' as const } : {}) })
+    this.localHint(id)
+    return moved
   }
 
   /** The latest things that happened in this company, newest first (one line each). */
@@ -1135,8 +1162,19 @@ export class Engine {
         throw e
       }
     }
+    this.localHint(t.id)
     this.changed()
     return t
+  }
+
+  /** A2 (scope `easy`): a person gave a task to an employee on this PC: tell them when it looks fine (a hint, nothing moves). */
+  private localHint(taskId: string): void {
+    try {
+      const hint = this.handoffs.hint(taskId)
+      if (hint) this.hive.addEvent(taskId, 'status', 'system', hint)
+    } catch {
+      /* a hint is never worth breaking the assignment */
+    }
   }
 
   updateTask(id: string, patch: Partial<Task>): Task {
@@ -1348,6 +1386,10 @@ export class Engine {
       }
       // v5: the connection ran out of usage — another connection's employee carries on from the last step
       if (outcome === 'limited' && !ac.signal.aborted) handedTo = await this.handoffs.onLimit(id).catch(() => null)
+      // A3: the model on this PC could not run (memory / load / long wait): another connection's employee may take it
+      const failKind = this.localFail.get(id)
+      this.localFail.delete(id)
+      if (failKind && !ac.signal.aborted) handedTo = await this.handoffs.onLocalFailure(id, failKind).catch(() => null)
       // what a work-tree task changed is saved on its branch (it is merged when the bundle is integrated)
       const finished = this.hive.getTask(id)
       if (finished?.kind !== 'review' && finished?.worktree && !finished.worktree.merged && (finished.kind === 'work' || !finished.github?.branch)) await commitWorktree(finished.worktree, finished.title).catch(() => false)
@@ -1513,9 +1555,51 @@ export class Engine {
     return this.chats.get(id)
   }
   chatCreate(o?: { model?: ChatModel; folderRefs?: string[]; aboutTask?: string }): Chat {
+    if (o?.aboutTask) {
+      // "이 업무에 대해 물어보기": only a task of this company
+      const t = this.hive.getTask(o.aboutTask)
+      if (!t) throw new Error('없는 업무예요. 지워졌거나 다른 회사의 업무일 수 있어요.')
+      return this.chats.create({ ...o, title: `업무: ${t.title}`.slice(0, 80), firstMessage: `"${t.title}" 업무에 대해 묻는 대화예요. 보고서·바뀐 파일·검사 결과를 보고 답해요. 파일은 바꾸지 않아요.` })
+    }
     return this.chats.create(o)
   }
   /** Runs in the company the conversation belongs to, even when the person switches company meanwhile. */
+  /** 챗-2: the draft of a task from a conversation (plain rules, nothing is made). */
+  chatTaskDraft(id: string, messageIds?: string[]): TaskDraft & { projectId?: string; folders: string[] } {
+    const c = this.chats.get(id)
+    if (!c) throw new Error('없는 대화예요.')
+    const folders = c.folderRefs
+    const paths = this.hive.projectPaths()
+    const norm = (p: string): string => resolve(p)
+    const projectId = this.hive.listProjects().find((p) => paths[p.id] && folders.some((f) => norm(f) === norm(paths[p.id])))?.id
+    return { ...draftFromChat(c.messages, messageIds), folders, ...(projectId ? { projectId } : {}) }
+  }
+
+  /** 챗-2 (optional): the model of the chat words the draft. Nothing is made or saved. */
+  chatPolishDraft(id: string, draft: TaskDraft): Promise<{ title: string; description: string }> {
+    return this.als.run(this.hive, () => this.chats.polishDraft(id, draft))
+  }
+
+  /**
+   * 챗-2: hand a confirmed draft over as a task (the usual quick assignment: the app picks the employee unless one is named).
+   * `confirmed` must be true: a chat never makes a task by itself.
+   */
+  chatMakeTask(id: string, o: { confirmed: boolean; title: string; description?: string; projectId?: string; agentId?: string; refDirs?: string[] }): Task {
+    if (o.confirmed !== true) throw new Error('먼저 내용을 확인해 주세요.')
+    const c = this.chats.get(id)
+    if (!c) throw new Error('없는 대화예요.')
+    const title = o.title.trim()
+    if (!title) throw new Error('업무 제목을 적어 주세요.')
+    if (o.projectId && !this.hive.listProjects().some((p) => p.id === o.projectId)) throw new Error('없는 프로젝트예요.')
+    let t = this.quickAssign({ title, description: o.description?.trim() ?? '', agentId: o.agentId || undefined, projectId: o.projectId || undefined })
+    const refDirs = (o.refDirs ?? []).filter((d) => existsSync(d))
+    t = this.hive.updateTask(t.id, { fromChat: id, ...(refDirs.length ? { refDirs } : {}) })
+    this.hive.addEvent(t.id, 'created', this.config.memberName || 'me', `챗에서 만든 업무예요: "${c.title}" 대화의 초안을 확인하고 맡겼어요.`)
+    this.chats.noteMadeTask(id, t.id)
+    this.changed()
+    return t
+  }
+
   chatSend(id: string, text: string): Promise<Chat> {
     return this.als.run(this.hive, () => this.chats.send(id, text))
   }
@@ -1701,12 +1785,15 @@ export class Engine {
       humanReview: this.config.humanReview,
       checksEnabled: s.checks,
       chat: (m, msgs, o) => this.local.complete(m, msgs, o),
+      queue: this.localQueue,
+      onFailure: ({ taskId, kind }) => this.localFail.set(taskId, kind),
       runChecks: (dir, taskId) =>
         runChecks(dir, { app: false, shotDir: join(hive.root, '.local', 'checks'), shotName: `${taskId}-${Date.now()}`, env: cleanEnv(process.env, this.config.stripApiKeys) }),
       excludes: (root) => this.excludesFor(root),
       collect: () => !!this.config.collectExamples,
       saveExample: (e) => saveExample(hive.root, e),
-      onRunEnd: ({ agent: a, taskId, ms, result }) => this.noteAptitude(a, taskId, { runs: 1, ms, approved: result === 'approved' ? 1 : 0, failed: result === 'failed' ? 1 : 0 })
+      // a PC that ran out of memory says nothing about how well the model works: not counted
+      onRunEnd: ({ agent: a, taskId, ms, result }) => result !== 'other' && this.noteAptitude(a, taskId, { runs: 1, ms, approved: result === 'approved' ? 1 : 0, failed: result === 'failed' ? 1 : 0 })
     })
   }
 
@@ -2798,6 +2885,8 @@ export class Engine {
   // ---- aptitude: how each model version does in each work area ----
   private aptitudeKey(agent: Agent): { key: string; label: string } {
     const cat = this.catalog()
+    // a model on this PC has its own record (A2 reads it): not mixed with the outside model of the same connection
+    if (agent.localModel) return { key: `local:${agent.localModel.endpointId}|${agent.localModel.model}`, label: `내 PC ${agent.localModel.model}` }
     const m = agent.modelRef ? cat.find((x) => x.id === agent.modelRef!.id) : undefined
     if (m) return { key: m.id, label: modelLabel(m) }
     const arg = agent.model ?? 'default'

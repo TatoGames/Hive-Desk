@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Snapshot } from '@shared/types'
+import type { Snapshot, Task } from '@shared/types'
+import type { TaskDraft } from '@shared/chatTask'
 import { TIER_LABEL } from '@shared/company'
 import { sameModel, type Chat as ChatT, type ChatMessage, type ChatModel, type ChatSummary } from '@shared/chat'
 import type { ChatModelInfo } from '../../../main/chat'
@@ -10,7 +11,7 @@ import { ConfirmButton } from './Materials'
 const modelId = (m: ChatModel): string => (m.kind === 'cli' ? `cli:${m.adapter}:${m.modelId}` : `local:${m.endpointId}:${m.model}`)
 
 /** v6 챗: a plain conversation with a model you pick. It never changes files; a change is handed to a task. */
-export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnections: () => void }): JSX.Element {
+export default function Chat({ snap, openId, goConnections, goBoard }: { snap: Snapshot; openId?: string | null; goConnections: () => void; goBoard?: () => void }): JSX.Element {
   const [list, setList] = useState<ChatSummary[]>([])
   const [models, setModels] = useState<ChatModelInfo[]>([])
   const [sel, setSel] = useState<string | null>(null)
@@ -20,7 +21,14 @@ export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnec
   /** A model change that costs much more against the limit, waiting for a yes. */
   const [ask, setAsk] = useState<{ model: ChatModel; label: string; factor: number; retry: boolean } | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
+  /** 챗-2: the draft of a task from this conversation (`ids` = the picked messages), waiting for the person. */
+  const [draft, setDraft] = useState<{ ids?: string[] } | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
+
+  // another screen sent the person here ("이 업무에 대해 물어보기")
+  useEffect(() => {
+    if (openId) setSel(openId)
+  }, [openId])
 
   const load = useCallback(async (id: string | null) => {
     const [l, m] = await Promise.all([window.hive.chatList(), window.hive.chatModels()])
@@ -173,6 +181,9 @@ export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnec
                   </b>
                 )}
                 <div className="row">
+                  <button className="sm" title="이 대화에서 업무 초안을 만들어요. 확인하기 전에는 아무것도 맡기지 않아요" onClick={() => setDraft({})}>
+                    이 대화로 업무 만들기
+                  </button>
                   <button
                     className="sm"
                     title="이 폴더를 읽기만 하면서 답해요"
@@ -246,12 +257,23 @@ export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnec
                   m={m}
                   label={m.model ? info(m.model)?.label : undefined}
                   alternatives={alternatives}
+                  onMakeTask={m.role === 'user' ? () => setDraft({ ids: [m.id] }) : undefined}
                   onRetry={(model) => (model ? void changeModel(model, true) : void run(async () => { void window.hive.chatRetry(chat.id).then(() => load(chat.id)); window.setTimeout(() => void load(chat.id), 60) }))}
                 />
               ))}
               <div ref={bottom} />
             </div>
             {err && <div className="warn-text small">{err}</div>}
+            {draft && chat && (
+              <DraftDialog
+                snap={snap}
+                chat={chat}
+                ids={draft.ids}
+                onClose={() => setDraft(null)}
+                onMade={() => void load(chat.id)}
+                goBoard={goBoard}
+              />
+            )}
             <div className="chat-input">
               <textarea
                 rows={3}
@@ -282,7 +304,7 @@ export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnec
   )
 }
 
-function Message({ m, label, alternatives, onRetry }: { m: ChatMessage; label?: string; alternatives: ChatModelInfo[]; onRetry: (model?: ChatModel) => void }): JSX.Element {
+function Message({ m, label, alternatives, onRetry, onMakeTask }: { m: ChatMessage; label?: string; alternatives: ChatModelInfo[]; onRetry: (model?: ChatModel) => void; onMakeTask?: () => void }): JSX.Element {
   if (m.role === 'system') return <div className="chat-mark">── {m.text} ──</div>
   const mine = m.role === 'user'
   return (
@@ -292,6 +314,13 @@ function Message({ m, label, alternatives, onRetry }: { m: ChatMessage; label?: 
         {m.text || (m.status === 'streaming' ? '…' : '')}
         {m.status === 'streaming' && m.text && <span className="chat-caret">▍</span>}
       </div>
+      {onMakeTask && (
+        <div>
+          <button className="sm ghost" onClick={onMakeTask}>
+            이 메시지로 업무 만들기
+          </button>
+        </div>
+      )}
       {m.status === 'stopped' && <div className="muted small">중지했어요.</div>}
       {m.status === 'failed' && (
         <div className="small">
@@ -313,6 +342,153 @@ function Message({ m, label, alternatives, onRetry }: { m: ChatMessage; label?: 
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * 챗-2: the task draft. The app fills it by rules from the conversation (no AI); the person edits it and presses
+ * "이 내용으로 맡길게요" — only then a task is made. Nothing is handed over before that.
+ */
+function DraftDialog({ snap, chat, ids, onClose, onMade, goBoard }: { snap: Snapshot; chat: ChatT; ids?: string[]; onClose: () => void; onMade: () => void; goBoard?: () => void }): JSX.Element {
+  const [base, setBase] = useState<(TaskDraft & { projectId?: string; folders: string[] }) | null>(null)
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [project, setProject] = useState('')
+  const [agent, setAgent] = useState('')
+  const [withFolders, setWithFolders] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [made, setMade] = useState<Task | null>(null)
+  const clean = (e: unknown): string => (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+
+  useEffect(() => {
+    let alive = true
+    void window.hive.chatTaskDraft(chat.id, ids).then((d) => {
+      if (!alive) return
+      setBase(d)
+      setTitle(d.title)
+      setDesc(d.description)
+      setProject(d.projectId ?? '')
+    })
+    return () => {
+      alive = false
+    }
+  }, [chat.id, ids])
+
+  const polish = async (): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const r = await window.hive.chatPolishDraft(chat.id, { title, description: desc, empty: false })
+      setTitle(r.title)
+      setDesc(r.description)
+    } catch (e) {
+      setErr(clean(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const confirm = async (): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    try {
+      setMade(
+        await window.hive.chatMakeTask(chat.id, {
+          confirmed: true,
+          title,
+          description: desc,
+          projectId: project || undefined,
+          agentId: agent || undefined,
+          refDirs: withFolders && base ? base.folders : undefined
+        })
+      )
+      onMade()
+    } catch (e) {
+      setErr(clean(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="dialog" role="dialog" aria-label="업무 초안" onClick={(e) => e.stopPropagation()}>
+        {made ? (
+          <>
+            <h2>업무를 맡겼어요</h2>
+            <p className="small">"{made.title}" 업무가 보드에 올라갔어요. 챗에서 만든 업무라고 기록에 남겨요.</p>
+            <div className="row end">
+              {goBoard && (
+                <button className="primary" onClick={() => (onClose(), goBoard())}>
+                  보드 보기
+                </button>
+              )}
+              <button onClick={onClose}>닫기</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h2>업무 초안</h2>
+            {!base && <p className="muted small">초안을 만드는 중이에요…</p>}
+            {base?.empty && <p className="small">이 대화에는 업무로 만들 요청이 아직 없어요. 먼저 하고 싶은 일을 대화로 적어 주세요.</p>}
+            {base && !base.empty && (
+              <>
+                <p className="muted small">대화에서 앱이 채운 초안이에요(AI를 쓰지 않았어요). 고친 뒤 맡기면 업무가 만들어져요. 맡기기 전에는 아무것도 실행되지 않아요.</p>
+                <label className="small">
+                  제목
+                  <input className="grow" aria-label="업무 제목" value={title} onChange={(e) => setTitle(e.target.value)} />
+                </label>
+                <label className="small">
+                  설명
+                  <textarea rows={8} aria-label="업무 설명" value={desc} onChange={(e) => setDesc(e.target.value)} />
+                </label>
+                <div className="row">
+                  <select aria-label="프로젝트" value={project} onChange={(e) => setProject(e.target.value)}>
+                    <option value="">프로젝트 없음</option>
+                    {snap.projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select aria-label="담당" value={agent} onChange={(e) => setAgent(e.target.value)}>
+                    <option value="">담당은 앱이 정해요</option>
+                    {snap.roster.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} · {r.owner}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {!!base.folders.length && (
+                  <label className="small row">
+                    <input type="checkbox" checked={withFolders} onChange={(e) => setWithFolders(e.target.checked)} />
+                    챗에서 참고한 폴더를 읽기용으로 붙이기 ({base.folders.map((f) => f.split(/[\\/]/).pop()).join(', ')})
+                  </label>
+                )}
+              </>
+            )}
+            {err && <div className="warn-text small">{err}</div>}
+            <div className="row end">
+              <button className="ghost" onClick={onClose}>
+                취소
+              </button>
+              {base && !base.empty && (
+                <>
+                  <button disabled={busy || !title.trim()} title="이 대화의 모델이 업무 문장으로 다듬어요(AI를 한 번 써요). 결과를 보고 고칠 수 있어요" onClick={() => void polish()}>
+                    AI로 정리하기
+                  </button>
+                  <button className="primary" disabled={busy || !title.trim()} onClick={() => void confirm()}>
+                    이 내용으로 맡길게요
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }
