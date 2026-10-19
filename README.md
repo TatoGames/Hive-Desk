@@ -55,6 +55,7 @@ Claude Code · OpenAI Codex · Antigravity(agy)를 각자 **자기 계정(무료
 - **데스크톱 알림**: 승인·자료 요청·결과 확인·실패·보고서가 생기면 알려줘요 (설정에서 끌 수 있어요).
 
 ### 여러 회사·AI 연결·오피스·회사 간 협업 (v3)
+- **휴대용 버전(선택)**: Windows `HiveDesk-Portable-<버전>.exe`, macOS `*-mac-portable.zip`은 설치 없이 실행하고 데이터를 앱 옆 `HiveDesk-data/`에만 둬요. 자세한 내용은 `docs/guide.md`.
 - **한 폴더 모드(선택)**: 설정에서 켜면 설정·임시 파일을 HiveDesk 폴더 하나(`data`, `tmp`)에 모아요. 기본은 꺼짐이고, 켤 때는 복사만 해서 기존 파일을 지우지 않아요. 자세한 내용은 `docs/guide.md`.
 - **Ollama를 HiveDesk 폴더에 설치(선택)**: 내 PC AI 화면에서 설치 프로그램 없이 Ollama를 `<HiveDesk>/engine`에 받아(sha256 검증) 켜고 끄고, 모델도 `<HiveDesk>/models`에 저장해요. 자세한 내용은 `docs/guide.md`.
 - **여러 회사**: 회사마다 폴더·git 저장소·조직·메모리·직원이 완전히 분리돼요. 왼쪽 위 전환기로 바꾸고, `이사회` 탭에서 모든 회사의 대기 항목을 한눈에 봐요. v0.2 작업 공간은 백업을 만든 뒤 첫 번째 회사로 자동 옮겨져요.

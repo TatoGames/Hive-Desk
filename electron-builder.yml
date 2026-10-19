@@ -13,15 +13,14 @@ mac:
   target:
     - target: dmg
       arch: [arm64, x64]
-    # portable: the .app plus portable.flag in a zip (see extraDistFiles)
+    # portable: the .app plus portable.flag in a zip (portable.flag at the repo root, see extraDistFiles)
     - target: zip
       arch: [arm64, x64]
   # only the zip target is affected (the dmg name is pinned by the dmg: block)
   artifactName: ${productName}-${version}-${arch}-mac-portable.${ext}
   # copied next to the .app, only into the zip (the dmg is built from the .app alone)
   extraDistFiles:
-    - from: build/portable
-      to: .
+    - portable.flag
   category: public.app-category.developer-tools
   # No Developer ID yet: electron-builder's own signing is skipped and
   # build/afterPack.cjs applies an ad-hoc signature instead.
