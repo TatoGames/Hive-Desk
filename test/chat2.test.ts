@@ -44,8 +44,9 @@ describe('챗-2: the task draft is made by rules', () => {
     const all = [msg('user', '첫 요청', 'u1'), msg('assistant', '첫 답', 'a1'), msg('user', '둘째 요청', 'u2')]
     const d = draftFromChat(all, ['u1'])
     expect(d.title).toBe('첫 요청')
-    expect(d.description).toContain('첫 답')
+    expect(d.description).not.toContain('첫 답') // not picked
     expect(d.description).not.toContain('둘째 요청')
+    expect(draftFromChat(all, ['u1', 'a1']).description).toContain('첫 답')
   })
 
   it('the answer of "AI로 정리하기" is read as title + description', () => {
