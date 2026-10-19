@@ -95,6 +95,8 @@ import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
 import { detectChecks, isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
+import { searchLibrary } from './ollamaLibrary'
+import type { LibraryItem } from '../shared/ollamaLibrary'
 import { LocalAi, type LocalJob, type LocalStatus } from './local'
 import { OllamaEngine, type EngineManifest, type EngineStatus } from './ollamaEngine'
 import ENGINE_MANIFEST from '../shared/ollama-engine.default.json'
@@ -1529,6 +1531,9 @@ export class Engine {
   }
   localBench(endpointId: string, model: string): Promise<LocalJob> {
     return this.local.bench(endpointId, model)
+  }
+  localSearchLibrary(q: string): Promise<LibraryItem[] | null> {
+    return searchLibrary(q)
   }
   localPull(endpointId: string, name: string): Promise<LocalJob> {
     return this.local.pull(endpointId, name)

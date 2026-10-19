@@ -4,6 +4,7 @@ import { CANDIDATE_FILTERS, LICENSE_NOTICE, REMOTE_NOTICE, SCOPE_LABEL, endpoint
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
 import OllamaEngineCard from './OllamaEngineCard'
+import { installChoices, isStaffCandidate, libraryUrl, type LibraryItem } from '@shared/ollamaLibrary'
 
 const key = (ep: string, m: string): string => `${ep}|${m}`
 
@@ -18,6 +19,10 @@ export default function LocalAi(): JSX.Element {
   /** An address of another computer waiting for the person to confirm that what they send goes there. */
   const [remoteOk, setRemoteOk] = useState<string | null>(null)
   const [custom, setCustom] = useState('')
+  /** J4: the library search. `null` after a search that could not be read; `undefined` before any search. */
+  const [found, setFound] = useState<LibraryItem[] | null | undefined>(undefined)
+  const [q, setQ] = useState('')
+  const [pick, setPick] = useState<Record<string, string>>({})
   const [agreed, setAgreed] = useState<Record<string, boolean>>({})
   const [filters, setFilters] = useState<CandidateFilter[]>([])
   const [sort, setSort] = useState<CandidateSort>('recommend')
@@ -256,6 +261,44 @@ export default function LocalAi(): JSX.Element {
             </div>
           )
         })}
+        {ollamaEp && (
+          <div className="local-find">
+            <div className="row">
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="다른 모델 찾기 (예: coder, gemma)" onKeyDown={(e) => e.key === 'Enter' && q.trim() && void window.hive.localSearchLibrary(q).then(setFound)} />
+              <button className="sm" disabled={!q.trim()} onClick={() => void window.hive.localSearchLibrary(q).then(setFound)}>
+                찾기
+              </button>
+            </div>
+            {found === null && <div className="muted small">목록을 읽지 못했어요. 인터넷 연결을 확인하거나 아래에 모델 이름을 직접 적어 주세요.</div>}
+            {found && (
+              <>
+                <div className="muted small">앱이 추천하는 모델이 아니에요. 설치 전에 조건 링크를 직접 읽어 주세요. 라이선스는 모두 &quot;확인 전&quot;이에요.</div>
+                {found.filter(isStaffCandidate).slice(0, 12).map((it) => {
+                  const choices = installChoices(it)
+                  const cur = pick[it.name] ?? choices[0]
+                  return (
+                    <div key={it.name} className="local-cand">
+                      <b>{it.name}</b> {it.caps.map((c) => <span key={c} className="chip">{c}</span>)} <span className="chip warn">라이선스 확인 전</span>
+                      <div className="muted small">{it.description}</div>
+                      <div className="row">
+                        <select value={cur} onChange={(e) => setPick({ ...pick, [it.name]: e.target.value })}>
+                          {choices.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        <a href={libraryUrl(it.name)} target="_blank" rel="noreferrer">조건 보기</a>
+                        <label className="small">
+                          <input type="checkbox" checked={!!agreed['f:' + it.name]} onChange={(e) => setAgreed({ ...agreed, ['f:' + it.name]: e.target.checked })} /> 조건을 직접 확인했어요
+                        </label>
+                        <button className="sm primary" disabled={!agreed['f:' + it.name]} onClick={() => job(() => window.hive.localPull(ollamaEp.id, cur))}>
+                          설치
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        )}
         {ollamaEp && (
           <div className="row">
             <input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="다른 모델 이름 (예: gemma2:9b)" />

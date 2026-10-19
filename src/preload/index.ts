@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AutoRow } from '../shared/connections'
+import type { LibraryItem } from '../shared/ollamaLibrary'
 import type { ExtAccess, ExtConnection, ExtKind, GhStatus } from '../shared/external'
 import type { Company, ModelEntry, OrgUnit, Seat } from '../shared/company'
 import type {
@@ -136,6 +137,7 @@ const api = {
   localRefresh: (id?: string): Promise<void> => ipcRenderer.invoke('local:refresh', id),
   localSpeed: (endpointId: string, model: string): Promise<LocalJob> => ipcRenderer.invoke('local:speed', endpointId, model),
   localBench: (endpointId: string, model: string): Promise<LocalJob> => ipcRenderer.invoke('local:bench', endpointId, model),
+  localSearchLibrary: (q: string): Promise<LibraryItem[] | null> => ipcRenderer.invoke('local:search-library', q),
   localPull: (endpointId: string, name: string): Promise<LocalJob> => ipcRenderer.invoke('local:pull', endpointId, name),
   localDeleteModel: (endpointId: string, name: string): Promise<void> => ipcRenderer.invoke('local:delete-model', endpointId, name),
   localEngineStatus: (): Promise<EngineStatus> => ipcRenderer.invoke('local:engine-status'),
