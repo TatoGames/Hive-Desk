@@ -194,6 +194,9 @@ const api = {
   checkCli: (id: Agent['adapter']): Promise<SetupCheck> => ipcRenderer.invoke('setup:check', id),
   enableSharing: (url: string): Promise<SyncResult> => ipcRenderer.invoke('share:enable', url),
   sync: (): Promise<SyncResult> => ipcRenderer.invoke('share:sync'),
+  homeGet: (): Promise<{ active: boolean; homeDir: string; oldDataDir: string; bootstrapFile: string }> => ipcRenderer.invoke('home:get'),
+  homeSet: (enabled: boolean, dir: string): Promise<{ ok: boolean; copied: string[]; skipped: string[]; leftBehind: string; message: string }> =>
+    ipcRenderer.invoke('home:set', enabled, dir),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:folder'),
   saveConnection: (c: Partial<ExtConnection> & { kind: ExtKind; name: string }): Promise<ExtConnection> => ipcRenderer.invoke('ext:save', c),
   deleteConnection: (id: string): Promise<void> => ipcRenderer.invoke('ext:delete', id),

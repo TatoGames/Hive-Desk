@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { copyFileSync, existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { tempDir } from './paths'
 import { join, resolve, sep } from 'node:path'
 import type { DiffFile, RunDiff, TrackMode } from '../shared/types'
 import { SHARED_DIRS } from './hive'
@@ -84,7 +84,7 @@ export async function snapshotTree(toplevel: string, exclude: string[]): Promise
   const gd = await git(toplevel, ['rev-parse', '--absolute-git-dir'])
   if (!gd.ok) return { error: gd.err || 'git 폴더를 찾지 못했어요.' }
   const gitDir = gd.out.trim()
-  const tmp = mkdtempSync(join(tmpdir(), 'hivedesk-idx-'))
+  const tmp = tempDir('hivedesk-idx-')
   try {
     const index = join(tmp, 'index')
     const real = join(gitDir, 'index')

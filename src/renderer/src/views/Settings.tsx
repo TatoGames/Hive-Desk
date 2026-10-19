@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AutoApprove, HandoffSettings, HumanReview, ReviewSettings, Snapshot, SyncResult } from '@shared/types'
 import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF, DEFAULT_REVIEW } from '@shared/types'
+import HomeFolder from './HomeFolder'
 import { Glossary, resetHints } from './Help'
 
 export default function Settings({
@@ -90,6 +91,7 @@ export default function Settings({
         </p>
       )}
 
+      {!firstRun && <HomeFolder />}
       <section className="panel form">
         <label>
           내 이름 (팀원에게 보이는 이름, 에이전트 ID에 들어가요)

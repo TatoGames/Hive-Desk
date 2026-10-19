@@ -3,7 +3,6 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmdirSync,
@@ -12,7 +11,7 @@ import {
   utimesSync,
   writeFileSync
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tempDir } from './paths'
 import { dirname, join } from 'node:path'
 import type { Checkpoint, RunDiff } from '../shared/types'
 import { diffScans, diffTrees, FileStamp, git, scanFolder, snapshotTree, unavailable, type TrackSource } from './gitdiff'
@@ -220,7 +219,7 @@ async function rollbackGit(cp: Checkpoint, exclude: string[]): Promise<RollbackR
   }
   let restored = 0
   if (back.length) {
-    const tmpDir = mkdtempSync(join(tmpdir(), 'hivedesk-undo-'))
+    const tmpDir = tempDir('hivedesk-undo-')
     try {
       const env = { GIT_INDEX_FILE: join(tmpDir, 'index') }
       const rt = await git(root, ['read-tree', cp.tree!], env)

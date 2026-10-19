@@ -9,7 +9,18 @@ import { cleanEnv } from './adapters'
 import { Engine } from './engine'
 import { checkForUpdate } from './updates'
 import { fixPath } from './shellPath'
+import { bootstrapFile, migrateToHome, readBootstrap, resolveUserData, setTempRoot, tmpDirOf, writeBootstrap } from './paths'
+import { homedir } from 'node:os'
 import { checkCli, installCli, installCommand, installGh, openGhLogin, openLogin } from './setup'
+
+// one-folder mode: must be decided before anything reads userData (the engine, safeStorage, caches)
+const bootFile = bootstrapFile(app.getPath('appData'))
+const bootstrap = readBootstrap(bootFile)
+const defaultUserData = app.getPath('userData')
+if (bootstrap) {
+  app.setPath('userData', resolveUserData(bootstrap, defaultUserData))
+  setTempRoot(tmpDirOf(bootstrap.homeDir))
+}
 
 let win: BrowserWindow | null = null
 let engine: Engine
@@ -153,6 +164,23 @@ function registerIpc(): void {
   ipcMain.handle('task:shared-runs', (_e, id: string) => engine.sharedRuns(id))
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
   ipcMain.handle('share:sync', () => engine.sync())
+  ipcMain.handle('home:get', () => ({
+    active: !!bootstrap,
+    homeDir: bootstrap?.homeDir ?? join(homedir(), 'HiveDesk'),
+    oldDataDir: defaultUserData,
+    bootstrapFile: bootFile
+  }))
+  ipcMain.handle('home:set', (_e, enabled: boolean, dir: string) => {
+    if (!enabled) {
+      writeBootstrap(bootFile, { oneFolder: false, homeDir: bootstrap?.homeDir ?? dir })
+      return { ok: true, copied: [], skipped: [], leftBehind: defaultUserData, message: '다음 실행부터 예전 위치의 설정을 써요. 한 폴더에 있는 파일은 지우지 않았어요.' }
+    }
+    const from = bootstrap ? app.getPath('userData') : defaultUserData
+    const r = migrateToHome(from, dir)
+    // only a verified copy switches the location
+    if (r.ok) writeBootstrap(bootFile, { oneFolder: true, homeDir: dir })
+    return { ...r, message: r.ok ? '다음 실행부터 한 폴더 모드로 시작해요.' : `옮기지 못해서 예전 설정을 그대로 써요. (${r.error})` }
+  })
   ipcMain.handle('dialog:folder', async () => {
     if (!win) return null
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
