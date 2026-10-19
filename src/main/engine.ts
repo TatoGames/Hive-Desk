@@ -48,6 +48,8 @@ import { containsPath, enableTracking, git as gitRun, isInsideGit, normPath } fr
 import type { LimitInfo } from './limits'
 import { Hive } from './hive'
 import { budgetProblem, holdsAppData, resolveCwd, runTask } from './runner'
+import { runLocalTask } from './localWorker'
+import { approveExamples, examplesDir, saveExample } from './examples'
 import type { AptitudeRecord } from '../shared/aptitude'
 import {
   DEFAULT_RULES,
@@ -1045,6 +1047,14 @@ export class Engine {
       )
     }
     saveConfig(this.configFile, this.config)
+    // the folder the examples go to exists once collecting is on, so "폴더 열기" always works
+    if (patch.collectExamples) {
+      try {
+        mkdirSync(examplesDir(this.hive.root), { recursive: true })
+      } catch {
+        /* shown as empty */
+      }
+    }
     if (this.config.workspace !== prevWorkspace) {
       this.config = { ...this.config, activeCompanyId: undefined }
       this.openWorkspace()
@@ -1065,6 +1075,8 @@ export class Engine {
       }
       input = { ...input, model: resolveModelArg(m, input.modelRef.pin) }
     }
+    // a model on this PC: no CLI, no usage limit, no daily budget of its own
+    if (input.localModel) input = { ...input, adapter: 'custom', modelRef: undefined, command: undefined, extraArgs: '', dailyRunLimit: 0, dailyMinuteLimit: 0 }
     const prev = existingId ? this.config.agents.find((a) => a.id === existingId) : undefined
     const company = input.companyId ?? (prev ? this.companyOf(prev) : this.hive.id)
     // a new employee whose name is taken gets "name 2" — it never replaces the one already there
@@ -1342,7 +1354,7 @@ export class Engine {
       if (finished?.github?.branch) await this.github.commit(id)
       if (finished?.status === 'done' && finished.github?.branch && !ac.signal.aborted) await this.github.onDone(id)
       // v5.1: the app checks the work itself before any AI review (still inside the folder lock)
-      if (!ac.signal.aborted && finished?.kind === 'work' && finished.status === 'done') await this.checkWork(agent, id)
+      if (!ac.signal.aborted && finished?.kind === 'work' && finished.status === 'done' && !agent.localModel) await this.checkWork(agent, id)
       // delegation: what a plan / review / work run produced decides what happens next
       if (!ac.signal.aborted) {
         this.delegation.onRunFinished(id)
@@ -1634,6 +1646,8 @@ export class Engine {
   }
 
   private runOnce(agent: Agent, id: string, ac: AbortController): Promise<string> {
+    // v6 4단계: a model on this PC is led by the app, not by a CLI (and costs no usage limit)
+    if (agent.localModel) return this.runLocal(agent, id, ac)
     this.machine.countRun(agent.adapter)
     return runTask(agent, id, {
       hive: this.hive,
@@ -1673,6 +1687,26 @@ export class Engine {
       onLive: (live) => this.liveRuns.set(live.taskId, live),
       onActivity: (taskId, events, live) =>
         this.emit({ type: 'activity', taskId, events, summary: live.summary() })
+    })
+  }
+
+  private runLocal(agent: Agent, id: string, ac: AbortController): Promise<string> {
+    const hive = this.hive
+    const s = this.reviewSettings()
+    return runLocalTask(agent, id, {
+      hive,
+      defaultCwd: hive.ensureWorkspace(),
+      machine: this.config.memberName,
+      signal: ac.signal,
+      humanReview: this.config.humanReview,
+      checksEnabled: s.checks,
+      chat: (m, msgs, o) => this.local.complete(m, msgs, o),
+      runChecks: (dir, taskId) =>
+        runChecks(dir, { app: false, shotDir: join(hive.root, '.local', 'checks'), shotName: `${taskId}-${Date.now()}`, env: cleanEnv(process.env, this.config.stripApiKeys) }),
+      excludes: (root) => this.excludesFor(root),
+      collect: () => !!this.config.collectExamples,
+      saveExample: (e) => saveExample(hive.root, e),
+      onRunEnd: ({ agent: a, taskId, ms, result }) => this.noteAptitude(a, taskId, { runs: 1, ms, approved: result === 'approved' ? 1 : 0, failed: result === 'failed' ? 1 : 0 })
     })
   }
 
@@ -2352,6 +2386,7 @@ export class Engine {
       }
       this.hive.addEvent(id, 'review', by, '확인했어요. 완료로 처리했어요.')
       this.noteTaskAptitude(t, { approved: 1 })
+      if (this.localAgent(t.assignee)?.localModel) approveExamples(this.hive.root, id)
       this.delegation.recordDecision(id, true, by)
       if (t.github?.branch) void this.github.onDone(id)
     } else {

@@ -22,7 +22,7 @@ import type { ChatModel } from '../shared/chat'
 import { runBench } from './bench'
 import type { ChatModelInfo, LocalTurn } from './chat'
 import type { Cipher } from './external'
-import { chatStream, ollamaDelete, ollamaPull, probe, speedTest, type Conn, type FetchFn, type PullProgress } from './openai'
+import { chatStream, ollamaDelete, ollamaPull, probe, speedTest, type ChatMsg, type Conn, type FetchFn, type PullProgress } from './openai'
 import { diagnosePc, type Exec } from './pcinfo'
 
 export interface LocalCtx {
@@ -211,6 +211,12 @@ export class LocalAi {
 
   async turn(m: Extract<ChatModel, { kind: 'local' }>, t: LocalTurn): Promise<{ text: string }> {
     const r = await chatStream(this.conn(m.endpointId), m.model, [{ role: 'user', content: t.prompt }], { signal: t.signal, onText: t.onText, idleMs: 300_000 })
+    return { text: r.text }
+  }
+
+  /** One answer for a task (the app leads the edit, see localWorker.ts). */
+  async complete(m: { endpointId: string; model: string }, messages: ChatMsg[], o: { signal: AbortSignal; idleMs: number }): Promise<{ text: string }> {
+    const r = await chatStream(this.conn(m.endpointId), m.model, messages, { signal: o.signal, idleMs: o.idleMs, temperature: 0, maxTokens: 8192 })
     return { text: r.text }
   }
 
