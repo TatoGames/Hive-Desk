@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { AptitudeRecord } from '../src/shared/aptitude'
-import { DEFAULT_EXTERNAL_WEIGHT, LOCAL_BENEFIT, localBenefit, localHistory, localSavings, localScopeOf, type LocalBenefitInput } from '../src/shared/localbenefit'
+import { DEFAULT_EXTERNAL_WEIGHT, LOCAL_BENEFIT, LOCAL_SCOPE_HELP, LOCAL_SCOPE_LABEL, localBenefit, localHistory, localSavings, localScopeOf, type LocalBenefitInput } from '../src/shared/localbenefit'
 
 const base: LocalBenefitInput = { passed: 0, attempts: 0, externalWeight: 3, hasChecks: false, limited: true }
 
@@ -130,5 +132,26 @@ describe('A2: savings', () => {
   })
   it('nothing yet', () => {
     expect(localSavings([], () => 1)).toEqual({ tasks: 0, usage: 0 })
+  })
+})
+
+describe('A2: UI wiring (source check)', () => {
+  const read = (p: string): string => readFileSync(join(__dirname, '..', p), 'utf8')
+  it('Settings has one scope select with a line of help per choice, and no allowLocal checkbox any more', () => {
+    const s = read('src/renderer/src/views/Settings.tsx')
+    expect(s).toContain('내 PC AI 사용 범위')
+    expect(s).toContain('LOCAL_SCOPE_HELP')
+    expect(s).not.toMatch(/type="checkbox"[^>]*allowLocal/)
+    for (const k of ['off', 'easy', 'limit-only'] as const) {
+      expect(LOCAL_SCOPE_LABEL[k]).toBeTruthy()
+      expect(LOCAL_SCOPE_HELP[k].split('\n')).toHaveLength(1)
+    }
+    expect(LOCAL_SCOPE_LABEL.easy).toBe('쉬운 일만')
+  })
+  it('Performance shows the savings card with "아직 없어요" as the empty text', () => {
+    const s = read('src/renderer/src/views/Performance.tsx')
+    expect(s).toContain('내 PC AI가 아낀 양')
+    expect(s).toContain('아직 없어요.')
+    expect(s).toContain('(추정)')
   })
 })
