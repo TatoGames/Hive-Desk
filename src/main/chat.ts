@@ -113,7 +113,8 @@ export class Chats {
     const all = this.models()
     const last = this.c.lastModel()
     if (last && all.some((x) => sameModel(x.model, last))) return last
-    const pick = [...all].sort((a, b) => Number(b.ok) - Number(a.ok) || a.weight - b.weight)[0]
+    // a model of this PC is never the surprise default (it may be slow): connections first
+    const pick = [...all].sort((a, b) => Number(b.ok) - Number(a.ok) || Number(a.where === 'local') - Number(b.where === 'local') || a.weight - b.weight)[0]
     return pick?.model
   }
 
@@ -198,6 +199,12 @@ export class Chats {
   }
 
   // ---- a turn ----
+  /** A turn is running on this local connection (its models cannot be removed meanwhile). */
+  usesLocal(endpointId: string): boolean {
+    for (const t of this.turns.values()) if (t.conn === `local:${endpointId}`) return true
+    return false
+  }
+
   isRunning(id: string): boolean {
     return this.turns.has(id)
   }

@@ -1,0 +1,9 @@
+{
+  "updatedAt": "2026-10-19",
+  "models": [
+    { "id": "llama3.2:3b", "label": "Llama 3.2 3B", "paramsB": 3, "tier": "light", "approxGB": 2.0, "licenseName": "Llama 3.2 Community License", "licenseUrl": "https://www.llama.com/llama3_2/license/", "licenseStatus": "unchecked", "note": "작은 PC용 후보. 짧은 대화·요약" },
+    { "id": "qwen2.5-coder:7b", "label": "Qwen2.5 Coder 7B", "paramsB": 7, "tier": "balanced", "approxGB": 4.7, "licenseName": "Apache-2.0 (모델 카드에서 확인)", "licenseUrl": "https://ollama.com/library/qwen2.5-coder", "licenseStatus": "unchecked", "note": "코드 중심 후보" },
+    { "id": "qwen2.5-coder:14b", "label": "Qwen2.5 Coder 14B", "paramsB": 14, "tier": "balanced", "approxGB": 9.0, "licenseName": "Apache-2.0 (모델 카드에서 확인)", "licenseUrl": "https://ollama.com/library/qwen2.5-coder", "licenseStatus": "unchecked", "note": "메모리가 넉넉한 PC용" },
+    { "id": "qwen2.5-coder:32b", "label": "Qwen2.5 Coder 32B", "paramsB": 32, "tier": "top", "approxGB": 20, "licenseName": "Apache-2.0 (모델 카드에서 확인)", "licenseUrl": "https://ollama.com/library/qwen2.5-coder", "licenseStatus": "unchecked", "note": "그래픽 메모리 24GB급 또는 큰 공유 메모리" }
+  ]
+}

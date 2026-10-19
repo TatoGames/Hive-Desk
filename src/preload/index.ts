@@ -26,6 +26,8 @@ import type {
 import type { TeamSummary } from '../shared/team'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
 import type { ChatModelInfo } from '../main/chat'
+import type { LocalEndpoint } from '../shared/localai'
+import type { LocalJob, LocalStatus } from '../main/local'
 
 const api = {
   snapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot'),
@@ -123,6 +125,15 @@ const api = {
   chatSetFolders: (id: string, folders: string[]): Promise<void> => ipcRenderer.invoke('chat:set-folders', id, folders),
   chatDelete: (id: string): Promise<void> => ipcRenderer.invoke('chat:delete', id),
   chatExport: (id: string): Promise<string | null> => ipcRenderer.invoke('chat:export', id),
+  localStatus: (): Promise<LocalStatus> => ipcRenderer.invoke('local:status'),
+  localAdd: (o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> => ipcRenderer.invoke('local:add', o),
+  localRemove: (id: string): Promise<void> => ipcRenderer.invoke('local:remove', id),
+  localRefresh: (id?: string): Promise<void> => ipcRenderer.invoke('local:refresh', id),
+  localSpeed: (endpointId: string, model: string): Promise<LocalJob> => ipcRenderer.invoke('local:speed', endpointId, model),
+  localBench: (endpointId: string, model: string): Promise<LocalJob> => ipcRenderer.invoke('local:bench', endpointId, model),
+  localPull: (endpointId: string, name: string): Promise<LocalJob> => ipcRenderer.invoke('local:pull', endpointId, name),
+  localDeleteModel: (endpointId: string, name: string): Promise<void> => ipcRenderer.invoke('local:delete-model', endpointId, name),
+  localStop: (jobId: string): Promise<void> => ipcRenderer.invoke('local:stop', jobId),
   taskCost: (id: string): Promise<import('../shared/cost').TaskCost> => ipcRenderer.invoke('task:cost', id),
   folderGit: (dir: string): Promise<'ok' | 'none' | 'not-top' | 'no-commit'> => ipcRenderer.invoke('folder:git-state', dir),
   initFolderGit: (dir: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('folder:git-init', dir),

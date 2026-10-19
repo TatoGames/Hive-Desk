@@ -801,6 +801,8 @@ export interface AppConfig {
   handoff?: HandoffSettings
   /** v6 챗: the model of the last conversation (a new one starts with it). */
   chatModel?: import('./chat').ChatModel
+  /** v6 8-2: connections to engines on this PC (or the network) and what was measured; kept per computer. */
+  local?: import('./localai').LocalStore
   /** v5.1: the app's own checks and when an AI review is needed. */
   review?: Partial<ReviewSettings>
   /** v0.6.1: put a snapshot of the work folder (structure, scripts, README, recent work) at the top of each prompt (default on). */
@@ -860,7 +862,7 @@ export interface Snapshot {
 }
 
 export interface EngineEvent {
-  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify' | 'chat'
+  type: 'changed' | 'output' | 'setup' | 'activity' | 'notify' | 'chat' | 'local'
   taskId?: string
   /** For `chat`: the conversation that changed (the open screen reads it again). */
   chatId?: string

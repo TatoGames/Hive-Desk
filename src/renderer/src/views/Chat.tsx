@@ -31,6 +31,8 @@ export default function Chat({ snap, goConnections }: { snap: Snapshot; goConnec
 
   useEffect(() => {
     void load(sel)
+    // models of this PC: ask the engines what they have now
+    void window.hive.localRefresh().then(() => load(sel))
   }, [load, sel, snap.company.company?.name])
 
   // the answer comes in while it is written: read the conversation again on each change

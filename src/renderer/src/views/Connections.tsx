@@ -4,6 +4,7 @@ import type { AdapterInfo, Snapshot } from '@shared/types'
 import type { ConnectionView, ModelAgentView } from '@shared/connections'
 import { TIER_LABEL } from '@shared/company'
 import { fmtTime } from '../store'
+import LocalAi from './LocalAi'
 
 const STATUS: Record<ModelAgentView['status'], string> = { ok: '✓ 쓸 수 있어요', unavailable: '✗ 쓸 수 없어요', unchecked: '확인 전' }
 
@@ -144,6 +145,7 @@ export default function Connections({ snap }: { snap: Snapshot }): JSX.Element {
       {infos.map((i) => (
         <Card key={i.id} info={i} view={snap.connections.find((c) => c.adapter === i.id)} snap={snap} />
       ))}
+      <LocalAi />
     </div>
   )
 }

@@ -423,3 +423,13 @@ label.chip.on { border-color: var(--accent); color: inherit; }
 .chat-input { display: flex; gap: 8px; align-items: flex-end; }
 .chat-input textarea { flex: 1; resize: vertical; }
 @media (max-width: 800px) { .chat-grid { grid-template-columns: 1fr; } }
+
+/* v6 내 PC AI */
+.local-ai .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.local-pc, .local-ep, .local-install { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.local-model, .local-cand { padding: 8px 0; border-top: 1px solid var(--line); }
+.local-job { margin-top: 8px; display: grid; gap: 4px; }
+.license-note { margin: 8px 0; }
+.local-add { margin-top: 12px; }
+.chip.ok { border-color: #3a9; }
+.chip.bad, .chip.warn { border-color: #c95; }

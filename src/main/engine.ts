@@ -91,6 +91,8 @@ import { listMcpTools, mergeTools } from './mcp'
 import { readPage, type FetchFn } from './webread'
 import { isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
+import { LocalAi, type LocalJob, type LocalStatus } from './local'
+import type { LocalEndpoint } from '../shared/localai'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
 import { presetById } from '../shared/presets'
 import { checksLine } from '../shared/review'
@@ -146,6 +148,7 @@ export class Engine {
   private pendingRuns = new Map<string, Promise<unknown>>()
   private liveRuns = new Map<string, LiveRun>()
   readonly chats!: Chats
+  readonly local!: LocalAi
   private chatsRecovered = new Set<string>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
@@ -234,11 +237,26 @@ export class Engine {
       notify: (title, body) => self.notify(title, body),
       me: () => self.config.memberName || 'me'
     })
+    this.local = new LocalAi({
+      store: () => self.config.local ?? {},
+      saveStore: (st) => {
+        self.config = { ...self.config, local: st }
+        saveConfig(self.configFile, self.config)
+      },
+      cipher: () => self.cipher,
+      secrets: () => self.machine.secretBlobs(),
+      setSecret: (k, blob) => self.machine.setSecretBlob(k, blob),
+      candidatesPath: join(dirname(self.configFile), 'local-models.json'),
+      busy: (id) => self.chats.usesLocal(id),
+      changed: () => self.emit({ type: 'local' })
+    })
     this.chats = new Chats({
       hive: () => self.hive,
       runner: () => self.runner,
       stripApiKeys: () => self.config.stripApiKeys,
       catalog: () => self.catalog(),
+      localModels: () => self.local.models(),
+      localTurn: (m, t) => self.local.turn(m, t),
       cliModels: () =>
         self.machine
           .modelAgents()
@@ -1407,6 +1425,35 @@ export class Engine {
   /** v0.6.1: where the AI runs and time of a job went, by stage. */
   taskCost(taskId: string): TaskCost {
     return taskCost(this.hive.listTasks(), taskId, this.hive.listAptitude())
+  }
+
+  // ---- v6 8-2: models that run on this PC ----
+  localStatus(): Promise<LocalStatus> {
+    return this.local.status()
+  }
+  localAdd(o: { name?: string; url: string; token?: string }): Promise<LocalEndpoint> {
+    return this.local.add(o)
+  }
+  localRemove(id: string): void {
+    this.local.remove(id)
+  }
+  localRefresh(id?: string): Promise<void> {
+    return this.local.refresh(id)
+  }
+  localSpeed(endpointId: string, model: string): Promise<LocalJob> {
+    return this.local.speed(endpointId, model)
+  }
+  localBench(endpointId: string, model: string): Promise<LocalJob> {
+    return this.local.bench(endpointId, model)
+  }
+  localPull(endpointId: string, name: string): Promise<LocalJob> {
+    return this.local.pull(endpointId, name)
+  }
+  localDeleteModel(endpointId: string, name: string): Promise<void> {
+    return this.local.deleteModel(endpointId, name)
+  }
+  localStop(jobId: string): void {
+    this.local.stopJob(jobId)
   }
 
   // ---- v6 챗: conversations with a model the person picks (no file is ever changed) ----
