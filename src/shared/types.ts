@@ -718,8 +718,10 @@ export interface HandoffSettings {
   waitMinutes: number
   /** Put the step that was in progress back to how it was when it started (git folders; default on). */
   rollbackStep: boolean
-  /** A1: a model on this PC may take over when a connection ran out of usage and the task is easy enough (default on). */
+  /** A1 (older): a model on this PC may take over when a connection ran out of usage. Read as `localScope`: false = off, otherwise easy (see `localScopeOf`). */
   allowLocal?: boolean
+  /** A2: where a model on this PC may be used. `off` = never, `easy` = easy work (default), `limit-only` = only when a usage limit stops everyone else. */
+  localScope?: 'off' | 'easy' | 'limit-only'
 }
 
 /** One check the app ran in the work folder (no AI, no tokens). */
@@ -764,7 +766,7 @@ export interface ReviewSettings {
 
 export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2, bundle: 'once' }
 
-export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true, allowLocal: true }
+export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
 
 export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
 
