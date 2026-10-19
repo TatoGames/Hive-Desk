@@ -92,6 +92,9 @@ import { readPage, type FetchFn } from './webread'
 import { isElectronApp, runChecks } from './checks'
 import { Chats, type ChatModelInfo } from './chat'
 import { LocalAi, type LocalJob, type LocalStatus } from './local'
+import { OllamaEngine, type EngineManifest, type EngineStatus } from './ollamaEngine'
+import ENGINE_MANIFEST from '../shared/ollama-engine.default.json'
+import { defaultHomeDir } from './paths'
 import type { LocalEndpoint } from '../shared/localai'
 import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
 import { presetById } from '../shared/presets'
@@ -149,6 +152,9 @@ export class Engine {
   private liveRuns = new Map<string, LiveRun>()
   readonly chats!: Chats
   readonly local!: LocalAi
+  readonly ollama!: OllamaEngine
+  /** The HiveDesk folder (one-folder mode's folder, else ~/HiveDesk); set by the main process. */
+  hiveHome?: string
   private chatsRecovered = new Set<string>()
   /** How often the work folder is inspected while a task runs (ms); tests lower it. */
   watchMs = 3000
@@ -249,6 +255,12 @@ export class Engine {
       candidatesPath: join(dirname(self.configFile), 'local-models.json'),
       busy: (id) => self.chats.usesLocal(id),
       changed: () => self.emit({ type: 'local' })
+    })
+    this.ollama = new OllamaEngine({
+      homeDir: () => self.hiveHome ?? defaultHomeDir(self.home),
+      manifest: ENGINE_MANIFEST as unknown as EngineManifest,
+      changed: () => self.emit({ type: 'local' }),
+      connect: (url) => self.local.ensure('HiveDesk Ollama', url)
     })
     this.chats = new Chats({
       hive: () => self.hive,
@@ -1428,6 +1440,24 @@ export class Engine {
   }
 
   // ---- v6 8-2: models that run on this PC ----
+  localEngineStatus(): Promise<EngineStatus> {
+    return this.ollama.status()
+  }
+  localEngineInstall(): Promise<void> {
+    return this.ollama.install()
+  }
+  localEngineCancel(): void {
+    this.ollama.cancel()
+  }
+  localEngineStart(): Promise<EngineStatus> {
+    return this.ollama.start()
+  }
+  localEngineStop(): Promise<void> {
+    return this.ollama.stop()
+  }
+  localEngineRemove(): Promise<void> {
+    return this.ollama.remove()
+  }
   localStatus(): Promise<LocalStatus> {
     return this.local.status()
   }
@@ -3133,6 +3163,7 @@ export class Engine {
     if (this.syncTimer) clearInterval(this.syncTimer)
     if (this.githubTimer) clearInterval(this.githubTimer)
     this.external.shutdown()
+    this.ollama.shutdown()
     for (const ac of this.running.values()) ac.abort()
   }
 }

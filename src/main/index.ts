@@ -217,6 +217,12 @@ function registerIpc(): void {
   ipcMain.handle('local:bench', (_e, ep: string, model: string) => engine.localBench(ep, model))
   ipcMain.handle('local:pull', (_e, ep: string, name: string) => engine.localPull(ep, name))
   ipcMain.handle('local:delete-model', (_e, ep: string, name: string) => engine.localDeleteModel(ep, name))
+  ipcMain.handle('local:engine-status', () => engine.localEngineStatus())
+  ipcMain.handle('local:engine-install', () => engine.localEngineInstall())
+  ipcMain.handle('local:engine-cancel', () => engine.localEngineCancel())
+  ipcMain.handle('local:engine-start', () => engine.localEngineStart())
+  ipcMain.handle('local:engine-stop', () => engine.localEngineStop())
+  ipcMain.handle('local:engine-remove', () => engine.localEngineRemove())
   ipcMain.handle('local:stop', (_e, jobId: string) => engine.localStop(jobId))
   ipcMain.handle('chat:models', () => engine.chatModels())
   ipcMain.handle('chat:list', () => engine.chatList())
@@ -327,6 +333,7 @@ app.whenReady().then(() => {
   fixPath()
   try {
     engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+    if (bootstrap) engine.hiveHome = bootstrap.homeDir
     // tokens of external connections are kept encrypted by the operating system (Keychain / DPAPI / libsecret)
     engine.cipher = {
       available: () => safeStorage.isEncryptionAvailable(),

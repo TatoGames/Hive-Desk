@@ -28,6 +28,7 @@ import type { Chat, ChatModel, ChatSummary } from '../shared/chat'
 import type { ChatModelInfo } from '../main/chat'
 import type { LocalEndpoint } from '../shared/localai'
 import type { LocalJob, LocalStatus } from '../main/local'
+import type { EngineStatus } from '../main/ollamaEngine'
 
 const api = {
   snapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot'),
@@ -133,6 +134,12 @@ const api = {
   localBench: (endpointId: string, model: string): Promise<LocalJob> => ipcRenderer.invoke('local:bench', endpointId, model),
   localPull: (endpointId: string, name: string): Promise<LocalJob> => ipcRenderer.invoke('local:pull', endpointId, name),
   localDeleteModel: (endpointId: string, name: string): Promise<void> => ipcRenderer.invoke('local:delete-model', endpointId, name),
+  localEngineStatus: (): Promise<EngineStatus> => ipcRenderer.invoke('local:engine-status'),
+  localEngineInstall: (): Promise<void> => ipcRenderer.invoke('local:engine-install'),
+  localEngineCancel: (): Promise<void> => ipcRenderer.invoke('local:engine-cancel'),
+  localEngineStart: (): Promise<EngineStatus> => ipcRenderer.invoke('local:engine-start'),
+  localEngineStop: (): Promise<void> => ipcRenderer.invoke('local:engine-stop'),
+  localEngineRemove: (): Promise<void> => ipcRenderer.invoke('local:engine-remove'),
   localStop: (jobId: string): Promise<void> => ipcRenderer.invoke('local:stop', jobId),
   taskCost: (id: string): Promise<import('../shared/cost').TaskCost> => ipcRenderer.invoke('task:cost', id),
   folderGit: (dir: string): Promise<'ok' | 'none' | 'not-top' | 'no-commit'> => ipcRenderer.invoke('folder:git-state', dir),

@@ -3,6 +3,7 @@ import { TIER_LABEL } from '@shared/company'
 import { LICENSE_NOTICE, fitNote, fmtBytes, modelTier, type LocalModelInfo } from '@shared/localai'
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
+import OllamaEngineCard from './OllamaEngineCard'
 
 const key = (ep: string, m: string): string => `${ep}|${m}`
 
@@ -80,7 +81,9 @@ export default function LocalAi(): JSX.Element {
       <p className="muted small">
         Ollama나 LM Studio처럼 <b>이 PC(또는 같은 네트워크의 PC)에서 도는 AI</b>를 연결하면 챗에서 쓸 수 있어요. 키가 필요 없고 구독 한도도 쓰지 않아요. 대신 PC 성능만큼만 빨라요.
       </p>
-      <p className="muted small">Ollama는 따로 설치해야 해요(ollama.com).</p>
+      <p className="muted small">Ollama를 이미 설치했다면 아래에서 연결하고, 설치하지 않았다면 HiveDesk 폴더에 바로 받을 수 있어요.</p>
+
+      <OllamaEngineCard onChanged={() => void load()} />
 
       <div className="local-pc">
         <b>이 PC</b>: 메모리 {st.pc.ramGB}GB · 코어 {st.pc.cores}개
