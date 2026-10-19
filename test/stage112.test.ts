@@ -424,3 +424,20 @@ describe('8-2: the whole thing in the engine', () => {
     eng.shutdown()
   })
 })
+
+describe('J1 candidate tags and kind', () => {
+  it('reads tags and kind, drops what is not allowed, and keeps old files working', () => {
+    const f = parseCandidates({
+      models: [
+        { id: 'a:7b', paramsB: 7, kind: 'embedding', tags: ['코딩', '코딩', '설치됨', '잘 맞아요', 5, '검색용'], approxGB: 4.7 },
+        { id: 'b:3b', paramsB: 3, kind: 'weird', tags: 'x', approxGB: -1 },
+        { id: 'c:3b', paramsB: 3 }
+      ]
+    })
+    expect(f.models[0].kind).toBe('embedding')
+    expect(f.models[0].tags).toEqual(['코딩', '검색용'])
+    expect(f.models[0].approxGB).toBe(4.7)
+    expect(f.models[1]).toMatchObject({ kind: 'text', tags: [], approxGB: undefined })
+    expect(f.models[2]).toMatchObject({ kind: 'text', tags: [], approxGB: undefined })
+  })
+})

@@ -175,7 +175,12 @@ export interface LocalCandidate {
   label: string
   paramsB: number
   tier: Tier
-  approxGB: number
+  /** Download size from the model card; absent when the card was not read (never guessed). */
+  approxGB?: number
+  /** What the model is for. Hidden by default in the staff list: `embedding`, `vision`, `other`. */
+  kind: CandidateKind
+  /** Curated tags (ability, use, caution). Size, this-PC and state tags are computed by the app, never stored. */
+  tags: CandidateTag[]
   /** Where the terms are. */
   licenseName: string
   licenseUrl?: string
@@ -184,6 +189,16 @@ export interface LocalCandidate {
   note?: string
 }
 
+export type CandidateKind = 'text' | 'embedding' | 'vision' | 'other'
+export const CANDIDATE_KINDS: CandidateKind[] = ['text', 'embedding', 'vision', 'other']
+
+/** Tags kept in the data file (design J-2). Size / this-PC / state tags are computed. */
+export const ABILITY_TAGS = ['도구 호출', '생각하며 풀기', '사진 보기', '검색용'] as const
+export const USE_TAGS = ['코딩', '일반', '번역·다국어', '짧은 대화', '긴 글'] as const
+export const CAUTION_TAGS = ['라이선스 확인 전', '영어 위주', '오래된 모델'] as const
+export type CandidateTag = (typeof ABILITY_TAGS)[number] | (typeof USE_TAGS)[number] | (typeof CAUTION_TAGS)[number]
+const ALL_TAGS: readonly string[] = [...ABILITY_TAGS, ...USE_TAGS, ...CAUTION_TAGS]
+
 export interface CandidateFile {
   updatedAt: string
   models: LocalCandidate[]
@@ -191,6 +206,14 @@ export interface CandidateFile {
 
 export const LICENSE_NOTICE =
   '모델은 각 개발사가 만든 것이고, 쓸 때의 조건(라이선스)이 모델마다 달라요. 이 앱은 모델을 대신 허락해 주지 않아요. 내려받기 전에 아래 링크의 조건을 직접 읽어 보세요. "확인 전" 표시가 있는 모델은 앱이 아직 조건을 확인하지 않은 것이에요.'
+
+/** Known tags only, no duplicates; anything else (wrong type, computed tags, typos) is dropped. */
+function parseTags(raw: unknown): CandidateTag[] {
+  if (!Array.isArray(raw)) return []
+  const out: CandidateTag[] = []
+  for (const t of raw) if (typeof t === 'string' && ALL_TAGS.includes(t) && !out.includes(t as CandidateTag)) out.push(t as CandidateTag)
+  return out
+}
 
 /** Parse a candidate file; skip what is malformed, never throw. */
 export function parseCandidates(raw: unknown): CandidateFile {
@@ -204,7 +227,9 @@ export function parseCandidates(raw: unknown): CandidateFile {
         label: typeof x.label === 'string' ? x.label : x.id,
         paramsB: x.paramsB,
         tier: x.tier === 'light' || x.tier === 'top' || x.tier === 'balanced' ? x.tier : tierOfParams(x.paramsB),
-        approxGB: typeof x.approxGB === 'number' ? x.approxGB : Math.round(x.paramsB * 0.6 * 10) / 10,
+        approxGB: typeof x.approxGB === 'number' && x.approxGB > 0 ? x.approxGB : undefined,
+        kind: CANDIDATE_KINDS.includes(x.kind as CandidateKind) ? (x.kind as CandidateKind) : 'text',
+        tags: parseTags(x.tags),
         licenseName: typeof x.licenseName === 'string' ? x.licenseName : '확인 필요',
         licenseUrl: typeof x.licenseUrl === 'string' && /^https:\/\//.test(x.licenseUrl) ? x.licenseUrl : undefined,
         licenseStatus: x.licenseStatus === 'checked' ? 'checked' : 'unchecked',

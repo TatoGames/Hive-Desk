@@ -169,7 +169,7 @@ export default function LocalAi(): JSX.Element {
             const fit = fitNote({ name: c.id, paramsB: c.paramsB }, st.advice)
             return (
               <div key={c.id} className="local-cand">
-                <b>{c.label}</b> <span className="chip">{TIER_LABEL[c.tier]}</span> <span className="muted small">약 {c.approxGB}GB · {c.licenseName}</span>{' '}
+                <b>{c.label}</b> <span className="chip">{TIER_LABEL[c.tier]}</span> <span className="muted small">{c.approxGB ? `약 ${c.approxGB}GB` : '용량 미확인'} · {c.licenseName}</span>{' '}
                 {c.licenseStatus === 'unchecked' && <span className="chip warn">라이선스 확인 전</span>}
                 {c.licenseUrl && (
                   <a href={c.licenseUrl} target="_blank" rel="noreferrer" className="small">
