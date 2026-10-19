@@ -13,6 +13,12 @@ mac:
   target:
     - target: dmg
       arch: [arm64, x64]
+    # portable: the .app plus portable.flag in a zip (portable.flag at the repo root, see extraDistFiles)
+    - target: zip
+      arch: [arm64, x64]
+  # copied next to the .app, only into the zip (the dmg is built from the .app alone)
+  extraDistFiles:
+    - portable.flag
   category: public.app-category.developer-tools
   # No Developer ID yet: electron-builder's own signing is skipped and
   # build/afterPack.cjs applies an ad-hoc signature instead.
@@ -22,9 +28,13 @@ win:
   target:
     - target: nsis
       arch: [x64]
+    - target: portable
+      arch: [x64]
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+portable:
+  artifactName: HiveDesk-Portable-${version}.${ext}
 linux:
   target: [AppImage]
   category: Development

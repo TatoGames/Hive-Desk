@@ -11,11 +11,14 @@ import { checkForUpdate } from './updates'
 import { fixPath } from './shellPath'
 import { bootstrapFile, migrateToHome, readBootstrap, resolveUserData, setTempRoot, tmpDirOf, writeBootstrap } from './paths'
 import { homedir } from 'node:os'
+import { detectPortable, portableNotice } from './portable'
 import { checkCli, installCli, installCommand, installGh, openGhLogin, openLogin } from './setup'
 
 // one-folder mode: must be decided before anything reads userData (the engine, safeStorage, caches)
 const bootFile = bootstrapFile(app.getPath('appData'))
-const bootstrap = readBootstrap(bootFile)
+// portable mode comes first: it forces the one-folder layout next to the app and never touches the system app data
+const portableInfo = detectPortable({ platform: process.platform, env: process.env, execPath: process.execPath })
+const bootstrap = portableInfo.portable && portableInfo.homeDir ? { oneFolder: true, homeDir: portableInfo.homeDir } : readBootstrap(bootFile)
 const defaultUserData = app.getPath('userData')
 if (bootstrap) {
   app.setPath('userData', resolveUserData(bootstrap, defaultUserData))
@@ -168,9 +171,12 @@ function registerIpc(): void {
     active: !!bootstrap,
     homeDir: bootstrap?.homeDir ?? join(homedir(), 'HiveDesk'),
     oldDataDir: defaultUserData,
-    bootstrapFile: bootFile
+    bootstrapFile: bootFile,
+    portable: portableInfo.portable,
+    portableNotice: portableInfo.portable && portableInfo.homeDir ? portableNotice(portableInfo.homeDir) : undefined
   }))
   ipcMain.handle('home:set', (_e, enabled: boolean, dir: string) => {
+    if (portableInfo.portable) return { ok: false, copied: [], skipped: [], leftBehind: '', message: '휴대용 모드에서는 바꿀 수 없어요.' }
     if (!enabled) {
       writeBootstrap(bootFile, { oneFolder: false, homeDir: bootstrap?.homeDir ?? dir })
       return { ok: true, copied: [], skipped: [], leftBehind: defaultUserData, message: '다음 실행부터 예전 위치의 설정을 써요. 한 폴더에 있는 파일은 지우지 않았어요.' }
@@ -331,6 +337,7 @@ function makeTray(): void {
 
 app.whenReady().then(() => {
   fixPath()
+  if (portableInfo.warning) dialog.showErrorBox('HiveDesk 휴대용 모드', portableInfo.warning)
   try {
     engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
     if (bootstrap) engine.hiveHome = bootstrap.homeDir

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-type Info = { active: boolean; homeDir: string; oldDataDir: string; bootstrapFile: string }
+type Info = { active: boolean; homeDir: string; oldDataDir: string; bootstrapFile: string; portable?: boolean; portableNotice?: string }
 
 /** One-folder mode: keep settings and temp files in a single HiveDesk folder. Off by default. */
 export default function HomeFolder(): JSX.Element | null {
@@ -20,6 +20,16 @@ export default function HomeFolder(): JSX.Element | null {
       .catch(() => undefined)
   }, [])
   if (!info) return null
+  if (info.portable)
+    return (
+      <section className="panel form">
+        <div className="full">{info.portableNotice ?? `휴대용 모드예요: 데이터는 ${info.homeDir}에만 있어요`}</div>
+        <label className="full toggle">
+          <input type="checkbox" checked disabled />
+          한 폴더 모드 (휴대용 모드에서는 항상 켜져 있어요)
+        </label>
+      </section>
+    )
 
   const apply = async (): Promise<void> => {
     setBusy(true)
