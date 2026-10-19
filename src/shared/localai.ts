@@ -31,7 +31,7 @@ export interface LocalModelInfo {
 
 export const DEFAULT_PORTS = [11434, 1234]
 
-/** `localhost`, `192.168.0.5:1234`, `http://x/v1/` → `http://localhost:11434` form. Undefined if it is not an address. */
+/** `localhost`, `192.168.0.5:1234`, `http://x/v1/` → `http://127.0.0.1:11434` form. Undefined if it is not an address. */
 export function normalizeUrl(input: string): string | undefined {
   let s = input.trim()
   if (!s) return undefined
@@ -48,6 +48,8 @@ export function normalizeUrl(input: string): string | undefined {
     // a bare host: Ollama's port is the usual one
     u.port = String(DEFAULT_PORTS[0])
   }
+  // `localhost` can resolve to the IPv6 address first, while Ollama and LM Studio listen on IPv4 only
+  if (u.hostname === 'localhost') u.hostname = '127.0.0.1'
   const path = u.pathname.replace(/\/+$/, '').replace(/\/v1$/, '')
   return `${u.protocol}//${u.host}${path}`
 }

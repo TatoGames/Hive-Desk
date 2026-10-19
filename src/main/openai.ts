@@ -38,7 +38,7 @@ function withTimeout(ms: number, outer?: AbortSignal): { signal: AbortSignal; do
 export function explainFetchError(e: unknown, url: string): string {
   const err = e as { name?: string; message?: string; cause?: { code?: string } }
   const code = err.cause?.code
-  if (code === 'ECONNREFUSED') return `${url}에 연결할 수 없어요. 엔진(Ollama·LM Studio)이 켜져 있는지 확인해 주세요.`
+  if (code === 'ECONNREFUSED') return `${url}에 연결할 수 없어요. 엔진이 켜져 있는지 확인해 주세요. Ollama는 앱이 켜져 있으면 되고, LM Studio는 Developer 탭에서 서버를 시작해야 해요(Start Server, 포트 1234).`
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `${url} 주소를 찾을 수 없어요.`
   if (code === 'ETIMEDOUT' || code === 'EHOSTUNREACH') return `${url}에서 답이 없어요. 같은 네트워크인지, 방화벽이 막고 있지 않은지 확인해 주세요.`
   if (err.name === 'AbortError' || err.name === 'TimeoutError') return err.message && !/aborted/i.test(err.message) ? err.message : '중지했어요.'
