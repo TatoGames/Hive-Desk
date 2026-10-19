@@ -246,3 +246,82 @@ export interface LocalStore {
   speed?: Record<string, SpeedResult & { at: string }>
   bench?: Record<string, BenchSummary>
 }
+
+// ---- J3: tags the app computes, filters, sorting ----
+
+export type PcFit = '잘 맞아요' | '빠듯해요' | '이 PC엔 무거워요'
+
+/** Size relative to what the PC holds (maxParamsB): up to 80% is comfortable, up to 115% is tight (same 1.15 as `fitNote`). */
+export const PC_FIT_GOOD_RATIO = 0.8
+export const PC_FIT_TIGHT_RATIO = 1.15
+/** 4-bit weights take about 0.6 GB per billion parameters (see `recommendTier`); used to read a download size as parameters. */
+const GB_PER_B = 0.6
+
+/** The `이 PC` tag. Compares the bigger of the parameter count and the size on disk with what this PC holds. Undefined until the PC is known. */
+export function pcFit(c: Pick<LocalCandidate, 'paramsB' | 'approxGB'>, advice: TierAdvice | undefined): PcFit | undefined {
+  if (!advice) return undefined
+  const effectiveB = Math.max(c.paramsB, c.approxGB ? c.approxGB / GB_PER_B : 0)
+  if (advice.maxParamsB <= 0) return '이 PC엔 무거워요'
+  const ratio = effectiveB / advice.maxParamsB
+  if (ratio <= PC_FIT_GOOD_RATIO) return '잘 맞아요'
+  if (ratio <= PC_FIT_TIGHT_RATIO) return '빠듯해요'
+  return '이 PC엔 무거워요'
+}
+
+/** The size tag, by size on disk when known (~4GB / ~10GB), else by the tier already in the file. */
+export function sizeTag(c: Pick<LocalCandidate, 'approxGB' | 'tier'>): '경량' | '균형' | '상위' {
+  if (c.approxGB) return c.approxGB <= 4 ? '경량' : c.approxGB <= 10 ? '균형' : '상위'
+  return c.tier === 'light' ? '경량' : c.tier === 'balanced' ? '균형' : '상위'
+}
+
+/** Passing the app's own 10-edit test with 7 or more: most edits right, a bar to be settled by experience (design J-2). */
+export const RECOMMEND_MIN_PASSED = 7
+
+/**
+ * `recommended` only when this PC fits it, it is for coding or general work, and the real test passed.
+ * `candidate` = the same without a test yet (shown as "추천 후보", not as a recommendation). Failed test = neither.
+ */
+export function recommendState(c: Pick<LocalCandidate, 'paramsB' | 'approxGB' | 'tags' | 'kind'>, advice: TierAdvice | undefined, bench: Pick<BenchSummary, 'passed' | 'total'> | undefined): 'recommended' | 'candidate' | undefined {
+  if (c.kind !== 'text' || pcFit(c, advice) !== '잘 맞아요') return undefined
+  if (!c.tags.includes('코딩') && !c.tags.includes('일반')) return undefined
+  if (!bench) return 'candidate'
+  const need = bench.total ? Math.ceil((RECOMMEND_MIN_PASSED / 10) * bench.total) : Infinity
+  return bench.passed >= need ? 'recommended' : undefined
+}
+
+/** Hidden in the staff list unless asked: search-only and picture-only models. */
+export const isStaffKind = (c: Pick<LocalCandidate, 'kind' | 'tags'>): boolean => c.kind === 'text' && !c.tags.includes('검색용')
+
+/** Without tool calling a model is only used for the "easy work" range (the app leads the edit). */
+export const needsEasyOnly = (c: Pick<LocalCandidate, 'tags'>): boolean => !c.tags.includes('도구 호출')
+
+export const CANDIDATE_FILTERS = ['코딩', '이 PC에 맞음', '설치됨', '도구 호출'] as const
+export type CandidateFilter = (typeof CANDIDATE_FILTERS)[number]
+export type CandidateSort = 'recommend' | 'size'
+
+export interface CandidateView {
+  c: LocalCandidate
+  installed: boolean
+  fit?: PcFit
+  rec?: 'recommended' | 'candidate'
+}
+
+/** Every chosen filter must hold (AND). */
+export function filterCandidates(items: CandidateView[], filters: CandidateFilter[], showAllKinds = false): CandidateView[] {
+  return items.filter((v) => {
+    if (!showAllKinds && !isStaffKind(v.c)) return false
+    return filters.every((f) => (f === '코딩' ? v.c.tags.includes('코딩') : f === '이 PC에 맞음' ? v.fit === '잘 맞아요' : f === '설치됨' ? v.installed : v.c.tags.includes('도구 호출')))
+  })
+}
+
+const FIT_RANK: Record<string, number> = { 잘: 0, 빠: 1, 이: 2 }
+const sizeOf = (c: LocalCandidate): number => c.approxGB ?? Math.round(c.paramsB * GB_PER_B * 10) / 10
+
+/** `recommend`: recommended, then candidates, then by fit; ties keep the file's order. `size`: smallest first. Stable. */
+export function sortCandidates(items: CandidateView[], by: CandidateSort): CandidateView[] {
+  const rank = (v: CandidateView): number => (v.rec === 'recommended' ? 0 : v.rec === 'candidate' ? 1 : 2 + (v.fit ? FIT_RANK[v.fit[0]] : 3))
+  return items
+    .map((v, i) => ({ v, i }))
+    .sort((a, b) => (by === 'size' ? sizeOf(a.v.c) - sizeOf(b.v.c) : rank(a.v) - rank(b.v)) || a.i - b.i)
+    .map((x) => x.v)
+}

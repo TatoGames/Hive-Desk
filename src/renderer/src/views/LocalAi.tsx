@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { TIER_LABEL } from '@shared/company'
-import { LICENSE_NOTICE, fitNote, fmtBytes, modelTier, type LocalModelInfo } from '@shared/localai'
+import { CANDIDATE_FILTERS, LICENSE_NOTICE, filterCandidates, fitNote, fmtBytes, modelTier, needsEasyOnly, pcFit, recommendState, sizeTag, sortCandidates, type CandidateFilter, type CandidateSort, type CandidateView, type LocalModelInfo } from '@shared/localai'
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
 import OllamaEngineCard from './OllamaEngineCard'
@@ -17,6 +17,9 @@ export default function LocalAi(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [custom, setCustom] = useState('')
   const [agreed, setAgreed] = useState<Record<string, boolean>>({})
+  const [filters, setFilters] = useState<CandidateFilter[]>([])
+  const [sort, setSort] = useState<CandidateSort>('recommend')
+  const [showAllKinds, setShowAllKinds] = useState(false)
 
   const load = useCallback(async () => setSt(await window.hive.localStatus()), [])
   useEffect(() => {
@@ -71,6 +74,15 @@ export default function LocalAi(): JSX.Element {
   if (!st) return <div className="panel muted small">내 PC AI를 확인하는 중…</div>
   const installedAll = new Set(st.endpoints.flatMap((e) => (e.state?.models ?? []).map((m) => key(e.id, m.name))))
   const ollamaEp = st.endpoints.find((e) => (e.state?.kind ?? e.kind) === 'ollama' && e.state?.ok)
+  const views: CandidateView[] = ollamaEp
+    ? st.candidates.models.map((c) => ({
+        c,
+        installed: installedAll.has(key(ollamaEp.id, c.id)),
+        fit: pcFit(c, st.advice),
+        rec: recommendState(c, st.advice, st.bench[key(ollamaEp.id, c.id)])
+      }))
+    : []
+  const shown = sortCandidates(filterCandidates(views, filters, showAllKinds), sort)
   const running = st.jobs.filter((j) => j.state === 'running')
 
   return (
@@ -163,36 +175,65 @@ export default function LocalAi(): JSX.Element {
         </summary>
         {!ollamaEp && <div className="muted small">Ollama를 연결하면 여기서 모델을 내려받을 수 있어요. (LM Studio는 그 프로그램에서 설치해 주세요.)</div>}
         <div className="muted small license-note">{LICENSE_NOTICE}</div>
-        {ollamaEp &&
-          st.candidates.models.map((c) => {
-            const have = installedAll.has(key(ollamaEp.id, c.id))
-            const fit = fitNote({ name: c.id, paramsB: c.paramsB }, st.advice)
-            return (
-              <div key={c.id} className="local-cand">
-                <b>{c.label}</b> <span className="chip">{TIER_LABEL[c.tier]}</span> <span className="muted small">{c.approxGB ? `약 ${c.approxGB}GB` : '용량 미확인'} · {c.licenseName}</span>{' '}
-                {c.licenseStatus === 'unchecked' && <span className="chip warn">라이선스 확인 전</span>}
-                {c.licenseUrl && (
-                  <a href={c.licenseUrl} target="_blank" rel="noreferrer" className="small">
-                    조건 보기
-                  </a>
-                )}
-                {c.note && <div className="muted small">{c.note}</div>}
-                {fit && <div className="warn-text small">{fit}</div>}
-                {have ? (
-                  <span className="muted small">설치됨</span>
-                ) : (
-                  <>
-                    <label className="small">
-                      <input type="checkbox" checked={!!agreed[c.id]} onChange={(e) => setAgreed({ ...agreed, [c.id]: e.target.checked })} /> 조건을 직접 확인했어요
-                    </label>{' '}
-                    <button className="sm primary" disabled={!agreed[c.id]} onClick={() => job(() => window.hive.localPull(ollamaEp.id, c.id))}>
-                      설치
-                    </button>
-                  </>
-                )}
-              </div>
-            )
-          })}
+        {ollamaEp && (
+          <div className="local-filters small">
+            {CANDIDATE_FILTERS.map((f) => (
+              <button key={f} className={'chip' + (filters.includes(f) ? ' on' : '')} aria-pressed={filters.includes(f)} onClick={() => setFilters(filters.includes(f) ? filters.filter((x) => x !== f) : [...filters, f])}>
+                {f}
+              </button>
+            ))}{' '}
+            <label>
+              정렬{' '}
+              <select value={sort} onChange={(e) => setSort(e.target.value as CandidateSort)}>
+                <option value="recommend">추천순</option>
+                <option value="size">크기순</option>
+              </select>
+            </label>{' '}
+            <label>
+              <input type="checkbox" checked={showAllKinds} onChange={(e) => setShowAllKinds(e.target.checked)} /> 검색용·사진 전용도 보기
+            </label>
+            <div className="muted">&quot;추천&quot;은 이 PC에서 잘 맞고 실측을 통과한 모델에만 붙어요. 실측 전에는 &quot;추천 후보&quot;로만 보여요.</div>
+            {!shown.length && <div className="muted">조건에 맞는 모델이 없어요. 필터를 줄여 보세요.</div>}
+          </div>
+        )}
+        {shown.map(({ c, installed: have, fit, rec }) => {
+          const note = fitNote({ name: c.id, paramsB: c.paramsB }, st.advice)
+          return (
+            <div key={c.id} className="local-cand">
+              <b>{c.label}</b> <span className="chip">{TIER_LABEL[c.tier]}</span> <span className="muted small">{c.approxGB ? `약 ${c.approxGB}GB` : '용량 미확인'} · {c.licenseName}</span>{' '}
+              <span className="local-tags">
+                <span className="chip">{sizeTag(c)}</span>
+                {fit && <span className={'chip ' + (fit === '잘 맞아요' ? 'ok' : 'warn')}>{fit}</span>}
+                {rec === 'recommended' && <span className="chip ok">추천</span>}
+                {rec === 'candidate' && <span className="chip">추천 후보</span>}
+                {have && <span className="chip">설치됨</span>}
+                {c.tags.map((t) => (
+                  <span key={t} className={'chip' + (t === '라이선스 확인 전' ? ' warn' : '')}>
+                    {t}
+                  </span>
+                ))}
+              </span>{' '}
+              {c.licenseUrl && (
+                <a href={c.licenseUrl} target="_blank" rel="noreferrer" className="small">
+                  조건 보기
+                </a>
+              )}
+              {c.note && <div className="muted small">{c.note}</div>}
+              {needsEasyOnly(c) && <div className="muted small">쉬운 일만 범위에서만 직원으로 쓸 수 있어요</div>}
+              {note && <div className="warn-text small">{note}</div>}
+              {!have && (
+                <>
+                  <label className="small">
+                    <input type="checkbox" checked={!!agreed[c.id]} onChange={(e) => setAgreed({ ...agreed, [c.id]: e.target.checked })} /> 조건을 직접 확인했어요
+                  </label>{' '}
+                  <button className="sm primary" disabled={!agreed[c.id]} onClick={() => job(() => window.hive.localPull(ollamaEp!.id, c.id))}>
+                    설치
+                  </button>
+                </>
+              )}
+            </div>
+          )
+        })}
         {ollamaEp && (
           <div className="row">
             <input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="다른 모델 이름 (예: gemma2:9b)" />
