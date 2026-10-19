@@ -1,0 +1,32 @@
+{
+  "_about": "HiveDesk 폴더에 받는 Ollama 실행 파일의 내려받기 정보예요. 코드가 아니라 데이터라서, 값을 고치면 앱 코드는 그대로예요. url·sha256·format·exe 중 하나라도 비어 있거나 모양이 틀리면 앱은 설치를 거부해요(미확인).",
+  "version": "0.40.6",
+  "verifiedAt": "2026-10-19",
+  "source": "https://github.com/ollama/ollama/releases/tag/v0.40.6",
+  "platforms": {
+    "darwin-arm64": {
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.6/ollama-darwin.tgz",
+      "sha256": "b2b55434865a668decb494110d7fd970eed3ecc8837be2872f672ccbb95df974",
+      "format": "tgz",
+      "exe": "ollama",
+      "sizeBytes": 174459907,
+      "verification": "내려받아 sha256을 직접 계산했고 릴리스의 sha256sum.txt와 같음. 압축 안에 ollama(유니버설: x86_64+arm64)와 dylib이 최상위에 평평하게 들어 있음"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.6/ollama-darwin.tgz",
+      "sha256": "b2b55434865a668decb494110d7fd970eed3ecc8837be2872f672ccbb95df974",
+      "format": "tgz",
+      "exe": "ollama",
+      "sizeBytes": 174459907,
+      "verification": "darwin-arm64와 같은 파일(유니버설 바이너리)"
+    },
+    "win32-x64": {
+      "url": "https://github.com/ollama/ollama/releases/download/v0.40.6/ollama-windows-amd64.zip",
+      "sha256": "e359637575302f288d76c0007c408a4be9c7376d59c4f28684d63b232a44b427",
+      "format": "zip",
+      "exe": "ollama.exe",
+      "sizeBytes": 1471164488,
+      "verification": "릴리스 페이지의 digest와 sha256sum.txt가 같음(전체를 내려받아 계산하지는 않음). zip 끝의 목록을 직접 읽어 ollama.exe가 최상위, lib/ollama/ 아래에 GPU 라이브러리(cuda_v12 등)가 있는 것을 확인함"
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { TIER_LABEL } from '@shared/company'
 import { LICENSE_NOTICE, fitNote, fmtBytes, modelTier, type LocalModelInfo } from '@shared/localai'
 import type { LocalStatus, LocalJob } from '../../../main/local'
 import { ConfirmButton } from './Materials'
+import OllamaEngineCard from './OllamaEngineCard'
 
 const key = (ep: string, m: string): string => `${ep}|${m}`
 
@@ -80,6 +81,9 @@ export default function LocalAi(): JSX.Element {
       <p className="muted small">
         Ollama나 LM Studio처럼 <b>이 PC(또는 같은 네트워크의 PC)에서 도는 AI</b>를 연결하면 챗에서 쓸 수 있어요. 키가 필요 없고 구독 한도도 쓰지 않아요. 대신 PC 성능만큼만 빨라요.
       </p>
+      <p className="muted small">Ollama를 이미 설치했다면 아래에서 연결하고, 설치하지 않았다면 HiveDesk 폴더에 바로 받을 수 있어요.</p>
+
+      <OllamaEngineCard onChanged={() => void load()} />
 
       <div className="local-pc">
         <b>이 PC</b>: 메모리 {st.pc.ramGB}GB · 코어 {st.pc.cores}개
@@ -98,10 +102,10 @@ export default function LocalAi(): JSX.Element {
         <button className="primary" disabled={busy || !url.trim()} onClick={() => add(url)}>
           연결
         </button>
-        <button className="sm" disabled={busy} onClick={() => add('localhost:11434')}>
+        <button className="sm primary" disabled={busy} onClick={() => add('localhost:11434')}>
           Ollama
         </button>
-        <button className="sm" disabled={busy} onClick={() => add('localhost:1234')}>
+        <button className="sm ghost" disabled={busy} onClick={() => add('localhost:1234')}>
           LM Studio
         </button>
         <button className="sm ghost" onClick={() => setShowToken((v) => !v)}>
@@ -226,6 +230,7 @@ function ModelRow({
   const sp = st.speed[k]
   const bn = st.bench[k]
   const fit = fitNote(m, st.advice)
+  const [open, setOpen] = useState(false)
   return (
     <div className="local-model">
       <b>{m.name}</b> <span className="chip">{TIER_LABEL[modelTier(m)]}</span>{' '}
@@ -240,6 +245,21 @@ function ModelRow({
           {' '}
           · 실측 {bn.passed}/{bn.total}개 통과 (중간 {(bn.medianMs / 1000).toFixed(0)}초)
         </span>
+      )}
+      {bn && (
+        <button className="sm ghost" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? '결과 접기' : '결과 보기'}
+        </button>
+      )}
+      {bn && open && (
+        <ul className="bench-rows small">
+          {bn.rows.map((r) => (
+            <li key={r.id} className={r.ok ? 'muted' : 'warn-text'}>
+              {r.ok ? '통과' : '실패'} · {r.title} ({(r.ms / 1000).toFixed(0)}초)
+              {!r.ok && r.reason ? ` — ${r.reason}` : ''}
+            </li>
+          ))}
+        </ul>
       )}
       {fit && <div className="warn-text small">{fit}</div>}
       <div className="row">

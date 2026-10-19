@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AutoApprove, HandoffSettings, HumanReview, ReviewSettings, Snapshot, SyncResult } from '@shared/types'
 import { DEFAULT_AUTO_APPROVE, DEFAULT_HANDOFF, DEFAULT_REVIEW } from '@shared/types'
+import HomeFolder from './HomeFolder'
 import { Glossary, resetHints } from './Help'
 
 export default function Settings({
@@ -24,6 +25,7 @@ export default function Settings({
   const [worktrees, setWorktrees] = useState(firstRun ? true : !!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
   const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
+  const [collect, setCollect] = useState(!!c.collectExamples)
   const [snapOn, setSnapOn] = useState(c.projectSnapshot !== false)
   const [rv, setRv] = useState<ReviewSettings>({ ...DEFAULT_REVIEW, ...(c.review ?? {}) })
   const [samples, setSamples] = useState<{ at: string; adapter: string; text: string }[]>([])
@@ -57,6 +59,7 @@ export default function Settings({
       handoff: hand,
       review: rv,
       projectSnapshot: snapOn,
+      collectExamples: collect,
       staleBundleHours: Math.max(0, stale),
       approvalTimeoutHours: Math.max(0, timeout),
       discordWebhook: discord.trim() || undefined,
@@ -90,6 +93,7 @@ export default function Settings({
         </p>
       )}
 
+      {!firstRun && <HomeFolder />}
       <section className="panel form">
         <label>
           내 이름 (팀원에게 보이는 이름, 에이전트 ID에 들어가요)
@@ -199,6 +203,21 @@ export default function Settings({
             <input type="checkbox" checked={snapOn} onChange={(e) => setSnapOn(e.target.checked)} />
             직원이 일을 시작할 때 프로젝트 요약(폴더 구조·실행 스크립트·README·최근 끝낸 일)을 앱이 먼저 보여 줘요 — 매번 폴더를 훑는 토큰을 아껴요
           </label>
+          <label className="toggle">
+            <input type="checkbox" checked={collect} onChange={(e) => setCollect(e.target.checked)} />
+            내 PC AI가 한 일을 예시로 모아 둬요 (기본은 꺼짐)
+          </label>
+          <div className="muted small">
+            켜면 내 PC AI 직원이 한 일마다 &quot;요청, 준 파일, 받은 수정본, 검사 결과, 시도 횟수, 사람이 승인했는지&quot;를 회사 폴더의 .local/examples/날짜.jsonl에 한 줄씩 저장해요. 비밀번호·키처럼 보이는 글자는 ***로 바꿔서 저장하고, 이 컴퓨터 밖으로는 보내지 않아요. 나중에 모델을 더 잘 쓰게 다듬을 때 쓸 준비일 뿐, 지금은 학습하지 않아요.
+            {snap.companyRoot && (
+              <>
+                {' '}
+                <button className="sm ghost" onClick={() => void window.hive.openPath(snap.companyRoot.replace(/[\\/]+$/, '') + (snap.companyRoot.includes('\\') ? '\\.local\\examples' : '/.local/examples'))}>
+                  예시 폴더 열기
+                </button>
+              </>
+            )}
+          </div>
           <label>
             AI 검토
             <select value={rv.policy} onChange={(e) => setRv({ ...rv, policy: e.target.value as ReviewSettings['policy'] })}>

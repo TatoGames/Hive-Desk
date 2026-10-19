@@ -22,7 +22,7 @@ import type { ChatModel } from '../shared/chat'
 import { runBench } from './bench'
 import type { ChatModelInfo, LocalTurn } from './chat'
 import type { Cipher } from './external'
-import { chatStream, ollamaDelete, ollamaPull, probe, speedTest, type Conn, type FetchFn, type PullProgress } from './openai'
+import { chatStream, ollamaDelete, ollamaPull, probe, speedTest, type ChatMsg, type Conn, type FetchFn, type PullProgress } from './openai'
 import { diagnosePc, type Exec } from './pcinfo'
 
 export interface LocalCtx {
@@ -123,6 +123,25 @@ export class LocalAi {
     return e
   }
 
+  /** Keep one connection with this name pointing at `url` (the app's own engine): update it when the port changed, never duplicate. */
+  async ensure(name: string, url: string): Promise<LocalEndpoint> {
+    const u = normalizeUrl(url)
+    if (!u) throw new Error('주소를 알아볼 수 없어요.')
+    const byName = this.endpoints().find((e) => e.name === name)
+    if (byName) {
+      if (byName.url !== u) {
+        const next = { ...byName, url: u, kind: 'ollama' as const }
+        this.c.saveStore({ ...this.c.store(), endpoints: this.endpoints().map((e) => (e.id === byName.id ? next : e)) })
+        this.states.delete(byName.id)
+      }
+      await this.refresh(byName.id)
+      return this.endpoints().find((e) => e.id === byName.id)!
+    }
+    const same = this.endpoints().find((e) => e.url === u)
+    if (same) return same
+    return this.add({ name, url: u })
+  }
+
   remove(id: string): void {
     const j = [...this.jobs.values()].find((x) => x.job.endpointId === id && x.job.state === 'running')
     if (j) throw new Error('이 연결에서 내려받기·측정이 도는 중이에요. 먼저 중지해 주세요.')
@@ -192,6 +211,12 @@ export class LocalAi {
 
   async turn(m: Extract<ChatModel, { kind: 'local' }>, t: LocalTurn): Promise<{ text: string }> {
     const r = await chatStream(this.conn(m.endpointId), m.model, [{ role: 'user', content: t.prompt }], { signal: t.signal, onText: t.onText, idleMs: 300_000 })
+    return { text: r.text }
+  }
+
+  /** One answer for a task (the app leads the edit, see localWorker.ts). */
+  async complete(m: { endpointId: string; model: string }, messages: ChatMsg[], o: { signal: AbortSignal; idleMs: number }): Promise<{ text: string }> {
+    const r = await chatStream(this.conn(m.endpointId), m.model, messages, { signal: o.signal, idleMs: o.idleMs, temperature: 0, maxTokens: 8192 })
     return { text: r.text }
   }
 

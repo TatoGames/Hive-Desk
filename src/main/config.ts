@@ -56,7 +56,7 @@ export function makeAgent(
     adapter: input.adapter,
     role: input.role ?? '',
     workDir: input.workDir ?? '',
-    model: input.model || undefined,
+    model: input.localModel?.model || input.model || undefined,
     extraArgs: input.extraArgs ?? defaultExtraArgs(input.adapter),
     command: input.command,
     dailyRunLimit: input.dailyRunLimit ?? 20,
@@ -67,6 +67,7 @@ export function makeAgent(
     ...(input.unitId ? { unitId: input.unitId } : {}),
     ...(input.job ? { job: input.job } : {}),
     ...(input.modelRef ? { modelRef: input.modelRef } : {}),
-    ...(input.permission ? { permission: input.permission } : {})
+    ...(input.permission ? { permission: input.permission } : {}),
+    ...(input.localModel ? { localModel: { endpointId: input.localModel.endpointId, model: input.localModel.model } } : {})
   }
 }

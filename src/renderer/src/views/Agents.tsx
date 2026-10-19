@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AdapterId, AdapterInfo, Agent, Snapshot } from '@shared/types'
+import type { BenchSummary } from '@shared/bench'
+import type { ChatModelInfo } from '../../../main/chat'
 import { JOBS, TIER_LABEL, modelLabel } from '@shared/company'
 import { fmtTime } from '../store'
 import { ConfirmButton } from './Materials'
@@ -87,7 +89,8 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
               <div key={a.id} className="agent">
                 <div>
                   <div className="title">
-                    {a.name} <span className="tag">{ADAPTER_LABEL[a.adapter] ?? '알 수 없는 AI (' + a.adapter + ')'}</span>
+                    {a.name}{' '}
+                    <span className="tag">{a.localModel ? `내 PC AI · ${a.localModel.model}` : (ADAPTER_LABEL[a.adapter] ?? '알 수 없는 AI (' + a.adapter + ')')}</span>
                     {a.requireApproval && <span className="tag warn">항상 승인</span>}
                   </div>
                   <div className="muted small">{a.role || '역할 미지정'}</div>
@@ -99,9 +102,11 @@ export default function Agents({ snap, goBoard }: { snap: Snapshot; goBoard: () 
                   <Meter label="오늘 시간" value={mins} max={a.dailyMinuteLimit} unit="분" />
                 </div>
                 <div className="row">
-                  <button className="sm" onClick={() => void test(a)}>
-                    테스트
-                  </button>
+                  {!a.localModel && (
+                    <button className="sm" onClick={() => void test(a)}>
+                      테스트
+                    </button>
+                  )}
                   <button className="sm" onClick={() => setDraft({ ...a, model: a.model ?? '' })}>
                     수정
                   </button>
@@ -170,12 +175,25 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
   const [d, setD] = useState<Draft>(draft)
   const [err, setErr] = useState('')
   const set = <K extends keyof Draft>(k: K, v: Draft[K]): void => setD((x) => ({ ...x, [k]: v }))
+  // v6 4단계: "내 PC AI" — a model of this PC does small edits; the app leads it (no CLI, no usage limit)
+  const [local, setLocal] = useState(!!draft.localModel)
+  const [models, setModels] = useState<ChatModelInfo[] | null>(null)
+  const [bench, setBench] = useState<Record<string, BenchSummary>>({})
+  useEffect(() => {
+    void Promise.all([window.hive.chatModels(), window.hive.localStatus()]).then(([m, st]) => {
+      setModels(m.filter((x) => x.where === 'local'))
+      setBench(st.bench ?? {})
+    })
+  }, [])
+  const picked = models?.find((m) => m.model.kind === 'local' && d.localModel && m.model.endpointId === d.localModel.endpointId && m.model.model === d.localModel.model)
+  const pickedBench = d.localModel ? bench[`${d.localModel.endpointId}|${d.localModel.model}`] : undefined
   const num = (v: string): number => Math.max(0, Number(v) || 0)
 
   const save = async (): Promise<void> => {
     if (!d.name.trim()) return setErr('이름을 입력하세요.')
-    if (d.adapter === 'custom' && !d.command?.trim()) return setErr('실행할 명령을 입력하세요.')
-    await window.hive.saveAgent({ ...d, model: d.modelRef ? undefined : d.model?.trim() || undefined })
+    if (local && !d.localModel) return setErr('쓸 내 PC AI 모델을 골라 주세요.')
+    if (!local && d.adapter === 'custom' && !d.command?.trim()) return setErr('실행할 명령을 입력하세요.')
+    await window.hive.saveAgent({ ...d, localModel: local ? d.localModel : undefined, model: d.modelRef ? undefined : d.model?.trim() || undefined })
     onClose()
   }
 
@@ -191,10 +209,16 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
           <label>
             사용할 AI
             <select
-              value={d.adapter}
+              value={local ? 'local' : d.adapter}
               onChange={(e) => {
+                if (e.target.value === 'local') {
+                  setLocal(true)
+                  setD((x) => ({ ...x, adapter: 'custom', extraArgs: '', modelRef: undefined, model: '', command: '' }))
+                  return
+                }
+                setLocal(false)
                 const a = e.target.value as AdapterId
-                setD((x) => ({ ...x, adapter: a, extraArgs: DEFAULT_ARGS[a], modelRef: undefined, model: '' }))
+                setD((x) => ({ ...x, adapter: a, extraArgs: DEFAULT_ARGS[a], modelRef: undefined, model: '', localModel: undefined }))
               }}
             >
               {(Object.keys(ADAPTER_LABEL) as AdapterId[]).map((k) => (
@@ -202,8 +226,43 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
                   {ADAPTER_LABEL[k]}
                 </option>
               ))}
+              <option value="local">내 PC AI (이 컴퓨터의 모델)</option>
             </select>
           </label>
+          {local && (
+            <div className="full local-pick">
+              <label>
+                내 PC AI 모델
+                <select
+                  value={d.localModel ? `${d.localModel.endpointId}|${d.localModel.model}` : ''}
+                  onChange={(e) => {
+                    const i = e.target.value.indexOf('|')
+                    set('localModel', i < 0 ? undefined : { endpointId: e.target.value.slice(0, i), model: e.target.value.slice(i + 1) })
+                  }}
+                >
+                  <option value="">{models === null ? '불러오는 중…' : '모델을 고르세요'}</option>
+                  {(models ?? []).map((m) =>
+                    m.model.kind === 'local' ? (
+                      <option key={m.model.endpointId + m.model.model} value={`${m.model.endpointId}|${m.model.model}`}>
+                        {m.label} · {TIER_LABEL[m.tier]}
+                        {m.ok ? '' : ' (연결 안 됨)'}
+                      </option>
+                    ) : null
+                  )}
+                </select>
+              </label>
+              {models !== null && !models.length && <div className="muted small">연결된 모델이 없어요. 왼쪽 메뉴의 &quot;AI 연결&quot; 화면에서 내 PC AI를 먼저 연결해 주세요.</div>}
+              {picked?.note && <div className="warn-text small">{picked.note}</div>}
+              {pickedBench && (
+                <div className="muted small">
+                  실측: 쉬운 수정 {pickedBench.total}개 중 {pickedBench.passed}개 통과
+                </div>
+              )}
+              <div className="muted small">
+                쉬운 일만 맡겨요: 파일 3개 이하·24,000자 이하의 작은 수정이고, 자동 검사로 확인돼요. 검사에 계속 실패하면 고친 내용을 되돌리고 사람에게 넘겨요. 사용량 한도는 없어요.
+              </div>
+            </div>
+          )}
           <label className="full">
             역할 (에이전트에게 매번 알려 줄 설명)
             <textarea
@@ -228,13 +287,13 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
               </button>
             </div>
           </label>
-          {d.adapter === 'custom' && (
+          {d.adapter === 'custom' && !local && (
             <label className="full">
               실행할 명령 (프롬프트는 stdin으로 전달)
               <input value={d.command} onChange={(e) => set('command', e.target.value)} placeholder="예: ollama" />
             </label>
           )}
-          {d.adapter !== 'custom' && d.adapter !== 'agy' && (
+          {!local && d.adapter !== 'custom' && d.adapter !== 'agy' && (
             <label>
               모델 (카탈로그에서 고르면 버전을 정확히 지정할 수 있어요)
               <select
@@ -259,7 +318,7 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
               </select>
             </label>
           )}
-          {d.modelRef && (
+          {!local && d.modelRef && (
             <label>
               버전
               <select
@@ -271,7 +330,7 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
               </select>
             </label>
           )}
-          {!d.modelRef && d.adapter !== 'custom' && d.adapter !== 'agy' && !!d.model && (
+          {!local && !d.modelRef && d.adapter !== 'custom' && d.adapter !== 'agy' && !!d.model && (
             <label>
               모델 이름 직접 입력
               <input value={d.model} onChange={(e) => set('model', e.target.value)} />
@@ -300,22 +359,22 @@ function AgentDialog({ draft, snap, onClose }: { draft: Draft; snap: Snapshot; o
               <option value="exec">명령 실행</option>
             </select>
           </label>
-          <label className={d.adapter === 'custom' || d.adapter === 'agy' ? 'full' : ''}>
-            {d.adapter === 'custom' ? '명령 인자' : '추가 인자'}
-            <input value={d.extraArgs} onChange={(e) => set('extraArgs', e.target.value)} />
-          </label>
-          <label>
-            하루 최대 실행 (0 = 무제한)
-            <input type="number" value={d.dailyRunLimit} onChange={(e) => set('dailyRunLimit', num(e.target.value))} />
-          </label>
-          <label>
-            하루 최대 시간(분)
-            <input
-              type="number"
-              value={d.dailyMinuteLimit}
-              onChange={(e) => set('dailyMinuteLimit', num(e.target.value))}
-            />
-          </label>
+          {!local && (
+            <>
+              <label className={d.adapter === 'custom' || d.adapter === 'agy' ? 'full' : ''}>
+                {d.adapter === 'custom' ? '명령 인자' : '추가 인자'}
+                <input value={d.extraArgs} onChange={(e) => set('extraArgs', e.target.value)} />
+              </label>
+              <label>
+                하루 최대 실행 (0 = 무제한)
+                <input type="number" value={d.dailyRunLimit} onChange={(e) => set('dailyRunLimit', num(e.target.value))} />
+              </label>
+              <label>
+                하루 최대 시간(분)
+                <input type="number" value={d.dailyMinuteLimit} onChange={(e) => set('dailyMinuteLimit', num(e.target.value))} />
+              </label>
+            </>
+          )}
           <label>
             무응답 제한(분) — 이 시간 동안 아무 반응이 없으면 중지
             <input

@@ -1,13 +1,13 @@
 import { execFile } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { rmSync, writeFileSync } from 'node:fs'
+import { tempDir } from './paths'
 import { join } from 'node:path'
 import { BENCH_TASKS, benchPrompt, extractCode, summarizeBench, type BenchRow, type BenchSummary, type BenchTask } from '../shared/bench'
 import { chatStream, type Conn } from './openai'
 
 /** Run a check script next to the answer with plain Node (Electron's own Node when packaged). Resolves to the failure line or undefined. */
 export function runCheck(code: string, test: string, timeoutMs = 10_000): Promise<string | undefined> {
-  const dir = mkdtempSync(join(tmpdir(), 'hivedesk-bench-'))
+  const dir = tempDir('hivedesk-bench-')
   writeFileSync(join(dir, 'solution.js'), code)
   writeFileSync(join(dir, 'check.js'), test)
   return new Promise((resolve) => {

@@ -9,7 +9,21 @@ import { cleanEnv } from './adapters'
 import { Engine } from './engine'
 import { checkForUpdate } from './updates'
 import { fixPath } from './shellPath'
+import { bootstrapFile, migrateToHome, readBootstrap, resolveUserData, setTempRoot, tmpDirOf, writeBootstrap } from './paths'
+import { homedir } from 'node:os'
+import { detectPortable, portableNotice } from './portable'
 import { checkCli, installCli, installCommand, installGh, openGhLogin, openLogin } from './setup'
+
+// one-folder mode: must be decided before anything reads userData (the engine, safeStorage, caches)
+const bootFile = bootstrapFile(app.getPath('appData'))
+// portable mode comes first: it forces the one-folder layout next to the app and never touches the system app data
+const portableInfo = detectPortable({ platform: process.platform, env: process.env, execPath: process.execPath })
+const bootstrap = portableInfo.portable && portableInfo.homeDir ? { oneFolder: true, homeDir: portableInfo.homeDir } : readBootstrap(bootFile)
+const defaultUserData = app.getPath('userData')
+if (bootstrap) {
+  app.setPath('userData', resolveUserData(bootstrap, defaultUserData))
+  setTempRoot(tmpDirOf(bootstrap.homeDir))
+}
 
 let win: BrowserWindow | null = null
 let engine: Engine
@@ -153,6 +167,26 @@ function registerIpc(): void {
   ipcMain.handle('task:shared-runs', (_e, id: string) => engine.sharedRuns(id))
   ipcMain.handle('share:enable', (_e, url: string) => engine.enableSharing(url))
   ipcMain.handle('share:sync', () => engine.sync())
+  ipcMain.handle('home:get', () => ({
+    active: !!bootstrap,
+    homeDir: bootstrap?.homeDir ?? join(homedir(), 'HiveDesk'),
+    oldDataDir: defaultUserData,
+    bootstrapFile: bootFile,
+    portable: portableInfo.portable,
+    portableNotice: portableInfo.portable && portableInfo.homeDir ? portableNotice(portableInfo.homeDir) : undefined
+  }))
+  ipcMain.handle('home:set', (_e, enabled: boolean, dir: string) => {
+    if (portableInfo.portable) return { ok: false, copied: [], skipped: [], leftBehind: '', message: '휴대용 모드에서는 바꿀 수 없어요.' }
+    if (!enabled) {
+      writeBootstrap(bootFile, { oneFolder: false, homeDir: bootstrap?.homeDir ?? dir })
+      return { ok: true, copied: [], skipped: [], leftBehind: defaultUserData, message: '다음 실행부터 예전 위치의 설정을 써요. 한 폴더에 있는 파일은 지우지 않았어요.' }
+    }
+    const from = bootstrap ? app.getPath('userData') : defaultUserData
+    const r = migrateToHome(from, dir)
+    // only a verified copy switches the location
+    if (r.ok) writeBootstrap(bootFile, { oneFolder: true, homeDir: dir })
+    return { ...r, message: r.ok ? '다음 실행부터 한 폴더 모드로 시작해요.' : `옮기지 못해서 예전 설정을 그대로 써요. (${r.error})` }
+  })
   ipcMain.handle('dialog:folder', async () => {
     if (!win) return null
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
@@ -189,6 +223,12 @@ function registerIpc(): void {
   ipcMain.handle('local:bench', (_e, ep: string, model: string) => engine.localBench(ep, model))
   ipcMain.handle('local:pull', (_e, ep: string, name: string) => engine.localPull(ep, name))
   ipcMain.handle('local:delete-model', (_e, ep: string, name: string) => engine.localDeleteModel(ep, name))
+  ipcMain.handle('local:engine-status', () => engine.localEngineStatus())
+  ipcMain.handle('local:engine-install', () => engine.localEngineInstall())
+  ipcMain.handle('local:engine-cancel', () => engine.localEngineCancel())
+  ipcMain.handle('local:engine-start', () => engine.localEngineStart())
+  ipcMain.handle('local:engine-stop', () => engine.localEngineStop())
+  ipcMain.handle('local:engine-remove', () => engine.localEngineRemove())
   ipcMain.handle('local:stop', (_e, jobId: string) => engine.localStop(jobId))
   ipcMain.handle('chat:models', () => engine.chatModels())
   ipcMain.handle('chat:list', () => engine.chatList())
@@ -297,8 +337,10 @@ function makeTray(): void {
 
 app.whenReady().then(() => {
   fixPath()
+  if (portableInfo.warning) dialog.showErrorBox('HiveDesk 휴대용 모드', portableInfo.warning)
   try {
     engine = new Engine(join(app.getPath('userData'), 'config.json'), emit)
+    if (bootstrap) engine.hiveHome = bootstrap.homeDir
     // tokens of external connections are kept encrypted by the operating system (Keychain / DPAPI / libsecret)
     engine.cipher = {
       available: () => safeStorage.isEncryptionAvailable(),

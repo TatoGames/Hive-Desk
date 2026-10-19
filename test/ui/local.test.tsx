@@ -4,6 +4,8 @@ import type { AddressInfo } from 'node:net'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { mountApp, ready, type Ui } from './harness'
+import { OllamaEngine } from '../../src/main/ollamaEngine'
+import { FAKE_OLLAMA, fakeDownloads, makeTgz, sha256 } from '../ollama-fixtures'
 
 let ui: Ui | undefined
 afterEach(() => {
@@ -45,6 +47,68 @@ describe('8-2 UI: 내 PC AI', () => {
     } finally {
       server.closeAllConnections()
       server.close()
+    }
+  })
+})
+
+describe('v6 UI: HiveDesk 전용 Ollama', () => {
+  const key = `${process.platform}-${process.arch}`
+  const swap = (eng: import('../../src/main/engine').Engine, dir: string, url: string, sha: string | undefined): void => {
+    Object.defineProperty(eng, 'ollama', {
+      value: new OllamaEngine({
+        homeDir: () => `${dir}/HiveDesk`,
+        manifest: { version: '1.2.3', platforms: { [key]: { url, sha256: sha, format: 'tgz', exe: 'ollama', sizeBytes: 5_000_000 } } },
+        changed: () => (eng as unknown as { emit: (e: { type: string }) => void }).emit({ type: 'local' }),
+        connect: (u) => eng.local.ensure('HiveDesk Ollama', u),
+        allowUrl: (u) => u.hostname === '127.0.0.1',
+        defaultPort: 21434
+      })
+    })
+  }
+
+  it('an unverified download (no sha256) leaves the install button off and says why', async () => {
+    ui = await mountApp((eng, dir) => {
+      ready(eng, dir)
+      eng.saveSettings({ uiMode: 'basic' })
+      swap(eng, dir, 'https://example.invalid/x.tgz', undefined)
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'AI 연결' })[0])
+    await ui.refresh()
+    const btn = (await screen.findByRole('button', { name: /HiveDesk에 Ollama 설치하기/ })) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(screen.getByText(/sha256 값이 확인되지 않아서/)).toBeTruthy()
+  })
+
+  it.skipIf(process.platform === 'win32')('install, start, and the connection appears by itself', async () => {
+    const fake = await fakeDownloads()
+    const tgz = makeTgz([{ name: 'ollama', data: FAKE_OLLAMA(), mode: 0o755 }])
+    fake.files.set('/file', tgz)
+    try {
+      ui = await mountApp((eng, dir) => {
+        ready(eng, dir)
+        eng.saveSettings({ uiMode: 'basic' })
+        swap(eng, dir, fake.base + '/file', sha256(tgz))
+      })
+      fireEvent.click(screen.getAllByRole('button', { name: 'AI 연결' })[0])
+      await ui.refresh()
+      fireEvent.click(await screen.findByRole('button', { name: /HiveDesk에 Ollama 설치하기/ }))
+      // the test engine has no event channel to the page: nudge it to refresh
+      await waitFor(async () => {
+        await ui!.refresh()
+        expect(screen.getByRole('button', { name: '시작' })).toBeTruthy()
+      }, { timeout: 8000 })
+      const start = screen.getByRole('button', { name: '시작' })
+      expect(screen.getByText(/설치했어요/)).toBeTruthy()
+      fireEvent.click(start)
+      await waitFor(async () => {
+        await ui!.refresh()
+        expect(screen.getByText(/켜져 있어요 · 포트/)).toBeTruthy()
+        expect(screen.getByText('HiveDesk Ollama')).toBeTruthy()
+      }, { timeout: 10000 })
+      expect(ui.eng.local.endpoints().filter((e) => e.name === 'HiveDesk Ollama')).toHaveLength(1)
+    } finally {
+      ui?.eng.ollama.shutdown()
+      fake.close()
     }
   })
 })
