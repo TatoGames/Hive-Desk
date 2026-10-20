@@ -489,3 +489,18 @@ describe('task order', () => {
     expect(h.listTasks().map((t) => t.title)).toEqual(titles)
   })
 })
+
+describe('Codex 연결 확인이 시간 초과일 때', () => {
+  it('설정이 다른 서버를 가리키면 그 사실을 알려 주고, 설정이 없으면 기존 문구만 쓴다', async () => {
+    const { codexTimeoutNote, checkCli } = await import('../src/main/setup')
+    expect(codexTimeoutNote('')).toBe('')
+    expect(codexTimeoutNote('model = "gpt-5"\n')).toContain('model=gpt-5')
+    const n = codexTimeoutNote('model = "qwen2.5-coder:7b"\nmodel_provider = "ollama"\n[projects]\nx=1\n')
+    expect(n).toContain('model_provider=ollama')
+    expect(n).toContain('Ollama')
+    const r = await checkCli('claude', async () => ({ code: null, stdout: 'starting...', stderr: '', timedOut: true, aborted: false }))
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('응답이 없어요')
+    expect(r.message).toContain('starting...')
+  })
+})

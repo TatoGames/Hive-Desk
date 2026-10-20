@@ -196,6 +196,14 @@ export function codexConfigDefaults(toml: string): { model?: string; provider?: 
   return { model: pick('model'), provider: pick('model_provider') }
 }
 
+/** Codex waits for the server named in its own settings; when that is not OpenAI the check can hang with no word at all. */
+export function codexTimeoutNote(toml: string): string {
+  const set = codexConfigDefaults(toml)
+  if (!set.model && !set.provider) return ''
+  const now = [set.model && `model=${set.model}`, set.provider && `model_provider=${set.provider}`].filter(Boolean).join(', ')
+  return ` 그런데 Codex 설정(~/.codex/config.toml)에 ${now}가 적혀 있어요. 그 설정이 꺼져 있는 서버(예: Ollama)를 가리키면 Codex가 답을 기다리며 멈춰 있어서 로그인과 상관없이 이렇게 보일 수 있어요. 설정의 model·model_provider를 확인하거나 지워 보세요.`
+}
+
 export async function checkCli(
   id: AdapterId,
   runner: Runner = runCli,
@@ -214,10 +222,19 @@ export async function checkCli(
   const out = (res.stdout + '\n' + res.stderr).trim()
   if (res.spawnError) return { ok: false, needsLogin: false, message: res.spawnError }
   if (res.timedOut) {
+    let note = ''
+    if (id === 'codex') {
+      try {
+        note = codexTimeoutNote(readFileSync(join(homedir(), '.codex', 'config.toml'), 'utf8'))
+      } catch {
+        /* no config file */
+      }
+    }
+    const heard = out ? ` (CLI가 그때까지 한 말: ${out.replace(/\s+/g, ' ').slice(-200)})` : ''
     return {
       ok: false,
       needsLogin: true,
-      message: '응답이 없어요. 아직 로그인하지 않았거나 로그인 창이 열려 있을 수 있어요.'
+      message: '응답이 없어요. 아직 로그인하지 않았거나 로그인 창이 열려 있을 수 있어요.' + note + heard
     }
   }
   if (res.code === 0 && res.stdout.trim() && !/error/i.test(res.stdout.slice(0, 80))) {
