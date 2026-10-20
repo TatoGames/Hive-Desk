@@ -811,6 +811,8 @@ export interface AppConfig {
   autoApprove?: AutoApprove
   /** Sub-tasks of a project in a git folder work in their own work trees and run at the same time (off by default). */
   parallelWorktrees?: boolean
+  /** A project without design rules gets its own (concept, colours, type) when its first screen-related task runs (default on). */
+  autoDesign?: boolean
   /** Minutes a running AI waits for a person to answer a live tool request before it is declined (default 30). */
   externalApprovalMinutes?: number
   /** v5: when a connection runs out of usage, another connection's employee carries the task on. */
