@@ -84,6 +84,7 @@ import { TEMPLATES, buildFromTemplate } from '../shared/templates'
 import { initSync, isGitRepo, syncNow } from './sync'
 import { sendRemote } from './remotenotify'
 import { QuickAssign, type QuickPreview } from './quick'
+import { designBlock, hasDesign, looksVisual, pickDesign, usedDesigns } from '../shared/design'
 import { addWorktree, commitWorktree, gitState, initGitFolder, mergeBranchInto, mergeWorktree, removeWorktree, worktreeCwd, type GitState } from './worktree'
 import { External, type Cipher } from './external'
 import { Handoffs, type HandoffOption } from './handoffs'
@@ -1159,7 +1160,7 @@ export class Engine {
     if (input.delegate || input.unitId) {
       try {
         t = this.delegation.begin(t, { unitId: input.unitId, delegate: true })
-      } catch (e) {
+      } catch {
         this.hive.deleteTask(t.id)
         throw e
       }
@@ -1355,6 +1356,7 @@ export class Engine {
     this.changed()
     // Sub-tasks of a git project get their own work tree, so they do not queue behind each other
     await this.prepareWorktree(id, agent)
+    this.ensureDesign(id, agent)
     // a task of a GitHub project works on its own branch
     await this.github.prepare(id).catch(() => undefined)
     // Two agents editing the same folder would overwrite each other and mix up their diffs.
@@ -1425,6 +1427,23 @@ export class Engine {
       for (const target of [id, ended?.reviewOf].filter((x): x is string => !!x)) {
         if (h.getTask(target)?.worktree && !h.getTask(target)?.worktree?.merged) queueMicrotask(() => void this.inCompany(h, () => this.mergeSolo(target)).catch(() => undefined))
       }
+    }
+  }
+
+  /** A project without design rules gets its own before a screen-related task runs (see shared/design). */
+  private ensureDesign(id: string, agent: Agent): void {
+    try {
+      if (this.config.autoDesign === false) return
+      const t = this.hive.getTask(id)
+      const p = t?.projectId ? this.hive.getProject(t.projectId) : null
+      if (!t || !p || (t.kind && t.kind !== 'work') || hasDesign(p.briefing)) return
+      if (!looksVisual(`${t.title} ${t.description ?? ''} ${agent.role ?? ''} ${agent.job ?? ''}`)) return
+      const used = usedDesigns(this.hive.listProjects().filter((x) => x.id !== p.id).map((x) => x.briefing))
+      const d = pickDesign(p, used)
+      this.hive.saveProject({ ...p, briefing: [p.briefing, designBlock(d)].filter(Boolean).join('\n\n') })
+      this.hive.addEvent(id, 'status', 'system', `이 프로젝트에 디자인 지침 "${d.name}"을 넣었어요. 프로젝트 설명에서 고치거나 지울 수 있어요.`)
+    } catch {
+      /* a failure here must never stop the task */
     }
   }
 
@@ -2257,7 +2276,7 @@ export class Engine {
           const tip = attachmentAdvice(att.name)
           if (tip) out.notes.push(tip)
         } else out.errors.push(`${p}: 파일이 아니에요`)
-      } catch (e) {
+      } catch {
         out.errors.push(`${p}: ${(e as Error).message}`)
       }
     }
@@ -2273,7 +2292,7 @@ export class Engine {
       )
       const tip = attachmentAdvice(name)
       if (tip) out.notes.push(tip)
-    } catch (e) {
+    } catch {
       out.errors.push(`${name}: ${(e as Error).message}`)
     }
     this.changed()
@@ -2452,7 +2471,7 @@ export class Engine {
       this.committee.open(`방향 확인: ${t.title}`, `${question}\n\n(업무: ${t.title}\n${t.description})`, 'manager', t.id)
       this.hive.updateTask(t.id, { status: 'needs_input', question: `방향이 불분명해서 CEO 위원회에 올렸어요: ${question}` })
       this.hive.addEvent(t.id, 'delegation', 'delegation', '방향이 불분명해서 CEO 위원회에 올렸어요.')
-    } catch (e) {
+    } catch {
       // no committee: the board answers directly
       this.hive.updateTask(t.id, { status: 'needs_input', question })
       this.hive.addEvent(t.id, 'delegation', 'delegation', `방향이 불분명해요: ${(e as Error).message}`)
@@ -3030,7 +3049,7 @@ export class Engine {
       this.external.save({ ...c, mcp: { ...c.mcp, tools: mergeTools(c.mcp.tools, tools), toolsAt: new Date().toISOString() } })
       const w = tools.filter((t) => t.write).length
       return { ok: true, message: `도구 ${tools.length}개 (읽기 ${tools.length - w} · 쓰기 ${w})`, count: tools.length }
-    } catch (e) {
+    } catch {
       return { ok: false, message: (e as Error).message, count: 0 }
     }
   }
@@ -3145,7 +3164,7 @@ export class Engine {
         outcome: 'allowed',
         by: this.config.memberName || 'me'
       })
-    } catch (e) {
+    } catch {
       out.errors.push(`${url}: ${(e as Error).message}`)
     }
     this.changed()

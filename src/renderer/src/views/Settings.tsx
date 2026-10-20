@@ -23,6 +23,7 @@ export default function Settings({
   const [review, setReview] = useState<HumanReview>(c.humanReview)
   const [trial, setTrial] = useState(Math.round((c.quickTrialRate ?? 0.1) * 100))
   const [liveIn, setLiveIn] = useState(c.liveInstructions !== false)
+  const [autoDesign, setAutoDesign] = useState(c.autoDesign !== false)
   const [worktrees, setWorktrees] = useState(firstRun ? true : !!c.parallelWorktrees)
   const [auto, setAuto] = useState<AutoApprove>({ ...DEFAULT_AUTO_APPROVE, ...(c.autoApprove ?? {}) })
   const [hand, setHand] = useState<HandoffSettings>({ ...DEFAULT_HANDOFF, ...(c.handoff ?? {}) })
@@ -55,6 +56,7 @@ export default function Settings({
       syncIntervalMinutes: Math.max(0, interval),
       quickTrialRate: Math.min(1, Math.max(0, trial / 100)),
       parallelWorktrees: worktrees,
+      autoDesign,
       liveInstructions: liveIn,
       autoApprove: auto,
       handoff: hand,
@@ -135,6 +137,10 @@ export default function Settings({
         <label className="full toggle" title="git 폴더의 프로젝트에서는 하위 작업마다 별도 작업 폴더와 브랜치를 만들어 동시에 실행하고, 통합할 때 합쳐요. 충돌이 나면 멈추고 물어봐요.">
           <input type="checkbox" checked={worktrees} onChange={(e) => setWorktrees(e.target.checked)} />
           하위 작업을 별도 작업 폴더(git 작업 트리)에서 동시에 실행 (실험 기능)
+        </label>
+        <label className="full toggle" title="디자인 지침이 없는 프로젝트의 화면 관련 업무가 처음 실행될 때, 프로젝트 소개에 어울리고 같은 회사의 다른 프로젝트와 겹치지 않는 지침(콘셉트·색·글꼴·구성)을 프로젝트 설명에 넣어요. 프로젝트 화면에서 고치거나 지울 수 있어요.">
+          <input type="checkbox" checked={autoDesign} onChange={(e) => setAutoDesign(e.target.checked)} />
+          화면 업무에 프로젝트마다 다른 디자인 지침을 자동으로 넣기
         </label>
         <fieldset className="full">
           <legend>결재 자동 승인 (삭제·배포·외부 전송·명령 실행은 절대 자동 승인하지 않아요)</legend>
