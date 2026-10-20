@@ -404,7 +404,11 @@ export class Hive {
   /** A task is ready when it is `todo` and every dependency is `done`. */
   isReady(t: Task, all: Task[]): boolean {
     if (t.status !== 'todo' || t.blocked) return false
-    return t.dependsOn.every((d) => all.find((x) => x.id === d)?.status === 'done')
+    // A dependency that was deleted is gone for good: waiting for it would block this task forever.
+    return t.dependsOn.every((d) => {
+      const dep = all.find((x) => x.id === d)
+      return !dep || dep.status === 'done'
+    })
   }
 
   // ---- approvals ----

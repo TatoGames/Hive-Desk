@@ -27,3 +27,13 @@ describe('v0.8.2 codex check with an Ollama default model', () => {
     expect(r.message).toContain('config.toml')
   })
 })
+
+import { Hive } from '../src/main/hive'
+describe('v0.8.2 a deleted dependency does not block forever', () => {
+  it('isReady ignores a dependency that no longer exists', () => {
+    const h = Object.create(Hive.prototype) as InstanceType<typeof Hive>
+    const t = { status: 'todo', dependsOn: ['gone'], blocked: undefined } as never
+    expect(h.isReady(t, [])).toBe(true)
+    expect(h.isReady({ status: 'todo', dependsOn: ['x'] } as never, [{ id: 'x', status: 'todo' } as never])).toBe(false)
+  })
+})
