@@ -162,7 +162,7 @@ export default function Settings({
             같은 체급이 없으면 위 체급 직원에게도 넘기기
           </label>
           <label>
-            사용량 가중치가 이 배수 이상 오르면 넘기기 전에 결재함에 물어요 (0 = 묻지 않음)
+            한 단계 위 체급으로 넘기면서 사용량 가중치가 이 배수 이상 오르면 결재함에 물어요 (같은 체급은 그냥 넘겨요) (0 = 묻지 않음)
             <input type="number" min={0} step={0.5} value={hand.confirmAtCostX} onChange={(e) => setHand({ ...hand, confirmAtCostX: Math.max(0, Number(e.target.value) || 0) })} />
           </label>
           <label>
