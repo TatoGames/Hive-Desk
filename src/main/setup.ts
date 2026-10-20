@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { AdapterId, SetupCheck } from '../shared/types'
 import { buildCommand, cleanEnv, runCli, type Runner } from './adapters'
@@ -187,6 +189,13 @@ const AUTH_HINT =
   /(log ?in|sign ?in|authenticat|unauthori[sz]ed|credential|not logged|api[ _-]?key|oauth|\b401\b|\b403\b)/i
 
 /** Ask the CLI for a one-word reply to prove install + login work. */
+/** The top-level `model` and `model_provider` of a Codex config.toml (what a run without `-m` falls back to). */
+export function codexConfigDefaults(toml: string): { model?: string; provider?: string } {
+  const top = toml.split(/^\s*\[/m)[0]
+  const pick = (key: string): string | undefined => top.match(new RegExp('^\\s*' + key + '\\s*=\\s*["\']([^"\']+)["\']', 'm'))?.[1]
+  return { model: pick('model'), provider: pick('model_provider') }
+}
+
 export async function checkCli(
   id: AdapterId,
   runner: Runner = runCli,
@@ -213,6 +222,24 @@ export async function checkCli(
   }
   if (res.code === 0 && res.stdout.trim() && !/error/i.test(res.stdout.slice(0, 80))) {
     return { ok: true, needsLogin: false, message: '연결됐어요: ' + res.stdout.trim().slice(0, 80) }
+  }
+  // Codex falls back to the default model of the user's own config; when that is an Ollama cloud model the CLI asks for an
+  // Ollama account. The ChatGPT login is not the problem, so do not send the person to "로그인".
+  if (id === 'codex' && /ollama account|sign in to ollama/i.test(out)) {
+    let cfg = ''
+    try {
+      cfg = readFileSync(join(homedir(), '.codex', 'config.toml'), 'utf8')
+    } catch {
+      /* no config file */
+    }
+    const set = codexConfigDefaults(cfg)
+    const now = set.model || set.provider ? ` (지금 설정: ${[set.model && `model=${set.model}`, set.provider && `model_provider=${set.provider}`].filter(Boolean).join(', ')})` : ''
+    return {
+      ok: false,
+      needsLogin: false,
+      message:
+        'Codex 설정(~/.codex/config.toml)의 기본 모델이 Ollama 계정이 필요한 모델이에요' + now + '. ChatGPT 로그인 문제가 아니에요. 설정의 model·model_provider를 바꾸거나, 에이전트에 모델(예: gpt-5)을 직접 지정해 주세요.'
+    }
   }
   const needsLogin = AUTH_HINT.test(out)
   return {

@@ -31,6 +31,14 @@ const GITHUB = /(배포|푸시|\bpush\b|pull request|\bPR\b|머지|\bmerge\b|깃
 const WEB = /(웹\s?검색|웹에서|인터넷|온라인으로|검색해서|사이트를?\s?(조사|크롤)|크롤링|\burl\b)/i
 const MAKES_FILES = /(작성|만들|구현|생성|저장|파일로|문서화|코드)/
 
+/** "push는 하지 마" says what NOT to do: drop such clauses before looking for words that need GitHub or the web. */
+export function withoutNegated(text: string): string {
+  return text
+    .split(/[.。;\n]|,\s|·/)
+    .filter((c) => !/(하지\s?(마|말|않|못)|않는|금지|쓰지\s?(마|말)|없이|말\s?것|안\s?함)/.test(c))
+    .join('. ')
+}
+
 /**
  * Before the board decides: which sub-tasks cannot be done as written? (No GitHub connection, web reading off, a read-only
  * job that has to produce files.) `has` says what this company can do right now.
@@ -38,7 +46,7 @@ const MAKES_FILES = /(작성|만들|구현|생성|저장|파일로|문서화|코
 export function planIssues(items: SubtaskSpec[], has: { github: boolean; web: boolean }, isManager: (assignee: string) => boolean): PlanIssue[] {
   const out: PlanIssue[] = []
   items.forEach((it, index) => {
-    const text = `${it.title} ${it.done}`
+    const text = withoutNegated(`${it.title} ${it.done}`)
     if (!has.github && GITHUB.test(text)) out.push({ index, kind: 'github', text: '지금 할 수 없어요: GitHub 연결이 없어요' })
     if (!has.web && WEB.test(text)) out.push({ index, kind: 'web', text: '지금 할 수 없어요: 웹 읽기가 꺼져 있어요' })
     if (!isManager(it.assignee) && it.access === 'read' && MAKES_FILES.test(text)) {

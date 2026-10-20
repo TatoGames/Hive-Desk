@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { defaultPermission } from '@shared/permission'
+import { defaultPermission, isEnforced } from '@shared/permission'
 import type {
   ActivityEvent,
   AdapterId,
@@ -293,7 +293,10 @@ export function PermissionSelect({
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value ? (e.target.value as PermissionLevel) : undefined)}
     >
-      <option value="">기본 — {PERM_LABEL[def]}</option>
+      <option value="">
+        기본 — {PERM_LABEL[def]}
+        {def === 'read' && adapter && !isEnforced(adapter) ? ' · 이 AI는 안전하게 읽기로 시작해요. 파일을 만들 일이면 아래에서 "파일 수정"을 고르세요' : ''}
+      </option>
       {(Object.keys(PERM_LABEL) as PermissionLevel[])
         .filter((k) => k !== def)
         .map((k) => (

@@ -559,6 +559,15 @@ export class Delegation {
     const team = this.teamOf(t.assignee)
     const ids = new Set(team.map((x) => x.agent.id))
     if (!parsed.items.length) {
+      // A lead handed a plain job (a review, a report) answers it in full instead of splitting it: take the answer as the
+      // result rather than asking for the sub-task format again and again.
+      const body = (t.result ?? '').replace(/\[\[[^\]]*\]\]/g, '').trim()
+      if (body.length >= 200 && !/\[\[\s*(SUBTASK|SELF)/i.test(t.result ?? '')) {
+        h.updateTask(t.id, { kind: 'work', status: 'done', planTries: 0, finishedAt: new Date().toISOString(), notes: [...t.notes, '나눌 일이 아니라 직접 답한 것으로 받아들였어요.'] })
+        this.event(t.id, '하위 작업 없이 직접 답했어요. 이 답을 결과로 받아요.')
+        this.rollUp(h.getTask(t.id)!)
+        return
+      }
       return this.sendBack(t, '[[SUBTASK: 제목 | assignee=<id> | done=<완료 조건> | after=none]] 형식으로 하위 작업을 적어 주세요. 직접 처리할 크기면 [[SELF: 이유]]만 적으세요.')
     }
     if (parsed.bad.length) {
