@@ -194,17 +194,24 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
         return
       }
     }
-    const t = await window.hive.createTask({
-      title,
-      description: desc,
-      assignee: assignee || null,
-      risky,
-      dependsOn: dep ? [dep] : [],
-      permission: perm,
-      projectId: project || undefined,
-      delegate: delegate || undefined,
-      unitId: delegate && unit ? unit : undefined
-    })
+    let t: Awaited<ReturnType<typeof window.hive.createTask>>
+    try {
+      t = await window.hive.createTask({
+        title,
+        description: desc,
+        assignee: assignee || null,
+        risky,
+        dependsOn: dep ? [dep] : [],
+        permission: perm,
+        projectId: project || undefined,
+        delegate: delegate || undefined,
+        unitId: delegate && unit ? unit : undefined
+      })
+    } catch (e) {
+      // e.g. "총괄 본부장 자리에 에이전트를 배치해야 …" — say why nothing was added instead of failing silently (what was typed is kept)
+      setProblems([(e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')])
+      return
+    }
     // materials are copied into the new task's folder (folders become reference folders)
     const errs = items.length ? await sendDropped(t.id, items) : []
     setProblems(errs)
@@ -296,6 +303,7 @@ function NewTask({ snap }: { snap: Snapshot }): JSX.Element {
           추가
         </button>
       </div>
+      {!more && problems.length > 0 && <DropMessages items={problems} />}
       {badCheck && (
         <div className="warn-text small">
           ⚠ {badCheck.name}({badCheck.owner})의 최근 연결 확인이 실패했어요: {badCheck.check?.message} — 배정해도 실행되지 않을 수 있어요.
