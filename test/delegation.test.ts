@@ -456,6 +456,15 @@ describe('plan problems', () => {
     eng.shutdown()
   })
 
+  it('v0.8.2: a long plain answer to a plain job is taken as the result instead of asking for sub-tasks again', async () => {
+    const long = '검토 결과를 말씀드립니다. ' + '수치와 규칙은 서로 맞고 구현에 문제가 없어요. '.repeat(15)
+    const { eng, ids } = company(makeScript({ plan: () => long }))
+    const t = eng.createTask({ title: 'X', assignee: ids.srv, delegate: true })
+    await settle(eng)
+    expect(task(eng, t.id).status).toBe('done')
+    eng.shutdown()
+  })
+
   it('too many sub-tasks, a loop in the order, or too deep a split are sent back', async () => {
     const many = Array.from({ length: LIMITS.maxSubtasks + 1 }, (_, i) => `[[SUBTASK: ${i} | assignee=alice-dev1 | done=x | after=none]]`).join('\n')
     const { eng, ids } = company(makeScript({ plan: () => many }))

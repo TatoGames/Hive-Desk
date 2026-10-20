@@ -37,3 +37,12 @@ describe('v0.8.2 a deleted dependency does not block forever', () => {
     expect(h.isReady({ status: 'todo', dependsOn: ['x'] } as never, [{ id: 'x', status: 'todo' } as never])).toBe(false)
   })
 })
+
+import { codexConfigDefaults } from '../src/main/setup'
+describe('v0.8.2 codex config defaults', () => {
+  it('reads the top-level model and provider only', () => {
+    const t = 'model = "gpt-oss:120b-cloud"\nmodel_provider = "ollama"\n\n[profiles.x]\nmodel = "other"\n'
+    expect(codexConfigDefaults(t)).toEqual({ model: 'gpt-oss:120b-cloud', provider: 'ollama' })
+    expect(codexConfigDefaults('')).toEqual({ model: undefined, provider: undefined })
+  })
+})
