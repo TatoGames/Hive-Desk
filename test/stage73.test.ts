@@ -92,9 +92,21 @@ describe('7-3: a task carries on when its connection runs out of usage', () => {
     eng.shutdown()
   })
 
-  it('waits instead when the limit is over in a few minutes (known time)', async () => {
+  it('by default it does not wait even when the limit ends in a few minutes (the reset time is often off)', async () => {
+    const { runner, prompts } = runners('try again in 5 minutes')
+    const { eng, claude, codex } = setup(runner, { claude: 'claude-opus-5-5', codex: 'openai-gpt-6-astra' })
+    const t = eng.createTask({ title: '게임', assignee: claude.id })
+    await eng.runTask(t.id)
+    await waitFor(() => eng.hive.getTask(t.id)!.status === 'done')
+    expect(eng.hive.getTask(t.id)!.assignee).toBe(codex.id)
+    expect(prompts.codex.length).toBeGreaterThan(0)
+    eng.shutdown()
+  })
+
+  it('waits instead when the person set a wait time and the limit is over in a few minutes (known time)', async () => {
     const { runner, prompts } = runners('try again in 5 minutes')
     const { eng, claude } = setup(runner)
+    eng.saveSettings({ handoff: { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true } })
     const t = eng.createTask({ title: '게임', assignee: claude.id })
     await eng.runTask(t.id)
     await wait(200)

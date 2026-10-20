@@ -240,7 +240,7 @@ export class Handoffs {
       }
       return null
     }
-    if (s.confirmAtCostX > 0 && r.pick.costX >= s.confirmAtCostX) {
+    if (s.confirmAtCostX > 0 && r.pick.up && r.pick.costX >= s.confirmAtCostX) {
       const to = this.c.agents().find((a) => a.id === r.pick!.cand.agentId)!
       const lead = reason === 'limit' ? `${from.name}의 연결이 한도에 걸렸어요.` : `${from.name}의 내 PC AI로는 할 수 없었어요(${handoffReasonLabel(reason)}).`
       const a = h.createApproval({
