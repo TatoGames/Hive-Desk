@@ -504,3 +504,42 @@ describe('Codex 연결 확인이 시간 초과일 때', () => {
     expect(r.message).toContain('starting...')
   })
 })
+
+describe('Codex 설정이 Ollama로 돌리는 경우', () => {
+  const REAL = `model = "gemma4:31b:cloud"
+model_reasoning_effort = "medium"
+model_catalog_json = "/Users/minu/.codex/ollama-launch-models.json"
+openai_base_url = "http://127.0.0.1:11434/api/codex/v1"
+
+[desktop]
+x = 1
+[projects."/a"]
+openai_base_url = "http://elsewhere"
+`
+  it('openai_base_url·model_catalog_json까지 찾아서 알려 준다 (model만 바꿔서는 안 된다)', async () => {
+    const { codexRedirects, codexTimeoutNote } = await import('../src/main/setup')
+    const r = codexRedirects(REAL)
+    expect(r.redirected).toBe(true)
+    expect(r.baseUrl).toBe('http://127.0.0.1:11434/api/codex/v1')
+    expect(r.lines).toEqual(['model=gemma4:31b:cloud', 'openai_base_url=http://127.0.0.1:11434/api/codex/v1', 'model_catalog_json=/Users/minu/.codex/ollama-launch-models.json'])
+    const n = codexTimeoutNote(REAL)
+    expect(n).toContain('openai_base_url')
+    expect(n).toContain('model_catalog_json')
+    expect(n).toContain('Ollama')
+  })
+  it('평범한 설정은 돌려 보내는 설정으로 보지 않는다', async () => {
+    const { codexRedirects } = await import('../src/main/setup')
+    expect(codexRedirects('model = "gpt-5"\nmodel_reasoning_effort = "high"\n').redirected).toBe(false)
+    expect(codexRedirects('openai_base_url = "https://api.openai.com/v1"\n').redirected).toBe(false)
+    expect(codexRedirects('').lines).toEqual([])
+    expect(codexRedirects('model_provider = "ollama"\n').redirected).toBe(true)
+    expect(codexRedirects('openai_base_url = "http://localhost:1234/v1"\n').redirected).toBe(true)
+  })
+  it('Ollama 계정 안내도 세 줄을 함께 막으라고 말한다', async () => {
+    const { checkCli } = await import('../src/main/setup')
+    const r = await checkCli('codex', async () => ({ code: 1, stdout: '', stderr: 'ERROR: This model requires an Ollama account. Please sign in to Ollama to use this model.', timedOut: false, aborted: false }))
+    expect(r.needsLogin).toBe(false)
+    expect(r.message).toContain('openai_base_url')
+    expect(r.message).toContain('#')
+  })
+})

@@ -196,12 +196,37 @@ export function codexConfigDefaults(toml: string): { model?: string; provider?: 
   return { model: pick('model'), provider: pick('model_provider') }
 }
 
+/**
+ * Top-level settings that send Codex somewhere other than OpenAI: a base URL on this PC (what `ollama launch codex` writes),
+ * a model catalog made for Ollama, an Ollama provider or an Ollama cloud model. Changing only `model` does not undo them.
+ */
+export function codexRedirects(toml: string): { baseUrl?: string; catalog?: string; lines: string[]; redirected: boolean } {
+  const top = toml.split(/^\s*\[/m)[0]
+  const pick = (key: string): string | undefined => top.match(new RegExp('^\\s*' + key + '\\s*=\\s*["\']([^"\']+)["\']', 'm'))?.[1]
+  const set = codexConfigDefaults(toml)
+  const baseUrl = pick('openai_base_url')
+  const catalog = pick('model_catalog_json')
+  const local = !!baseUrl && (/^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\]|::1)([:/]|$)/i.test(baseUrl) || /:11434\b/.test(baseUrl))
+  const ollama = !!catalog && /ollama/i.test(catalog)
+  const lines = [
+    set.model && `model=${set.model}`,
+    set.provider && `model_provider=${set.provider}`,
+    baseUrl && `openai_base_url=${baseUrl}`,
+    catalog && `model_catalog_json=${catalog}`
+  ].filter((x): x is string => !!x)
+  const cloudModel = !!set.model && /:cloud\b|-cloud\b/i.test(set.model)
+  return { baseUrl, catalog, lines, redirected: local || ollama || set.provider === 'ollama' || cloudModel }
+}
+
+const CODEX_FIX = '바꿀 때는 model뿐 아니라 model_provider·openai_base_url·model_catalog_json 줄도 함께 앞에 #를 붙여 막아 주세요(model만 바꾸면 요청이 여전히 Ollama로 가요). 파일은 미리 복사해 두세요.'
+
 /** Codex waits for the server named in its own settings; when that is not OpenAI the check can hang with no word at all. */
 export function codexTimeoutNote(toml: string): string {
-  const set = codexConfigDefaults(toml)
-  if (!set.model && !set.provider) return ''
-  const now = [set.model && `model=${set.model}`, set.provider && `model_provider=${set.provider}`].filter(Boolean).join(', ')
-  return ` 그런데 Codex 설정(~/.codex/config.toml)에 ${now}가 적혀 있어요. 그 설정이 꺼져 있는 서버(예: Ollama)를 가리키면 Codex가 답을 기다리며 멈춰 있어서 로그인과 상관없이 이렇게 보일 수 있어요. 설정의 model·model_provider를 확인하거나 지워 보세요.`
+  const r = codexRedirects(toml)
+  if (!r.lines.length) return ''
+  return ` 그런데 Codex 설정(~/.codex/config.toml)에 ${r.lines.join(', ')}가 적혀 있어요. ${
+    r.redirected ? '이 설정은 Codex를 OpenAI가 아니라 내 컴퓨터의 Ollama 같은 다른 서버로 보내고 있어요. 그 서버가 꺼져 있으면 Codex가 답을 기다리며 멈춰서 로그인과 상관없이 이렇게 보여요. ' : '그 설정이 꺼져 있는 서버를 가리키면 Codex가 답을 기다리며 멈출 수 있어요. '
+  }${CODEX_FIX}`
 }
 
 export async function checkCli(
@@ -249,13 +274,12 @@ export async function checkCli(
     } catch {
       /* no config file */
     }
-    const set = codexConfigDefaults(cfg)
-    const now = set.model || set.provider ? ` (지금 설정: ${[set.model && `model=${set.model}`, set.provider && `model_provider=${set.provider}`].filter(Boolean).join(', ')})` : ''
+    const r = codexRedirects(cfg)
+    const now = r.lines.length ? ` (지금 설정: ${r.lines.join(', ')})` : ''
     return {
       ok: false,
       needsLogin: false,
-      message:
-        'Codex 설정(~/.codex/config.toml)의 기본 모델이 Ollama 계정이 필요한 모델이에요' + now + '. ChatGPT 로그인 문제가 아니에요. 설정의 model·model_provider를 바꾸거나, 에이전트에 모델(예: gpt-5)을 직접 지정해 주세요.'
+      message: 'Codex 설정(~/.codex/config.toml)의 기본 모델이 Ollama 계정이 필요한 모델이에요' + now + '. ChatGPT 로그인 문제가 아니에요. ' + CODEX_FIX
     }
   }
   const needsLogin = AUTH_HINT.test(out)
