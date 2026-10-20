@@ -768,7 +768,7 @@ export interface ReviewSettings {
 
 export const DEFAULT_REVIEW: ReviewSettings = { checks: true, appCheck: true, policy: 'risk', maxRounds: 2, bundle: 'once' }
 
-export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 20, rollbackStep: true }
+export const DEFAULT_HANDOFF: HandoffSettings = { auto: true, up: true, confirmAtCostX: 2, waitMinutes: 0, rollbackStep: true }
 
 export const DEFAULT_AUTO_APPROVE: AutoApprove = { readToEdit: true, planOverPercent: 20, planSmaller: true }
 
