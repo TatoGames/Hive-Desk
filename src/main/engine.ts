@@ -1160,7 +1160,7 @@ export class Engine {
     if (input.delegate || input.unitId) {
       try {
         t = this.delegation.begin(t, { unitId: input.unitId, delegate: true })
-      } catch {
+      } catch (e) {
         this.hive.deleteTask(t.id)
         throw e
       }
@@ -2276,7 +2276,7 @@ export class Engine {
           const tip = attachmentAdvice(att.name)
           if (tip) out.notes.push(tip)
         } else out.errors.push(`${p}: 파일이 아니에요`)
-      } catch {
+      } catch (e) {
         out.errors.push(`${p}: ${(e as Error).message}`)
       }
     }
@@ -2292,7 +2292,7 @@ export class Engine {
       )
       const tip = attachmentAdvice(name)
       if (tip) out.notes.push(tip)
-    } catch {
+    } catch (e) {
       out.errors.push(`${name}: ${(e as Error).message}`)
     }
     this.changed()
@@ -2471,7 +2471,7 @@ export class Engine {
       this.committee.open(`방향 확인: ${t.title}`, `${question}\n\n(업무: ${t.title}\n${t.description})`, 'manager', t.id)
       this.hive.updateTask(t.id, { status: 'needs_input', question: `방향이 불분명해서 CEO 위원회에 올렸어요: ${question}` })
       this.hive.addEvent(t.id, 'delegation', 'delegation', '방향이 불분명해서 CEO 위원회에 올렸어요.')
-    } catch {
+    } catch (e) {
       // no committee: the board answers directly
       this.hive.updateTask(t.id, { status: 'needs_input', question })
       this.hive.addEvent(t.id, 'delegation', 'delegation', `방향이 불분명해요: ${(e as Error).message}`)
@@ -3049,7 +3049,7 @@ export class Engine {
       this.external.save({ ...c, mcp: { ...c.mcp, tools: mergeTools(c.mcp.tools, tools), toolsAt: new Date().toISOString() } })
       const w = tools.filter((t) => t.write).length
       return { ok: true, message: `도구 ${tools.length}개 (읽기 ${tools.length - w} · 쓰기 ${w})`, count: tools.length }
-    } catch {
+    } catch (e) {
       return { ok: false, message: (e as Error).message, count: 0 }
     }
   }
@@ -3164,7 +3164,7 @@ export class Engine {
         outcome: 'allowed',
         by: this.config.memberName || 'me'
       })
-    } catch {
+    } catch (e) {
       out.errors.push(`${url}: ${(e as Error).message}`)
     }
     this.changed()
