@@ -1443,6 +1443,12 @@ export class Engine {
     const solo = !t.parentId && (!t.kind || t.kind === 'work')
     if (!sub && !(solo && this.folderShared(agent, id))) return
     const base = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
+    // a folder with no git (or no first record) could not run next to others: make the first record now so the parallel setting just works
+    const gs = await gitState(base).catch(() => 'ok' as GitState)
+    if (gs === 'none' || gs === 'no-commit') {
+      const r = await initGitFolder(base).catch(() => null)
+      if (r) this.hive.addEvent(id, 'status', 'system', r.ok ? `동시에 돌 수 있게 ${r.message}` : `동시에 돌 수 없어 순서대로 실행해요. ${r.message}`)
+    }
     const wt = await addWorktree(base, t.id).catch(() => null)
     if (!wt) return
     this.hive.updateTask(id, { worktree: wt })

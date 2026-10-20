@@ -760,6 +760,39 @@ describe('6-0.7: work trees let sub-tasks of one git project run at the same tim
   })
 })
 
+describe('auto first record: a folder without git history still runs sub-tasks in parallel', () => {
+  it.each(['no git at all', 'git without a commit'])('%s: HiveDesk makes the first record and the sub-tasks get work trees', async (kind) => {
+    const { execFileSync } = await import('node:child_process')
+    const repo = join(dir, 'repo')
+    mkdirSync(repo)
+    if (kind === 'git without a commit') execFileSync('git', ['init', '-b', 'main'], { cwd: repo })
+    writeFileSync(join(repo, 'README.md'), 'hi\n')
+    const cwds: string[] = []
+    const s = makeScript({
+      plan: (who) => {
+        if (who === 'coo') return '[[SUBTASK: 서버 만들기 | assignee=alice-hq | done=서버 동작 | after=none]]\n[[ESTIMATE: 6]]'
+        if (who === 'hq') return '[[SUBTASK: 서버팀 작업 | assignee=alice-srv | done=API 완성 | after=none]]\n[[ESTIMATE: 5]]'
+        return '[[SUBTASK: 모델 | assignee=alice-dev1 | done=모델 | after=none | files=src/model]]\n[[SUBTASK: 라우터 | assignee=alice-dev2 | done=라우터 | after=none | files=src/router]]\n[[ESTIMATE: 4]]'
+      },
+      work: (_who, task, cwd) => {
+        cwds.push(cwd)
+        writeFileSync(join(cwd, task + '.txt'), task + '\n')
+        return REPORT(task)
+      }
+    })
+    const { eng, ids } = company(s)
+    for (const n of ['dev1', 'dev2']) eng.saveAgent({ ...eng.config.agents.find((a) => a.id === ids[n])!, workDir: repo })
+    eng.saveSettings({ parallelWorktrees: true, maxConcurrent: 4 })
+    const root = eng.createTask({ title: '게임 서버', delegate: true })
+    await settle(eng)
+    expect(task(eng, root.id).status).toBe('needs_review')
+    expect(cwds.length).toBe(2)
+    expect(cwds.every((c) => c.includes('.hive-worktrees'))).toBe(true)
+    expect(execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: repo }).toString().trim()).toMatch(/^[0-9a-f]{40}$/)
+    eng.shutdown()
+  })
+})
+
 describe('C3: a bundle of a GitHub project goes out as one branch and one pull request', () => {
   it('the sub-tasks are merged on the bundle branch (not into the folder) and, once the person approved, pushed as a single PR', async () => {
     const { execFileSync } = await import('node:child_process')
