@@ -184,7 +184,7 @@ function openTerminal(login: string): { ok: boolean; message: string } {
 }
 
 const AUTH_HINT =
-  /(log ?in|sign ?in|authenticat|unauthori[sz]ed|credential|not logged|api[ _-]?key|oauth|401|403)/i
+  /(log ?in|sign ?in|authenticat|unauthori[sz]ed|credential|not logged|api[ _-]?key|oauth|\b401\b|\b403\b)/i
 
 /** Ask the CLI for a one-word reply to prove install + login work. */
 export async function checkCli(
@@ -219,7 +219,7 @@ export async function checkCli(
     ok: false,
     needsLogin,
     message: needsLogin
-      ? '로그인이 필요해요. "로그인"을 눌러 계정으로 로그인해 주세요.'
+      ? '로그인이 필요해요. "로그인"을 눌러 계정으로 로그인해 주세요. (CLI가 돌려준 말: ' + out.replace(/\s+/g, ' ').slice(-200) + ')'
       : '연결에 실패했어요: ' + out.slice(-300)
   }
 }
