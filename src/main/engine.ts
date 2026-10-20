@@ -1428,6 +1428,8 @@ export class Engine {
     }
   }
 
+  private gitInits = new Map<string, Promise<void>>()
+
   /** Make the work tree of a bundle's sub-task (or point its reviewer at the same one). Off unless the setting is on. */
   private async prepareWorktree(id: string, agent: Agent): Promise<void> {
     if (!this.config.parallelWorktrees) return
@@ -1444,11 +1446,16 @@ export class Engine {
     if (!sub && !(solo && this.folderShared(agent, id))) return
     const base = resolveCwd(agent, this.hive.ensureWorkspace(), this.hive.projectDir(t.projectId))
     // a folder with no git (or no first record) could not run next to others: make the first record now so the parallel setting just works
-    const gs = await gitState(base).catch(() => 'ok' as GitState)
-    if (gs === 'none' || gs === 'no-commit') {
+    // (one at a time per folder: two sub-tasks starting together must not both try to make the first record)
+    const prev = this.gitInits.get(base) ?? Promise.resolve()
+    const mine = prev.then(async () => {
+      const gs = await gitState(base).catch(() => 'ok' as GitState)
+      if (gs !== 'none' && gs !== 'no-commit') return
       const r = await initGitFolder(base).catch(() => null)
       if (r) this.hive.addEvent(id, 'status', 'system', r.ok ? `동시에 돌 수 있게 ${r.message}` : `동시에 돌 수 없어 순서대로 실행해요. ${r.message}`)
-    }
+    })
+    this.gitInits.set(base, mine.catch(() => undefined))
+    await mine.catch(() => undefined)
     const wt = await addWorktree(base, t.id).catch(() => null)
     if (!wt) return
     this.hive.updateTask(id, { worktree: wt })
